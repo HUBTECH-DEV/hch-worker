@@ -13,7 +13,7 @@ import {
   readWorkerControl,
 } from "./capacity.mjs";
 
-const KIT_VERSION = "3.0.0";
+const KIT_VERSION = "3.1.0";
 const PROCESS_STARTED_AT = Date.now();
 const PLATFORM = workerPlatform();
 
