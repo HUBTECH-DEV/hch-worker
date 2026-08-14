@@ -30,4 +30,4 @@ Platform-specific test commands are available in the root `package.json`.
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+MIT License. See [LICENSE](LICENSE).
