@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-claim-request-v1.schema.json",
+  "title": "HCH editorial worker claim request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["nodeId", "workerKeyId", "requestedCapacity"],
+  "properties": {
+    "nodeId": { "type": "string" },
+    "workerKeyId": { "type": "string" },
+    "requestedCapacity": { "type": "integer", "minimum": 0, "maximum": 64 },
+    "pressure": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpuPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "memoryPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "gpuPercent": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    }
+  }
+}

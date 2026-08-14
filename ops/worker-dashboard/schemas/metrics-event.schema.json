@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hch.local/schemas/worker-dashboard/metrics-event-v1.json",
+  "title": "HCH worker dashboard metrics event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "eventId", "type", "occurredAt", "data"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "eventId": { "$ref": "#/$defs/id" },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "type": {
+      "enum": [
+        "resource.sample", "job.started", "job.completed",
+        "batch.started", "batch.completed", "standby.changed"
+      ]
+    },
+    "data": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "resource.sample" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/resourceSample" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "job.started" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/jobStarted" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "job.completed" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/jobCompleted" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "batch.started" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/batchStarted" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "batch.completed" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/batchCompleted" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "standby.changed" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/standbyChanged" } } }
+    }
+  ],
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$" },
+    "counter": { "type": "integer", "minimum": 0 },
+    "number": { "type": "number", "minimum": 0 },
+    "resourceSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpuPercent", "cpuSecondsDelta", "gpu", "networkRxBytesDelta", "networkTxBytesDelta"],
+      "properties": {
+        "cpuPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "cpuSecondsDelta": { "$ref": "#/$defs/number" },
+        "networkRxBytesDelta": { "$ref": "#/$defs/counter" },
+        "networkTxBytesDelta": { "$ref": "#/$defs/counter" },
+        "gpu": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "utilizationPercent", "activeSecondsDelta", "errorCode"],
+          "properties": {
+            "status": { "enum": ["available", "unavailable", "unsupported", "error"] },
+            "utilizationPercent": { "anyOf": [{ "type": "number", "minimum": 0, "maximum": 100 }, { "type": "null" }] },
+            "activeSecondsDelta": { "$ref": "#/$defs/number" },
+            "errorCode": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }
+          }
+        }
+      }
+    },
+    "jobStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jobId", "batchId", "inputBytes"],
+      "properties": {
+        "jobId": { "$ref": "#/$defs/id" },
+        "batchId": { "$ref": "#/$defs/id" },
+        "inputBytes": { "$ref": "#/$defs/counter" }
+      }
+    },
+    "jobCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jobId", "batchId", "outcome", "durationMilliseconds", "memoryAverageBytes", "memoryPeakBytes", "outputBytes"],
+      "properties": {
+        "jobId": { "$ref": "#/$defs/id" },
+        "batchId": { "$ref": "#/$defs/id" },
+        "outcome": { "enum": ["succeeded", "failed"] },
+        "durationMilliseconds": { "$ref": "#/$defs/number" },
+        "memoryAverageBytes": { "$ref": "#/$defs/counter" },
+        "memoryPeakBytes": { "$ref": "#/$defs/counter" },
+        "outputBytes": { "$ref": "#/$defs/counter" }
+      }
+    },
+    "batchStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batchId", "totalJobs"],
+      "properties": {
+        "batchId": { "$ref": "#/$defs/id" },
+        "totalJobs": { "$ref": "#/$defs/counter" }
+      }
+    },
+    "batchCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batchId"],
+      "properties": { "batchId": { "$ref": "#/$defs/id" } }
+    },
+    "standbyChanged": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active"],
+      "properties": { "active": { "type": "boolean" } }
+    }
+  }
+}

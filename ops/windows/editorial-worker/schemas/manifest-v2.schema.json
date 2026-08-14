@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/editorial-worker-manifest-envelope-v2.schema.json",
+  "title": "HCH signed editorial worker manifest envelope v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest", "delegation", "rootKeyId", "rootPublicKeyFingerprint"],
+  "properties": {
+    "manifest": { "$ref": "#/$defs/signedJcsEnvelope" },
+    "delegation": { "$ref": "#/$defs/signedJcsEnvelope" },
+    "rootKeyId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "rootPublicKeyFingerprint": {
+      "type": "string",
+      "pattern": "^SHA256:[A-Za-z0-9_-]{43}$"
+    }
+  },
+  "$defs": {
+    "signedJcsEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protected", "payload", "signature"],
+      "properties": {
+        "protected": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "payload": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" }
+      }
+    }
+  }
+}

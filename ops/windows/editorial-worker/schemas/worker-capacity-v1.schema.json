@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-capacity-v1.schema.json",
+  "title": "HCH local worker capacity snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schemaVersion", "observedAt", "nodeId", "requestedCapacity",
+    "grantedCapacity", "activeAssignments", "capacityReason", "validUntil"
+  ],
+  "properties": {
+    "schema": { "const": "hch.worker-capacity/v1" },
+    "schemaVersion": { "const": 1 },
+    "observedAt": { "type": "string", "format": "date-time" },
+    "nodeId": { "type": "string", "minLength": 3, "maxLength": 64 },
+    "requestedCapacity": { "type": "integer", "minimum": 0, "maximum": 64 },
+    "grantedCapacity": { "type": "integer", "minimum": 0, "maximum": 64 },
+    "activeAssignments": { "type": "integer", "minimum": 0 },
+    "capacityReason": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "validUntil": { "type": ["string", "null"], "format": "date-time" }
+  }
+}

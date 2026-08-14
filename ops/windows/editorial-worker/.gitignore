@@ -1,0 +1,7 @@
+# Runtime state is local to each worker and must never be versioned.
+/WorkerConfig.psd1
+/state/
+/trust/*.pem
+/trust/*.key
+!/trust/README.md
+/service/bin/

@@ -1,0 +1,14 @@
+node_modules/
+coverage/
+dist/
+outputs/
+work/
+*.log
+*.pem
+*.key
+*.pfx
+*.p12
+.env*
+!.env.example
+ops/windows/editorial-worker/WorkerConfig.psd1
+ops/windows/editorial-worker/service/bin/

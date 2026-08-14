@@ -1,0 +1,13 @@
+{
+  "name": "@hubtech-dev/hch-worker",
+  "version": "3.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "test": "npm run test:linux && npm run test:dashboard",
+    "test:linux": "node --test ops/linux/editorial-worker/test/*.test.mjs",
+    "test:dashboard": "node --test ops/worker-dashboard/test/*.test.mjs",
+    "test:windows": "node --test ops/windows/editorial-worker/tests/*.test.mjs"
+  }
+}

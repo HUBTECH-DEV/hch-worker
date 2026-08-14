@@ -1,0 +1,17 @@
+{
+  "name": "@hch/linux-editorial-worker-kit",
+  "version": "3.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "bootstrap": "node worker.mjs bootstrap",
+    "node-heartbeat": "node worker.mjs node-heartbeat",
+    "run-one": "node worker.mjs run-one",
+    "supervise": "node worker.mjs supervise",
+    "execute": "node worker.mjs execute",
+    "test": "node --test test/*.test.mjs"
+  }
+}

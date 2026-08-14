@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+HCH_NODE_BIN=${HCH_NODE_BIN:-/opt/homebrew/bin/node}
+HCH_RUNTIME_ROOT=${HCH_RUNTIME_ROOT:-/usr/local/libexec/hch-editorial-runtime}
+HCH_WORKER_CONFIG=${HCH_WORKER_CONFIG:-"${HOME}/Library/Application Support/HCH/editorial-worker/config.json"}
+HCH_LAUNCHCTL_BIN=${HCH_LAUNCHCTL_BIN:-/bin/launchctl}
+HCH_LAUNCH_DOMAIN=${HCH_LAUNCH_DOMAIN:-"gui/$(id -u)"}
+HCH_CYCLE_LABEL=online.hubtech.hch.editorial-worker.cycle
+
+usage() {
+  echo "usage: hch-editorial-workerctl <configure|validate|start|pause|stop|status|set-parallelism> [0..64]" >&2
+  exit 2
+}
+
+command_name=${1:-}
+[ -n "${command_name}" ] || usage
+shift
+parallelism=
+if [ "${command_name}" = "set-parallelism" ]; then
+  parallelism=${1:-}
+  case "${parallelism}" in 0|[1-9]|[1-5][0-9]|6[0-4]) ;; *) usage ;; esac
+  shift
+fi
+[ "$#" -eq 0 ] || usage
+
+entrypoint="${HCH_RUNTIME_ROOT}/ops/linux/editorial-worker/worker.mjs"
+test -x "${HCH_NODE_BIN}"
+test -f "${entrypoint}"
+test -r "${HCH_WORKER_CONFIG}"
+
+run_local() {
+  "${HCH_NODE_BIN}" "${entrypoint}" "$@" --config "${HCH_WORKER_CONFIG}"
+}
+
+cycle_state() {
+  if "${HCH_LAUNCHCTL_BIN}" print "${HCH_LAUNCH_DOMAIN}/${HCH_CYCLE_LABEL}" >/dev/null 2>&1; then
+    printf loaded
+  else
+    printf unloaded
+  fi
+}
+
+case "${command_name}" in
+  configure) run_local control-configure ;;
+  validate) run_local control-validate ;;
+  start)
+    result=$(run_local control-start)
+    "${HCH_LAUNCHCTL_BIN}" kickstart "${HCH_LAUNCH_DOMAIN}/${HCH_CYCLE_LABEL}" >/dev/null
+    printf '%s\n' "${result}"
+    ;;
+  pause) run_local control-pause ;;
+  stop) run_local control-stop ;;
+  status)
+    state=$(cycle_state)
+    run_local control-status --timer-enabled "${state}" --timer-active "${state}" --service-active "${state}"
+    ;;
+  set-parallelism) run_local control-set-parallelism --parallelism "${parallelism}" ;;
+  *) usage ;;
+esac

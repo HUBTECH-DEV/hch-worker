@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>online.hubtech.hch.editorial-worker.bootstrap</string>
+<key>ProgramArguments</key><array><string>__HCH_NODE_BIN__</string><string>__HCH_RUNTIME_ROOT__/ops/linux/editorial-worker/worker.mjs</string><string>bootstrap</string><string>--config</string><string>__HCH_CONFIG_PATH__</string></array>
+<key>RunAtLoad</key><true/><key>StartInterval</key><integer>2700</integer>
+<key>StandardOutPath</key><string>__HCH_LOG_ROOT__/worker-bootstrap.log</string><key>StandardErrorPath</key><string>__HCH_LOG_ROOT__/worker-bootstrap-error.log</string>
+</dict></plist>

@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hch.local/schemas/worker-dashboard/state-v1.json",
+  "title": "HCH worker dashboard state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "revision",
+    "updatedAt",
+    "worker",
+    "connection",
+    "authentication",
+    "transport",
+    "trust"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "revision": { "$ref": "#/$defs/counter" },
+    "updatedAt": { "$ref": "#/$defs/timestamp" },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "displayName", "state", "version", "platform", "startedAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "state": {
+          "enum": [
+            "unknown", "bootstrapping", "updating", "self-testing", "ready",
+            "idle", "processing", "standby", "draining", "paused",
+            "update-failed", "error", "stopped"
+          ]
+        },
+        "version": { "$ref": "#/$defs/nullableId" },
+        "platform": { "$ref": "#/$defs/nullableId" },
+        "startedAt": { "$ref": "#/$defs/nullableTimestamp" }
+      }
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "lastSuccessAt", "lastFailureAt", "errorCode"],
+      "properties": {
+        "status": { "enum": ["unknown", "connecting", "connected", "degraded", "disconnected", "error"] },
+        "lastSuccessAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "lastFailureAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "errorCode": { "$ref": "#/$defs/nullableId" }
+      }
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "keyId", "lastVerifiedAt", "errorCode"],
+      "properties": {
+        "status": { "enum": ["unknown", "pending", "authenticated", "rejected", "expired", "revoked", "error"] },
+        "keyId": { "$ref": "#/$defs/nullableId" },
+        "lastVerifiedAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "errorCode": { "$ref": "#/$defs/nullableId" }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tlsStatus", "certificateStatus", "certificateExpiresAt", "certificateFingerprint", "errorCode"],
+      "properties": {
+        "tlsStatus": { "enum": ["unknown", "valid", "invalid", "unavailable", "error"] },
+        "certificateStatus": { "enum": ["unknown", "valid", "expiring", "expired", "unverified", "error"] },
+        "certificateExpiresAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "certificateFingerprint": { "$ref": "#/$defs/nullableId" },
+        "errorCode": { "$ref": "#/$defs/nullableId" }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "rootKeyId", "releaseKeyId", "manifestSequence", "manifestHash", "policyHash", "lastVerifiedAt", "errorCode"],
+      "properties": {
+        "status": { "enum": ["unknown", "valid", "invalid", "expired", "unverified", "updating", "error"] },
+        "rootKeyId": { "$ref": "#/$defs/nullableId" },
+        "releaseKeyId": { "$ref": "#/$defs/nullableId" },
+        "manifestSequence": { "anyOf": [{ "$ref": "#/$defs/counter" }, { "type": "null" }] },
+        "manifestHash": { "$ref": "#/$defs/nullableId" },
+        "policyHash": { "$ref": "#/$defs/nullableId" },
+        "lastVerifiedAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "errorCode": { "$ref": "#/$defs/nullableId" }
+      }
+    }
+  },
+  "$defs": {
+    "counter": { "type": "integer", "minimum": 0 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "nullableTimestamp": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$" },
+    "nullableId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] }
+  }
+}

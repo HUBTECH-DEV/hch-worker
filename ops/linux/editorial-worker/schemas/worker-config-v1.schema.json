@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-config-v1.schema.json",
+  "title": "HCH portable Linux/macOS editorial worker configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "nodeId",
+    "keyId",
+    "orchestratorBaseUrl",
+    "stateDirectory",
+    "rootPublicKeyPath",
+    "rootPublicKeyFingerprint",
+    "rootKeyId",
+    "localEngineBaseUrl",
+    "requestedCapacity"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "nodeId": { "type": "string" },
+    "keyId": { "type": "string" },
+    "orchestratorBaseUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
+    "stateDirectory": { "type": "string", "pattern": "^/" },
+    "rootPublicKeyPath": { "type": "string", "pattern": "^/" },
+    "rootPublicKeyFingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+    "rootKeyId": { "type": "string" },
+    "localEngineBaseUrl": { "type": "string", "format": "uri" },
+    "requestedCapacity": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 64,
+      "description": "Solicitação inicial/fallback. Zero é drain; a CLI persiste o controle operacional depois de configure."
+    },
+    "artifactMaximumBytes": { "type": "integer", "minimum": 1, "maximum": 104857600 },
+    "requestTimeoutMilliseconds": { "type": "integer", "minimum": 1000, "maximum": 120000 },
+    "executeRequestTimeoutMilliseconds": { "type": "integer", "minimum": 2700000, "maximum": 7200000 },
+    "requestRetries": { "type": "integer", "minimum": 0, "maximum": 5 },
+    "enrollmentTokenEnvironment": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$" }
+  }
+}

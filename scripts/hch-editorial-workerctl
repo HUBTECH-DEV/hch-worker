@@ -1,0 +1,116 @@
+#!/bin/sh
+set -eu
+
+HCH_EDITORIAL_NODE_BIN=${HCH_EDITORIAL_NODE_BIN:-/usr/local/libexec/hch-node}
+HCH_EDITORIAL_WORKER_ENTRYPOINT=${HCH_EDITORIAL_WORKER_ENTRYPOINT:-/usr/local/libexec/hch-editorial-runtime/ops/linux/editorial-worker/worker.mjs}
+HCH_EDITORIAL_WORKER_CONFIG=${HCH_EDITORIAL_WORKER_CONFIG:-/etc/hch-editorial-worker/config.json}
+HCH_EDITORIAL_WORKER_USER=${HCH_EDITORIAL_WORKER_USER:-hch-editorial-worker}
+HCH_EDITORIAL_SYSTEMCTL_BIN=${HCH_EDITORIAL_SYSTEMCTL_BIN:-/usr/bin/systemctl}
+HCH_EDITORIAL_RUNUSER_BIN=${HCH_EDITORIAL_RUNUSER_BIN:-/usr/sbin/runuser}
+HCH_EDITORIAL_TMPFILES_BIN=${HCH_EDITORIAL_TMPFILES_BIN:-/usr/bin/systemd-tmpfiles}
+HCH_EDITORIAL_TMPFILES_CONFIG=${HCH_EDITORIAL_TMPFILES_CONFIG:-/usr/lib/tmpfiles.d/hch-editorial-worker.conf}
+HCH_EDITORIAL_WORKER_SERVICE=${HCH_EDITORIAL_WORKER_SERVICE:-hch-editorial-worker.service}
+
+usage() {
+  echo "usage: hch-editorial-workerctl <configure|validate|start|pause|stop|status|set-parallelism> [0..64] [--config /absolute/config.json]" >&2
+  exit 2
+}
+
+command_name=${1:-}
+[ -n "${command_name}" ] || usage
+shift
+
+parallelism=
+if [ "${command_name}" = "set-parallelism" ]; then
+  parallelism=${1:-}
+  case "${parallelism}" in
+    0|[1-9]|[1-5][0-9]|6[0-4]) ;;
+    *) usage ;;
+  esac
+  shift
+fi
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --config)
+      [ "$#" -ge 2 ] || usage
+      HCH_EDITORIAL_WORKER_CONFIG=$2
+      shift 2
+      ;;
+    *) usage ;;
+  esac
+done
+
+case "${HCH_EDITORIAL_WORKER_CONFIG}" in
+  /*) ;;
+  *) echo "worker-config-path-must-be-absolute" >&2; exit 2 ;;
+esac
+
+test -x "${HCH_EDITORIAL_NODE_BIN}"
+test -f "${HCH_EDITORIAL_WORKER_ENTRYPOINT}"
+test -r "${HCH_EDITORIAL_WORKER_CONFIG}"
+
+run_local() {
+  if [ "$(id -u)" -eq 0 ] && [ "$(id -un)" != "${HCH_EDITORIAL_WORKER_USER}" ]; then
+    exec_as_worker=1
+  else
+    exec_as_worker=0
+  fi
+  if [ "${exec_as_worker}" -eq 1 ]; then
+    "${HCH_EDITORIAL_RUNUSER_BIN}" --user "${HCH_EDITORIAL_WORKER_USER}" -- \
+      "${HCH_EDITORIAL_NODE_BIN}" "${HCH_EDITORIAL_WORKER_ENTRYPOINT}" "$@" \
+      --config "${HCH_EDITORIAL_WORKER_CONFIG}"
+  else
+    "${HCH_EDITORIAL_NODE_BIN}" "${HCH_EDITORIAL_WORKER_ENTRYPOINT}" "$@" \
+      --config "${HCH_EDITORIAL_WORKER_CONFIG}"
+  fi
+}
+
+systemd_state() {
+  state=$1
+  unit=$2
+  value=$("${HCH_EDITORIAL_SYSTEMCTL_BIN}" "${state}" "${unit}" 2>/dev/null || true)
+  value=$(printf '%s' "${value}" | sed -n '1p')
+  case "${value}" in
+    [a-z]* ) printf '%s' "${value}" ;;
+    * ) printf '%s' unknown ;;
+  esac
+}
+
+case "${command_name}" in
+  configure)
+    if [ "$(id -u)" -eq 0 ] && [ -x "${HCH_EDITORIAL_TMPFILES_BIN}" ] && [ -r "${HCH_EDITORIAL_TMPFILES_CONFIG}" ]; then
+      "${HCH_EDITORIAL_TMPFILES_BIN}" --create "${HCH_EDITORIAL_TMPFILES_CONFIG}"
+    fi
+    run_local control-configure
+    ;;
+  validate)
+    run_local control-validate
+    ;;
+  start)
+    start_result=$(run_local control-start)
+    if ! "${HCH_EDITORIAL_SYSTEMCTL_BIN}" enable --now "${HCH_EDITORIAL_WORKER_SERVICE}" >/dev/null; then
+      run_local control-stop >/dev/null 2>&1 || true
+      exit 1
+    fi
+    printf '%s\n' "${start_result}"
+    ;;
+  pause)
+    run_local control-pause
+    ;;
+  stop)
+    # Keep the supervisor alive long enough to abort active generators and
+    # report operator-stop-requested to the orchestrator.
+    run_local control-stop
+    ;;
+  status)
+    service_active=$(systemd_state is-active "${HCH_EDITORIAL_WORKER_SERVICE}")
+    run_local control-status \
+      --service-active "${service_active}"
+    ;;
+  set-parallelism)
+    parallelism_result=$(run_local control-set-parallelism --parallelism "${parallelism}")
+    printf '%s\n' "${parallelism_result}"
+    ;;
+  *) usage ;;
+esac

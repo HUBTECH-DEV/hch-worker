@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-update-receipt-v1.schema.json",
+  "title": "HCH worker update receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "previousManifestHash",
+    "targetManifestHash",
+    "artifactHashes",
+    "result",
+    "rollbackPerformed",
+    "appliedAt",
+    "receiptHash",
+    "localAuditHash"
+  ],
+  "properties": {
+    "previousManifestHash": {
+      "type": ["string", "null"],
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "targetManifestHash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "artifactHashes": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-zA-Z0-9._-]{1,120}$" },
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    },
+    "result": { "enum": ["applied", "no-change"] },
+    "rollbackPerformed": { "const": false },
+    "appliedAt": { "type": "string", "format": "date-time" },
+    "receiptHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "localAuditHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

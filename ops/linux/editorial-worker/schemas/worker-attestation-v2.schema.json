@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-attestation-v2.schema.json",
+  "title": "HCH editorial worker attestation request v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "nodeId",
+    "workerKeyId",
+    "manifestSequence",
+    "manifestHash",
+    "challenge",
+    "workerRuntimeVersion",
+    "policyHash",
+    "adaptiveWorkPolicyHash",
+    "rootKeyId",
+    "releaseKeyId",
+    "trustVerifiedAt",
+    "promptConfigHash",
+    "pipelineVersion",
+    "model",
+    "modelDigest",
+    "protocol",
+    "provider",
+    "engineAdapter",
+    "engineAdapterVersion",
+    "checks",
+    "updateReceipt"
+  ],
+  "properties": {
+    "nodeId": { "type": "string", "minLength": 1 },
+    "workerKeyId": { "type": "string", "minLength": 1 },
+    "manifestSequence": { "type": "integer", "minimum": 1 },
+    "manifestHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "challenge": { "type": "string", "minLength": 16 },
+    "workerRuntimeVersion": { "type": "string", "minLength": 1 },
+    "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "adaptiveWorkPolicyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "rootKeyId": { "type": "string", "minLength": 1 },
+    "releaseKeyId": { "type": "string", "minLength": 1 },
+    "trustVerifiedAt": { "type": "string", "format": "date-time" },
+    "promptConfigHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "pipelineVersion": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 },
+    "modelDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "protocol": { "type": "string", "minLength": 1 },
+    "provider": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" },
+    "engineAdapter": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" },
+    "engineAdapterVersion": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configurationApplied",
+        "artifactsVerified",
+        "modelAvailable",
+        "generatorReachable",
+        "selfTestPassed"
+      ],
+      "properties": {
+        "configurationApplied": { "const": true },
+        "artifactsVerified": { "const": true },
+        "modelAvailable": { "const": true },
+        "generatorReachable": { "const": true },
+        "selfTestPassed": { "const": true }
+      }
+    },
+    "updateReceipt": {
+      "$ref": "worker-update-receipt-v1.schema.json"
+    }
+  }
+}

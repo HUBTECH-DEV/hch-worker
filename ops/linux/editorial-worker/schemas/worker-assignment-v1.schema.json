@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-assignment-v1.schema.json",
+  "title": "HCH portable editorial assignment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "assignmentId", "leaseToken", "leaseExpiresAt", "status",
+    "inputSnapshotHash", "entry", "runtimeProfile", "generationPlan",
+    "generationPlanHash"
+  ],
+  "properties": {
+    "assignmentId": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "leaseToken": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "leaseExpiresAt": { "type": "string", "format": "date-time" },
+    "status": { "const": "processing" },
+    "inputSnapshotHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "entry": { "type": "object" },
+    "runtimeProfile": { "$ref": "worker-runtime-profile-v2.schema.json" },
+    "generationPlan": { "$ref": "worker-generation-plan-v1.schema.json" },
+    "generationPlanHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

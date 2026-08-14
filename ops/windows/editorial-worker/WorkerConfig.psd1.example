@@ -1,0 +1,46 @@
+@{
+  SchemaVersion = 2
+  NodeId = 'windows-worker-01'
+  ControlPlaneBaseUri = 'https://hubtech.online'
+  RequestedCapacity = 1
+  # Local safety ceiling only. The signed manifest and the orchestrator may
+  # grant fewer slots. The first activation remains at one slot.
+  LocalParallelismLimit = 8
+
+  # The root public key is provisioned through an out-of-band trusted channel.
+  RootPublicKeyPath = 'C:\ProgramData\HCH\EditorialWorker\trust\orchestrator-root.pem'
+  StateRoot = 'C:\ProgramData\HCH\EditorialWorker\state'
+  InstallRoot = 'C:\ProgramData\HCH\EditorialWorker\runtime'
+
+  NodePath = 'node.exe'
+  MinimumNodeMajor = 22
+  ClockSkewSeconds = 60
+  RequestLifetimeSeconds = 120
+  # Each heartbeat performs a signed challenge plus the heartbeat request.
+  # Keeping each leg below 15 seconds leaves margin inside the server lease.
+  HeartbeatRequestTimeoutSeconds = 10
+  # Presence/capacity is independent from assignment lease heartbeats.
+  NodeHeartbeatIntervalSeconds = 60
+  NodeHeartbeatRequestTimeoutSeconds = 10
+  # Generation has no local wall-clock deadline. Refresh the attestation before
+  # claiming when less than 50 minutes remain; active assignments keep their
+  # lease with signed 30-second heartbeats and liveness progress.
+  ReadyRefreshBeforeSeconds = 3000
+
+  # Remote artifacts are accepted only from these origins. This is a download
+  # safety boundary, not worker identity and not an API IP restriction.
+  AllowedArtifactOrigins = @('https://hubtech.online')
+  AllowedSelfTestOrigins = @(
+    'https://hubtech.online',
+    'http://127.0.0.1:11434'
+  )
+
+  OllamaBaseUri = 'http://127.0.0.1:11434'
+  ModelPullTimeoutSeconds = 3600
+  AutomaticUpdateOnPolicyMismatch = $true
+
+  # Read-only local dashboard. The launcher always binds 127.0.0.1 even when
+  # machine-level environment variables contain another host.
+  DashboardRoot = 'C:\HCH\ops\worker-dashboard'
+  DashboardPort = 4319
+}

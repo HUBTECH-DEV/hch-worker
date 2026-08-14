@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-trust-state-v1.schema.json",
+  "title": "HCH editorial worker local trust state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "schema",
+    "rootKeyId",
+    "rootFingerprint",
+    "releaseKeyId",
+    "delegationSequence",
+    "delegationHash",
+    "manifestSequence",
+    "manifestHash",
+    "policyHash",
+    "verifiedAt"
+  ],
+  "properties": {
+    "schema": { "const": "hch.worker-trust-state/v1" },
+    "schemaVersion": { "const": 1 },
+    "rootKeyId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "rootFingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+    "releaseKeyId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "delegationSequence": { "type": "integer", "minimum": 1 },
+    "delegationHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "manifestSequence": { "type": "integer", "minimum": 1 },
+    "manifestHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "verifiedAt": { "type": "string", "format": "date-time" }
+  }
+}

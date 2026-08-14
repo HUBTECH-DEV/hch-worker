@@ -1,0 +1,41 @@
+[Unit]
+Description=HCH editorial worker and loopback dashboard supervisor
+After=network-online.target hch-editorial-bootstrap.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hch-editorial-worker
+Group=hch-editorial-worker
+Environment=TZ=UTC
+Environment=HCH_EDITORIAL_WORKER_CONFIG=/etc/hch-editorial-worker/config.json
+Environment=HCH_WORKER_DASHBOARD_PORT=4319
+StateDirectory=hch-editorial-worker
+StateDirectoryMode=0700
+RuntimeDirectory=hch-editorial-worker
+RuntimeDirectoryMode=0700
+ConfigurationDirectory=hch-editorial-worker
+ConfigurationDirectoryMode=0750
+ExecStart=/usr/bin/node /usr/local/libexec/hch-editorial-runtime/ops/linux/editorial-worker/worker.mjs supervise --config /etc/hch-editorial-worker/config.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=1h
+KillMode=mixed
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "nodeId": "vps-primary",
+  "keyId": "vps-primary-key-v1",
+  "orchestratorBaseUrl": "https://hubtech.online",
+  "stateDirectory": "/var/lib/hch-editorial-worker",
+  "rootPublicKeyPath": "/etc/hch-editorial-worker/trust/hch-root-v1.pub.pem",
+  "rootPublicKeyFingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "rootKeyId": "hch-root-v1",
+  "localEngineBaseUrl": "http://127.0.0.1:11434",
+  "requestedCapacity": 2,
+  "artifactMaximumBytes": 16777216,
+  "requestTimeoutMilliseconds": 15000,
+  "executeRequestTimeoutMilliseconds": 2700000,
+  "requestRetries": 2,
+  "enrollmentTokenEnvironment": "HCH_EDITORIAL_ENROLLMENT_TOKEN"
+}

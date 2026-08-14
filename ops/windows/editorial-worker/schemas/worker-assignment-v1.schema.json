@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-assignment-v1.schema.json",
+  "title": "HCH editorial worker assignment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "assignmentId", "leaseToken", "leaseExpiresAt", "status", "inputSnapshotHash",
+    "entry", "runtimeProfile", "generationPlan", "generationPlanHash"
+  ],
+  "properties": {
+    "assignmentId": { "type": "string", "format": "uuid" },
+    "leaseToken": { "type": "string", "minLength": 16 },
+    "leaseExpiresAt": { "type": "string", "format": "date-time" },
+    "status": { "const": "processing" },
+    "inputSnapshotHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "entry": { "type": "object" },
+    "generationPlanHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "generationPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithmVersion", "tierId", "tierRank", "maxOutputTokens", "editorialProfile",
+        "minimumUnit", "processingWindowSeconds", "nearWindowSeconds",
+        "firstProgressGraceSeconds", "stallAfterSeconds", "finalizationGraceSeconds", "policyHash"
+      ],
+      "properties": {
+        "algorithmVersion": { "const": "hch-adaptive-work-v1" },
+        "tierId": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+        "tierRank": { "type": "integer", "minimum": 0, "maximum": 15 },
+        "maxOutputTokens": { "type": "integer", "minimum": 1, "maximum": 32768 },
+        "editorialProfile": {
+          "enum": [
+            "EDITORIAL_LONG_FORM", "EDITORIAL_COMPACT", "EDITORIAL_MINIMUM",
+            "CATALOG_SUMMARY", "EVENT_LISTING"
+          ]
+        },
+        "minimumUnit": { "type": "boolean" },
+        "processingWindowSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+        "nearWindowSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "firstProgressGraceSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+        "stallAfterSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+        "finalizationGraceSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+        "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "runtimeProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider", "engineAdapter", "engineAdapterVersion",
+        "model", "modelDigest", "protocol", "temperature", "contextWindow", "maxOutputTokens",
+        "policyId", "policyVersion", "policyHash", "promptConfigHash", "pipelineVersion",
+        "manifestSequence", "manifestHash", "runtimeProfileHash"
+      ],
+      "properties": {
+        "provider": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" },
+        "engineAdapter": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" },
+        "engineAdapterVersion": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" },
+        "model": { "type": "string" },
+        "modelDigest": { "type": "string" },
+        "protocol": { "type": "string" },
+        "temperature": { "type": "number" },
+        "contextWindow": { "type": "integer", "minimum": 1 },
+        "maxOutputTokens": { "type": "integer", "minimum": 1 },
+        "policyId": { "type": "string" },
+        "policyVersion": { "type": "string" },
+        "policyHash": { "type": "string" },
+        "promptConfigHash": { "type": "string" },
+        "pipelineVersion": { "type": "string" },
+        "manifestSequence": { "type": "integer", "minimum": 1 },
+        "manifestHash": { "type": "string" },
+        "runtimeProfileHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
+  }
+}

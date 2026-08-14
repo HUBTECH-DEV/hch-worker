@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-control-v1.schema.json",
+  "title": "HCH worker local capacity control",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "nodeId",
+    "workerKeyId",
+    "acceptingClaims",
+    "requestedCapacity",
+    "lastNonZeroCapacity",
+    "drainRequested",
+    "updatedAt",
+    "updatedBy"
+  ],
+  "properties": {
+    "schema": { "const": "hch.worker-control/v1" },
+    "schemaVersion": { "const": 1 },
+    "nodeId": { "type": "string" },
+    "workerKeyId": { "type": "string" },
+    "acceptingClaims": { "type": "boolean" },
+    "requestedCapacity": { "type": "integer", "minimum": 0, "maximum": 64 },
+    "lastNonZeroCapacity": { "type": "integer", "minimum": 1, "maximum": 64 },
+    "drainRequested": { "type": "boolean" },
+    "updatedAt": { "type": ["string", "null"], "format": "date-time" },
+    "updatedBy": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+\\-]{0,79}$" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "acceptingClaims": { "const": true } } },
+      "then": {
+        "properties": {
+          "requestedCapacity": { "minimum": 1 },
+          "drainRequested": { "const": false }
+        }
+      },
+      "else": { "properties": { "drainRequested": { "const": true } } }
+    }
+  ]
+}

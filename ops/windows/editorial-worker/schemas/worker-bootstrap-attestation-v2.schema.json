@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-bootstrap-attestation-v2.schema.json",
+  "title": "HCH worker bootstrap attestation v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "nodeId", "workerKeyId", "manifestSequence", "manifestHash", "challenge",
+    "workerRuntimeVersion", "policyHash", "adaptiveWorkPolicyHash", "promptConfigHash", "pipelineVersion",
+    "provider", "engineAdapter", "engineAdapterVersion", "model", "modelDigest",
+    "protocol", "checks", "updateReceipt", "appliedChanges"
+  ],
+  "properties": {
+    "nodeId": { "type": "string", "minLength": 3, "maxLength": 64 },
+    "workerKeyId": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
+    "manifestSequence": { "type": "integer", "minimum": 1 },
+    "manifestHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "challenge": { "type": "string", "minLength": 16, "maxLength": 512 },
+    "workerRuntimeVersion": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "adaptiveWorkPolicyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "promptConfigHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "pipelineVersion": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "provider": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" },
+    "engineAdapter": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" },
+    "engineAdapterVersion": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" },
+    "model": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "modelDigest": { "type": "string", "pattern": "^(?:sha256:)?[a-f0-9]{64}$" },
+    "protocol": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configurationApplied", "artifactsVerified", "modelAvailable",
+        "generatorReachable", "selfTestPassed"
+      ],
+      "properties": {
+        "configurationApplied": { "const": true },
+        "artifactsVerified": { "const": true },
+        "modelAvailable": { "const": true },
+        "generatorReachable": { "const": true },
+        "selfTestPassed": { "const": true }
+      }
+    },
+    "updateReceipt": { "$ref": "worker-update-receipt-v1.schema.json" },
+    "appliedChanges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "applied"],
+        "properties": {
+          "target": { "type": "string", "minLength": 1, "maxLength": 260 },
+          "applied": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-status-v1.schema.json",
+  "title": "HCH worker status",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "observedAt",
+    "nodeId",
+    "platform",
+    "kitVersion",
+    "state",
+    "running",
+    "standby",
+    "ready",
+    "connection",
+    "transport",
+    "trust",
+    "capacity",
+    "uptimeSeconds",
+    "currentBatch",
+    "code"
+  ],
+  "properties": {
+    "schema": { "const": "hch.worker-status/v1" },
+    "schemaVersion": { "const": 1 },
+    "observedAt": { "type": "string", "format": "date-time" },
+    "nodeId": { "type": "string" },
+    "workerKeyId": { "type": ["string", "null"] },
+    "platform": { "enum": ["linux", "macos"] },
+    "kitVersion": { "type": "string" },
+    "state": {
+      "enum": [
+        "bootstrap-required",
+        "updating",
+        "self-testing",
+        "idle",
+        "standby",
+        "processing",
+        "draining",
+        "stopped",
+        "update-required",
+        "update-failed",
+        "connection-error"
+      ]
+    },
+    "running": { "type": "boolean" },
+    "standby": { "type": "boolean" },
+    "ready": { "type": "boolean" },
+    "readyUntil": { "type": ["string", "null"], "format": "date-time" },
+    "manifestSequence": { "type": ["integer", "null"] },
+    "manifestHash": { "type": ["string", "null"] },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api",
+        "tls",
+        "auth",
+        "ed25519",
+        "lastSuccessAt",
+        "lastFailureAt",
+        "lastErrorCode"
+      ],
+      "properties": {
+        "api": { "enum": ["unknown", "connected", "error"] },
+        "tls": { "enum": ["unknown", "verified", "error"] },
+        "auth": { "enum": ["pending", "ed25519"] },
+        "ed25519": { "type": "boolean" },
+        "lastSuccessAt": { "type": ["string", "null"], "format": "date-time" },
+        "lastFailureAt": { "type": ["string", "null"], "format": "date-time" },
+        "lastErrorCode": { "type": ["string", "null"] }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tlsStatus",
+        "certificateStatus",
+        "certificateExpiresAt",
+        "certificateFingerprint",
+        "errorCode"
+      ],
+      "properties": {
+        "tlsStatus": { "enum": ["unknown", "verified", "error", "unavailable"] },
+        "certificateStatus": {
+          "enum": ["valid", "expiring", "expired", "invalid", "unverified"]
+        },
+        "certificateExpiresAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "certificateFingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "errorCode": { "type": ["string", "null"] }
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "rootKeyId",
+        "releaseKeyId",
+        "manifestSequence",
+        "manifestHash",
+        "policyHash",
+        "lastVerifiedAt",
+        "errorCode"
+      ],
+      "properties": {
+        "status": { "enum": ["pending", "verified", "expired", "error"] },
+        "rootKeyId": { "type": ["string", "null"] },
+        "releaseKeyId": { "type": ["string", "null"] },
+        "manifestSequence": { "type": ["integer", "null"], "minimum": 1 },
+        "manifestHash": { "type": ["string", "null"] },
+        "policyHash": { "type": ["string", "null"] },
+        "lastVerifiedAt": { "type": ["string", "null"], "format": "date-time" },
+        "errorCode": { "type": ["string", "null"] }
+      }
+    },
+    "capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestedCapacity",
+        "grantedCapacity",
+        "effectiveGrantedCapacity",
+        "capacityClass",
+        "reason",
+        "grantedUntil",
+        "grantExpired",
+        "pressure",
+        "activeAssignments"
+      ],
+      "properties": {
+        "requestedCapacity": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "grantedCapacity": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "effectiveGrantedCapacity": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "capacityClass": { "type": ["string", "null"] },
+        "reason": { "type": "string" },
+        "grantedUntil": { "type": ["string", "null"], "format": "date-time" },
+        "grantExpired": { "type": "boolean" },
+        "pressure": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cpuPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+            "memoryPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+            "gpuPercent": { "type": "number", "minimum": 0, "maximum": 100 }
+          }
+        },
+        "activeAssignments": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "uptimeSeconds": { "type": ["integer", "null"], "minimum": 0 },
+    "currentBatch": {
+      "type": ["object", "null"],
+      "properties": {
+        "batchId": { "type": "string" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "jobs": { "type": "integer", "minimum": 0 },
+        "assignmentIds": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "code": { "type": "string" }
+  }
+}

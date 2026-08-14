@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-metrics-v1.schema.json",
+  "title": "HCH worker metrics",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schemaVersion", "observedAt", "nodeId", "uptimeSeconds", "resources",
+    "network", "batches", "jobs", "updates", "performance", "standby", "currentBatch"
+  ],
+  "properties": {
+    "schema": { "const": "hch.worker-metrics/v1" },
+    "schemaVersion": { "const": 1 },
+    "observedAt": { "type": "string", "format": "date-time" },
+    "nodeId": { "type": "string" },
+    "workerKeyId": { "type": ["string", "null"] },
+    "uptimeSeconds": { "type": ["integer", "null"], "minimum": 0 },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "gpu", "memory"],
+      "properties": {
+        "cpu": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["logicalProcessors", "utilizationPercent", "totalActiveSeconds", "sampleCount", "averageUtilizationPercent"],
+          "properties": {
+            "logicalProcessors": { "type": "integer", "minimum": 1 },
+            "utilizationPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+            "totalActiveSeconds": { "type": "number", "minimum": 0 },
+            "sampleCount": { "type": "integer", "minimum": 0 },
+            "averageUtilizationPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 }
+          }
+        },
+        "gpu": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["available", "status", "utilizationPercent", "totalActiveSeconds", "sampleCount", "averageUtilizationPercent", "errorCode"],
+          "properties": {
+            "available": { "type": "boolean" },
+            "status": { "enum": ["available", "unsupported", "unavailable"] },
+            "utilizationPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+            "totalActiveSeconds": { "type": "number", "minimum": 0 },
+            "sampleCount": { "type": "integer", "minimum": 0 },
+            "averageUtilizationPercent": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+            "errorCode": { "type": ["string", "null"] }
+          }
+        },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["totalBytes", "availableBytes", "processWorkingSetBytes", "estimatedBytesPerRunningItem", "perItem"],
+          "properties": {
+            "totalBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "availableBytes": { "type": ["integer", "null"], "minimum": 0 },
+            "processWorkingSetBytes": { "type": "integer", "minimum": 0 },
+            "estimatedBytesPerRunningItem": { "type": ["integer", "null"], "minimum": 0 },
+            "perItem": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sampleCount", "averageBytes", "peakBytes"],
+              "properties": {
+                "sampleCount": { "type": "integer", "minimum": 0 },
+                "averageBytes": { "type": ["integer", "null"], "minimum": 0 },
+                "peakBytes": { "type": ["integer", "null"], "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receiveBytesPerSecond", "sendBytesPerSecond", "requestBytes", "responseBytes", "rxBytes", "txBytes", "sourceRxBytes", "sourceTxBytes"],
+      "properties": {
+        "receiveBytesPerSecond": { "type": ["integer", "null"], "minimum": 0 },
+        "sendBytesPerSecond": { "type": ["integer", "null"], "minimum": 0 },
+        "requestBytes": { "type": "integer", "minimum": 0 },
+        "responseBytes": { "type": "integer", "minimum": 0 },
+        "rxBytes": { "type": "integer", "minimum": 0 },
+        "txBytes": { "type": "integer", "minimum": 0 },
+        "sourceRxBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "sourceTxBytes": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "batches": { "$ref": "#/$defs/counters" },
+    "jobs": { "$ref": "#/$defs/counters" },
+    "updates": { "$ref": "#/$defs/counters" },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lastDurationMilliseconds", "totalDurationMilliseconds", "durationSamples", "averageDurationMilliseconds"],
+      "properties": {
+        "lastDurationMilliseconds": { "type": ["integer", "null"], "minimum": 0 },
+        "totalDurationMilliseconds": { "type": "integer", "minimum": 0 },
+        "durationSamples": { "type": "integer", "minimum": 0 },
+        "averageDurationMilliseconds": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "standby": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active", "since", "totalMilliseconds"],
+      "properties": {
+        "active": { "type": "boolean" },
+        "since": { "type": ["string", "null"], "format": "date-time" },
+        "totalMilliseconds": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "currentBatch": { "type": ["object", "null"] }
+  },
+  "$defs": {
+    "counters": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    }
+  }
+}

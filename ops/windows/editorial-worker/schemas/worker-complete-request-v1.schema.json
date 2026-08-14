@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-complete-request-v1.schema.json",
+  "title": "HCH editorial worker complete request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "assignmentId", "nodeId", "workerKeyId", "leaseToken", "manifestSequence",
+    "manifestHash", "policyHash", "runtimeProfileHash", "generationPlanHash",
+    "inputSnapshotHash", "draft"
+  ],
+  "properties": {
+    "assignmentId": { "type": "string", "format": "uuid" },
+    "nodeId": { "type": "string" },
+    "workerKeyId": { "type": "string" },
+    "leaseToken": { "type": "string", "minLength": 16 },
+    "manifestSequence": { "type": "integer", "minimum": 1 },
+    "manifestHash": { "type": "string" },
+    "policyHash": { "type": "string" },
+    "runtimeProfileHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "generationPlanHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "inputSnapshotHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "draft": { "type": "object" }
+  }
+}

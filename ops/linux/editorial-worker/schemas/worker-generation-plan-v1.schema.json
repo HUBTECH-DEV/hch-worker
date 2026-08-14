@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-generation-plan-v1.schema.json",
+  "title": "HCH immutable worker generation plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "algorithmVersion", "tierId", "tierRank", "maxOutputTokens",
+    "editorialProfile", "minimumUnit", "processingWindowSeconds",
+    "nearWindowSeconds", "firstProgressGraceSeconds", "stallAfterSeconds",
+    "finalizationGraceSeconds", "policyHash"
+  ],
+  "properties": {
+    "algorithmVersion": { "const": "hch-adaptive-work-v1" },
+    "tierId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+    "tierRank": { "type": "integer", "minimum": 0, "maximum": 7 },
+    "maxOutputTokens": { "type": "integer", "minimum": 1, "maximum": 4096 },
+    "editorialProfile": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+    "minimumUnit": { "type": "boolean" },
+    "processingWindowSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+    "nearWindowSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+    "firstProgressGraceSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+    "stallAfterSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+    "finalizationGraceSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+    "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-control-v1.schema.json",
+  "title": "HCH local worker control",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schemaVersion", "nodeId", "acceptingClaims",
+    "requestedParallelism", "lastNonZeroParallelism", "drainRequested",
+    "updatedAt", "updatedBy"
+  ],
+  "properties": {
+    "schema": { "const": "hch.worker-control/v1" },
+    "schemaVersion": { "const": 1 },
+    "nodeId": { "type": "string" },
+    "acceptingClaims": { "type": "boolean" },
+    "requestedParallelism": { "type": "integer", "minimum": 0, "maximum": 64 },
+    "lastNonZeroParallelism": { "type": "integer", "minimum": 1, "maximum": 64 },
+    "drainRequested": { "type": "boolean" },
+    "updatedAt": { "type": ["string", "null"], "format": "date-time" },
+    "updatedBy": { "type": "string" }
+  }
+}

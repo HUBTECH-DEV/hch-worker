@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-orchestration-v1.schema.json",
+  "title": "HCH worker orchestration snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaVersion",
+    "observedAt",
+    "nodeId",
+    "mode",
+    "heartbeat",
+    "capacity",
+    "workload",
+    "workSizing",
+    "claim"
+  ],
+  "properties": {
+    "schema": { "const": "hch.worker-orchestration/v1" },
+    "schemaVersion": { "const": 1 },
+    "observedAt": { "$ref": "#/$defs/timestamp" },
+    "nodeId": { "$ref": "#/$defs/id" },
+    "mode": {
+      "enum": [
+        "heartbeat-only",
+        "waiting-for-work",
+        "execution-authorized",
+        "unavailable"
+      ]
+    },
+    "heartbeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "lastAttemptAt",
+        "lastSuccessAt",
+        "nextHeartbeatAt",
+        "intervalSeconds",
+        "errorCode"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["unknown", "pending", "succeeded", "failed", "error"]
+        },
+        "lastAttemptAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "lastSuccessAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "nextHeartbeatAt": { "$ref": "#/$defs/nullableTimestamp" },
+        "intervalSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "errorCode": { "$ref": "#/$defs/nullableId" }
+      }
+    },
+    "capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configuredCapacity",
+        "requestedCapacity",
+        "grantedCapacity",
+        "activeAssignments",
+        "availableSlots",
+        "capacityClass",
+        "reason",
+        "grantedUntil"
+      ],
+      "properties": {
+        "configuredCapacity": { "$ref": "#/$defs/nullableCapacity64" },
+        "requestedCapacity": { "$ref": "#/$defs/nullableCapacity64" },
+        "grantedCapacity": { "$ref": "#/$defs/nullableCapacity32" },
+        "activeAssignments": { "$ref": "#/$defs/nullableCounter" },
+        "availableSlots": { "$ref": "#/$defs/nullableCapacity32" },
+        "capacityClass": {
+          "type": ["string", "null"],
+          "enum": ["constrained", "standard", "accelerated", null]
+        },
+        "reason": { "$ref": "#/$defs/nullableText" },
+        "grantedUntil": { "$ref": "#/$defs/nullableTimestamp" }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claimable", "generating", "futureTotal", "claimableByTier"],
+      "properties": {
+        "claimable": { "$ref": "#/$defs/nullableCounter" },
+        "generating": { "$ref": "#/$defs/nullableCounter" },
+        "futureTotal": { "$ref": "#/$defs/nullableCounter" },
+        "claimableByTier": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 8,
+              "propertyNames": { "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+              "additionalProperties": { "$ref": "#/$defs/counter" }
+            }
+          ]
+        }
+      }
+    },
+    "workSizing": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "algorithmVersion", "currentTier", "currentRank", "maxOutputTokens",
+            "editorialProfile", "minimumUnit", "reason", "updatedAt",
+            "processingWindowSeconds", "nearWindowSeconds",
+            "firstProgressGraceSeconds", "stallAfterSeconds",
+            "finalizationGraceSeconds"
+          ],
+          "properties": {
+            "algorithmVersion": { "const": "hch-adaptive-work-v1" },
+            "currentTier": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$" },
+            "currentRank": { "type": "integer", "minimum": 0, "maximum": 15 },
+            "maxOutputTokens": { "type": "integer", "minimum": 1, "maximum": 4096 },
+            "editorialProfile": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "minimumUnit": { "type": "boolean" },
+            "reason": {
+              "enum": [
+                "attestation-reset", "minimum-unit-window-ignored", "within-window",
+                "near-window-downshift", "already-downshifted"
+              ]
+            },
+            "updatedAt": { "$ref": "#/$defs/timestamp" },
+            "processingWindowSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+            "nearWindowSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+            "firstProgressGraceSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+            "stallAfterSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+            "finalizationGraceSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 }
+          }
+        }
+      ]
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed", "recommendedCount", "reason"],
+      "properties": {
+        "allowed": { "type": ["boolean", "null"] },
+        "recommendedCount": { "$ref": "#/$defs/nullableCapacity32" },
+        "reason": { "$ref": "#/$defs/nullableText" }
+      }
+    }
+  },
+  "$defs": {
+    "counter": { "type": "integer", "minimum": 0 },
+    "capacity32": { "type": "integer", "minimum": 0, "maximum": 32 },
+    "capacity64": { "type": "integer", "minimum": 0, "maximum": 64 },
+    "nullableCounter": {
+      "anyOf": [{ "$ref": "#/$defs/counter" }, { "type": "null" }]
+    },
+    "nullableCapacity32": {
+      "anyOf": [{ "$ref": "#/$defs/capacity32" }, { "type": "null" }]
+    },
+    "nullableCapacity64": {
+      "anyOf": [{ "$ref": "#/$defs/capacity64" }, { "type": "null" }]
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "nullableTimestamp": {
+      "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }]
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$"
+    },
+    "nullableId": {
+      "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }]
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "nullableText": {
+      "anyOf": [{ "$ref": "#/$defs/text" }, { "type": "null" }]
+    }
+  }
+}

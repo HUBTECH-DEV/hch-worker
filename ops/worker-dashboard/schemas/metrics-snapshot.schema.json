@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hch.local/schemas/worker-dashboard/metrics-snapshot-v1.json",
+  "title": "HCH worker dashboard aggregated metrics",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "revision", "updatedAt", "lastEventAt", "eventsAccepted",
+    "cpu", "gpu", "memoryPerItem", "processingTime", "volume", "network",
+    "workload", "standby", "deduplication"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "revision": { "$ref": "#/$defs/counter" },
+    "updatedAt": { "$ref": "#/$defs/timestamp" },
+    "lastEventAt": { "$ref": "#/$defs/nullableTimestamp" },
+    "eventsAccepted": { "$ref": "#/$defs/counter" },
+    "cpu": { "$ref": "#/$defs/processor" },
+    "gpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "totalActiveSeconds", "sampleCount", "percentSum", "averagePercent", "errorCode"],
+      "properties": {
+        "status": { "enum": ["available", "unavailable", "unsupported", "error"] },
+        "totalActiveSeconds": { "$ref": "#/$defs/number" },
+        "sampleCount": { "$ref": "#/$defs/counter" },
+        "percentSum": { "$ref": "#/$defs/number" },
+        "averagePercent": { "$ref": "#/$defs/nullableNumber" },
+        "errorCode": { "$ref": "#/$defs/nullableId" }
+      }
+    },
+    "memoryPerItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sampleCount", "averageBytesSum", "averageBytes", "peakBytes"],
+      "properties": {
+        "sampleCount": { "$ref": "#/$defs/counter" },
+        "averageBytesSum": { "$ref": "#/$defs/number" },
+        "averageBytes": { "$ref": "#/$defs/nullableNumber" },
+        "peakBytes": { "$ref": "#/$defs/nullableNumber" }
+      }
+    },
+    "processingTime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sampleCount", "totalMilliseconds", "averageMilliseconds"],
+      "properties": {
+        "sampleCount": { "$ref": "#/$defs/counter" },
+        "totalMilliseconds": { "$ref": "#/$defs/number" },
+        "averageMilliseconds": { "$ref": "#/$defs/nullableNumber" }
+      }
+    },
+    "volume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputBytes", "outputBytes", "totalBytes"],
+      "properties": {
+        "inputBytes": { "$ref": "#/$defs/counter" },
+        "outputBytes": { "$ref": "#/$defs/counter" },
+        "totalBytes": { "$ref": "#/$defs/counter" }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rxBytes", "txBytes"],
+      "properties": {
+        "rxBytes": { "$ref": "#/$defs/counter" },
+        "txBytes": { "$ref": "#/$defs/counter" }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batchesTotal", "batchesCompleted", "jobsTotal", "jobsCompleted", "jobsSucceeded", "jobsFailed", "jobsRunning", "runningJobIds", "currentBatch"],
+      "properties": {
+        "batchesTotal": { "$ref": "#/$defs/counter" },
+        "batchesCompleted": { "$ref": "#/$defs/counter" },
+        "jobsTotal": { "$ref": "#/$defs/counter" },
+        "jobsCompleted": { "$ref": "#/$defs/counter" },
+        "jobsSucceeded": { "$ref": "#/$defs/counter" },
+        "jobsFailed": { "$ref": "#/$defs/counter" },
+        "jobsRunning": { "$ref": "#/$defs/counter" },
+        "runningJobIds": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+        "currentBatch": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "startedAt", "totalJobs", "completedJobs"],
+              "properties": {
+                "id": { "$ref": "#/$defs/id" },
+                "startedAt": { "$ref": "#/$defs/timestamp" },
+                "totalJobs": { "$ref": "#/$defs/counter" },
+                "completedJobs": { "$ref": "#/$defs/counter" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "standby": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active", "since", "totalMilliseconds"],
+      "properties": {
+        "active": { "type": "boolean" },
+        "since": { "$ref": "#/$defs/nullableTimestamp" },
+        "totalMilliseconds": { "$ref": "#/$defs/number" }
+      }
+    },
+    "deduplication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recentEventIds"],
+      "properties": {
+        "recentEventIds": { "type": "array", "maxItems": 512, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } }
+      }
+    }
+  },
+  "$defs": {
+    "counter": { "type": "integer", "minimum": 0 },
+    "number": { "type": "number", "minimum": 0 },
+    "nullableNumber": { "anyOf": [{ "$ref": "#/$defs/number" }, { "type": "null" }] },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "nullableTimestamp": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$" },
+    "nullableId": { "anyOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+    "processor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["totalSeconds", "sampleCount", "percentSum", "averagePercent"],
+      "properties": {
+        "totalSeconds": { "$ref": "#/$defs/number" },
+        "sampleCount": { "$ref": "#/$defs/counter" },
+        "percentSum": { "$ref": "#/$defs/number" },
+        "averagePercent": { "$ref": "#/$defs/nullableNumber" }
+      }
+    }
+  }
+}

@@ -1,0 +1,197 @@
+{
+  "schemaVersion": "1.0",
+  "policyId": "HCH-STD-LLM-THIRD-PARTY-001",
+  "displayName": "Padrão de geração editorial por LLM baseada em fontes de terceiros",
+  "version": "0.2.0",
+  "repository": "HUBTECH-DEV/HCH",
+  "effectiveAt": "2026-08-12T08:08:30-03:00",
+  "approval": {
+    "status": "approved",
+    "approvedBy": "user",
+    "approvedAt": "2026-08-12T08:08:30-03:00",
+    "evidenceRef": "chat:2026-08-12:adaptive-processing-window-release"
+  },
+  "profiles": {
+    "EDITORIAL_LONG_FORM": {
+      "appliesTo": [
+        "article",
+        "matter",
+        "news",
+        "review",
+        "comparison",
+        "event-coverage",
+        "technical-guide"
+      ],
+      "minimumBodyCharacters": 3200,
+      "minimumBodyWords": 450,
+      "minimumParagraphs": 5,
+      "minimumWordsPerParagraph": 50,
+      "recommendedWordsPerParagraph": {
+        "minimum": 70,
+        "maximum": 120
+      }
+    },
+    "EDITORIAL_COMPACT": {
+      "appliesTo": [
+        "article",
+        "matter",
+        "news",
+        "review",
+        "comparison",
+        "event-coverage",
+        "technical-guide"
+      ],
+      "minimumBodyCharacters": 900,
+      "maximumBodyCharacters": 1800,
+      "minimumBodyWords": 130,
+      "maximumBodyWords": 260,
+      "minimumParagraphs": 2,
+      "maximumParagraphs": 2,
+      "minimumWordsPerParagraph": 45,
+      "recommendedWordsPerParagraph": {
+        "minimum": 65,
+        "maximum": 110
+      }
+    },
+    "EDITORIAL_MINIMUM": {
+      "appliesTo": [
+        "article",
+        "matter",
+        "news",
+        "review",
+        "comparison",
+        "event-coverage",
+        "technical-guide"
+      ],
+      "minimumBodyCharacters": 320,
+      "maximumBodyCharacters": 800,
+      "minimumBodyWords": 50,
+      "maximumBodyWords": 115,
+      "minimumParagraphs": 1,
+      "maximumParagraphs": 1,
+      "minimumWordsPerParagraph": 50,
+      "recommendedWordsPerParagraph": {
+        "minimum": 55,
+        "maximum": 100
+      }
+    },
+    "CATALOG_SUMMARY": {
+      "minimumCharacters": 240,
+      "maximumCharacters": 480,
+      "paragraphs": 1
+    },
+    "EVENT_LISTING": {
+      "minimumCharacters": 220,
+      "maximumCharacters": 500,
+      "paragraphs": 1
+    },
+    "COURSE_ACCESS_SUMMARY": {
+      "minimumCharacters": 240,
+      "maximumCharacters": 500,
+      "paragraphs": 1
+    },
+    "COMMUNITY_DIRECTORY_SUMMARY": {
+      "minimumCharacters": 200,
+      "maximumCharacters": 420,
+      "paragraphs": 1
+    },
+    "DISTRIBUTION_DERIVATIVE": {
+      "deriveOnlyFromApprovedCanonicalContent": true
+    }
+  },
+  "adaptiveWorkPolicy": {
+    "algorithmVersion": "hch-adaptive-work-v1",
+    "processingWindowSeconds": 2700,
+    "nearWindowRatio": 0.8,
+    "firstProgressGraceSeconds": 900,
+    "stallAfterSeconds": 600,
+    "finalizationGraceSeconds": 180,
+    "windowMode": "advisory",
+    "minimumTierIgnoresWindow": true,
+    "livenessBasis": "progress",
+    "tiers": [
+      {
+        "id": "minimum",
+        "rank": 0,
+        "minimumUnit": true,
+        "maxOutputTokens": 768,
+        "editorialProfile": "EDITORIAL_MINIMUM"
+      },
+      {
+        "id": "compact",
+        "rank": 1,
+        "minimumUnit": false,
+        "maxOutputTokens": 1536,
+        "editorialProfile": "EDITORIAL_COMPACT"
+      },
+      {
+        "id": "full",
+        "rank": 2,
+        "minimumUnit": false,
+        "maxOutputTokens": 2400,
+        "editorialProfile": "EDITORIAL_LONG_FORM"
+      }
+    ]
+  },
+  "citationPolicy": {
+    "inlineCitationsRequired": true,
+    "sourceListRequired": true,
+    "citationFormat": "stable-source-id",
+    "sourceIdPattern": "^S[1-9][0-9]*$",
+    "minimumCitationsPerSourcedParagraph": 1,
+    "unsupportedExternalClaimsAllowed": 0,
+    "comparisonsAndReviewsMinimumSources": 2,
+    "singleSourceExceptionRequiresJustification": true
+  },
+  "quotationPolicy": {
+    "maximumWordsPerDirectQuotation": 25,
+    "maximumQuotationRatio": 0.05,
+    "attributionRequired": true
+  },
+  "rightsPolicy": {
+    "fullRepublicationRequiresRightsEvidence": true,
+    "translationRequiresDerivativePermission": true,
+    "unknownRightsDefault": [
+      "factual-metadata",
+      "original-summary",
+      "justified-short-excerpt",
+      "canonical-link"
+    ],
+    "mediaRightsEvaluatedSeparately": true
+  },
+  "ingestionPolicy": {
+    "defaultModerationStatus": "review",
+    "automaticPublication": false,
+    "separateSourceExcerptFromEditorialSummary": true
+  },
+  "translationPolicy": {
+    "provider": "vps-local",
+    "host": "vmid5398",
+    "endpointEnv": "HCH_VPS_TRANSLATOR_URL",
+    "tokenEnv": "HCH_VPS_TRANSLATOR_TOKEN",
+    "externalFallbacks": [],
+    "browserFallback": null,
+    "onUnavailable": "preserve-source-language",
+    "scope": "public-content-only"
+  },
+  "traceability": {
+    "sourceRevisionRequired": true,
+    "policyVersionRequired": true,
+    "promptConfigHashRequired": true,
+    "modelProviderRequired": true,
+    "modelIdentifierRequired": true,
+    "generationTimestampRequired": true,
+    "paragraphSourceMapRequired": true
+  },
+  "publicationGate": {
+    "humanReviewRequired": true,
+    "rightsReviewRequired": true,
+    "citationValidationRequired": true,
+    "originalityValidationRequired": true,
+    "atomicPublicationRequired": true,
+    "invalidateWhenSourceChanges": true
+  },
+  "hashAlgorithm": "sha256",
+  "hashScope": "canonical-json-without-hash",
+  "hash": "3917165868ee1d7d92da0d8979c7ea91a948a8c6d057b3a9e6ce55e6fafadcd4"
+}

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>online.hubtech.hch.editorial-worker.cycle</string>
+<key>ProgramArguments</key><array><string>__HCH_NODE_BIN__</string><string>__HCH_RUNTIME_ROOT__/ops/linux/editorial-worker/worker.mjs</string><string>supervise</string><string>--config</string><string>__HCH_CONFIG_PATH__</string></array>
+<key>KeepAlive</key><true/><key>ProcessType</key><string>Background</string>
+<key>StandardOutPath</key><string>__HCH_LOG_ROOT__/worker-cycle.log</string><key>StandardErrorPath</key><string>__HCH_LOG_ROOT__/worker-cycle-error.log</string>
+</dict></plist>

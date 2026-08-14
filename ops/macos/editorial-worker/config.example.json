@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "nodeId": "mac-worker-01",
+  "keyId": "mac-worker-01-key-v1",
+  "orchestratorBaseUrl": "https://hubtech.online",
+  "stateDirectory": "/Users/CHANGE_ME/Library/Application Support/HCH/editorial-worker",
+  "rootPublicKeyPath": "/Users/CHANGE_ME/Library/Application Support/HCH/editorial-worker/trust/hch-root-v1.pub.pem",
+  "rootPublicKeyFingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "rootKeyId": "hch-root-v1",
+  "localEngineBaseUrl": "http://127.0.0.1:11434",
+  "requestedCapacity": 1,
+  "artifactMaximumBytes": 16777216,
+  "requestTimeoutMilliseconds": 15000,
+  "executeRequestTimeoutMilliseconds": 2700000,
+  "requestRetries": 2,
+  "enrollmentTokenEnvironment": "HCH_EDITORIAL_ENROLLMENT_TOKEN"
+}

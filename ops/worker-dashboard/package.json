@@ -1,0 +1,14 @@
+{
+  "name": "@hch/worker-dashboard",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "collect": "node collector.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

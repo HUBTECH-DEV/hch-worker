@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.worker-assignment-progress-v1.schema.json",
+  "title": "HCH assignment material progress v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["phase", "attempt", "sequence", "contentBytes"],
+  "properties": {
+    "phase": { "enum": ["starting", "responding", "finalizing"] },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 8 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "contentBytes": { "type": "integer", "minimum": 0 }
+  }
+}

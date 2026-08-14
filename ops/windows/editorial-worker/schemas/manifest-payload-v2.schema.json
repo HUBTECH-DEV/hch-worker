@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/editorial-worker-manifest-payload-v2.schema.json",
+  "title": "HCH editorial worker manifest payload v2",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schemaVersion", "bootstrapVersion", "sequence", "releaseId", "issuedAt", "expiresAt",
+    "minimumAcceptedSequence", "runtime", "engine", "generation", "capacityPolicy", "editorial",
+    "actions", "rootActionCapabilities", "artifacts", "endpoints", "security", "safety", "hashAlgorithm", "hash"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "2.0" },
+    "bootstrapVersion": { "enum": ["2.0.0", "2.1.0", "2.2.0"] },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "minimumAcceptedSequence": { "type": "integer", "minimum": 1 },
+    "previousManifestHash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+    "releaseId": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "issuedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "runtime": { "type": "object" },
+    "engine": {
+      "type": "object",
+      "required": ["provider", "adapter", "adapterVersion", "model", "modelDigest", "protocol"],
+      "properties": {
+        "provider": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" },
+        "adapter": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" },
+        "adapterVersion": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,159}$" }
+      }
+    },
+    "generation": { "type": "object" },
+    "capacityPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithmVersion", "absoluteRequestedMaximum", "defaultNodeCeiling",
+        "globalAssignmentCeiling", "grantTtlSeconds", "telemetryMayOnlyReduce",
+        "classCeilings", "platformClasses", "nodeClasses", "nodeCeilings", "pressure"
+      ],
+      "properties": {
+        "algorithmVersion": { "const": "hch-adaptive-capacity-v1" },
+        "absoluteRequestedMaximum": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "defaultNodeCeiling": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "globalAssignmentCeiling": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "grantTtlSeconds": { "type": "integer", "minimum": 30, "maximum": 3600 },
+        "telemetryMayOnlyReduce": { "const": true },
+        "classCeilings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["constrained", "standard", "accelerated"],
+          "properties": {
+            "constrained": { "type": "integer", "minimum": 0, "maximum": 64 },
+            "standard": { "type": "integer", "minimum": 0, "maximum": 64 },
+            "accelerated": { "type": "integer", "minimum": 0, "maximum": 64 }
+          }
+        },
+        "platformClasses": {
+          "type": "object",
+          "required": ["linux", "macos", "windows"],
+          "additionalProperties": { "enum": ["constrained", "standard", "accelerated"] },
+          "properties": {
+            "linux": { "enum": ["constrained", "standard", "accelerated"] },
+            "macos": { "enum": ["constrained", "standard", "accelerated"] },
+            "windows": { "enum": ["constrained", "standard", "accelerated"] }
+          }
+        },
+        "nodeClasses": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+          "additionalProperties": { "enum": ["constrained", "standard", "accelerated"] }
+        },
+        "nodeCeilings": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+          "additionalProperties": { "type": "integer", "minimum": 0, "maximum": 64 }
+        },
+        "pressure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["softLimitPercent", "hardLimitPercent", "softReductionFactor"],
+          "properties": {
+            "softLimitPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+            "hardLimitPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+            "softReductionFactor": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        }
+      }
+    },
+    "adaptiveWorkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithmVersion", "processingWindowSeconds", "nearWindowRatio",
+        "firstProgressGraceSeconds", "stallAfterSeconds", "finalizationGraceSeconds",
+        "windowMode", "minimumTierIgnoresWindow", "livenessBasis", "tiers"
+      ],
+      "properties": {
+        "algorithmVersion": { "const": "hch-adaptive-work-v1" },
+        "processingWindowSeconds": { "const": 2700 },
+        "nearWindowRatio": { "const": 0.8 },
+        "firstProgressGraceSeconds": { "const": 900 },
+        "stallAfterSeconds": { "const": 600 },
+        "finalizationGraceSeconds": { "const": 180 },
+        "windowMode": { "const": "advisory" },
+        "minimumTierIgnoresWindow": { "const": true },
+        "livenessBasis": { "const": "progress" },
+        "tiers": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "rank", "minimumUnit", "maxOutputTokens", "editorialProfile"],
+              "properties": {
+                "id": { "const": "minimum" },
+                "rank": { "const": 0 },
+                "minimumUnit": { "const": true },
+                "maxOutputTokens": { "const": 768 },
+                "editorialProfile": { "const": "EDITORIAL_MINIMUM" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "rank", "minimumUnit", "maxOutputTokens", "editorialProfile"],
+              "properties": {
+                "id": { "const": "compact" },
+                "rank": { "const": 1 },
+                "minimumUnit": { "const": false },
+                "maxOutputTokens": { "const": 1536 },
+                "editorialProfile": { "const": "EDITORIAL_COMPACT" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "rank", "minimumUnit", "maxOutputTokens", "editorialProfile"],
+              "properties": {
+                "id": { "const": "full" },
+                "rank": { "const": 2 },
+                "minimumUnit": { "const": false },
+                "maxOutputTokens": { "const": 2400 },
+                "editorialProfile": { "const": "EDITORIAL_LONG_FORM" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "editorial": {
+      "type": "object",
+      "required": ["policyHash", "promptConfigHash", "pipelineVersion"],
+      "properties": {
+        "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "promptConfigHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "authorizationClass"],
+        "properties": {
+          "type": {
+            "enum": [
+              "verify-artifact", "configure-engine", "pull-model-by-digest",
+              "apply-editorial-policy", "self-test"
+            ]
+          },
+          "authorizationClass": { "const": "release" }
+        }
+      }
+    },
+    "rootActionCapabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "status"],
+        "properties": {
+          "type": { "enum": ["install-runtime-artifact", "install-engine-adapter"] },
+          "status": { "const": "requires-separate-root-envelope" }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "url", "sha256", "bytes", "authorizationClass"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-zA-Z0-9._-]{1,120}$" },
+          "url": { "type": "string", "format": "uri-reference" },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "bytes": { "type": "integer", "minimum": 0, "maximum": 536870912 },
+          "authorizationClass": { "const": "release" }
+        }
+      }
+    },
+    "endpoints": { "type": "object" },
+    "security": {
+      "type": "object",
+      "required": ["authorizationByIp", "arbitraryRemoteCommands"],
+      "properties": {
+        "authorizationByIp": { "const": false },
+        "arbitraryRemoteCommands": { "const": false }
+      }
+    },
+    "safety": { "type": "object" },
+    "hashAlgorithm": { "const": "sha256" },
+    "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "bootstrapVersion": { "const": "2.2.0" } },
+        "required": ["bootstrapVersion"]
+      },
+      "then": {
+        "required": ["presence", "adaptiveWorkPolicy"],
+        "properties": {
+          "generation": {
+            "required": ["maxOutputTokens"],
+            "properties": {
+              "maxOutputTokens": { "type": "integer", "minimum": 2400, "maximum": 4096 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "bootstrapVersion": { "const": "2.1.0" } },
+        "required": ["bootstrapVersion"]
+      },
+      "then": { "required": ["presence"] }
+    }
+  ]
+}

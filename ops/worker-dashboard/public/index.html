@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
+    <title>HCH · Worker local</title>
+    <meta name="description" content="Painel operacional local de um worker editorial HCH.">
+    <link rel="stylesheet" href="/app.css">
+    <script src="/app.js" type="module"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Ir para o conteúdo principal</a>
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">HCH · ORQUESTRAÇÃO EDITORIAL</p>
+        <h1>Worker local</h1>
+        <p class="lede">Estado, confiança e capacidade deste nó — sem expor credenciais.</p>
+      </div>
+      <div class="overall" aria-live="polite" aria-atomic="true">
+        <span id="overall-indicator" class="status" data-tone="neutral">Carregando</span>
+        <span id="last-refresh" class="refresh-time">Aguardando primeira leitura</span>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="identity" aria-labelledby="worker-title">
+        <div>
+          <p class="section-kicker">Nó observado</p>
+          <h2 id="worker-title">Worker não configurado</h2>
+          <p id="worker-meta" class="muted">Identidade ainda não publicada</p>
+        </div>
+        <dl class="identity-facts">
+          <div><dt>Estado</dt><dd id="worker-state"><span class="status" data-tone="neutral">—</span></dd></div>
+          <div><dt>Uptime</dt><dd id="worker-uptime">—</dd></div>
+          <div><dt>Standby</dt><dd id="standby-state">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="worker-controls" aria-labelledby="public-identity-title">
+        <div class="section-heading"><div><p class="section-kicker">Enrollment</p><h2 id="public-identity-title">Chave pública deste Worker</h2></div><span class="status" data-tone="good">Somente pública</span></div>
+        <p id="public-identity-meta" class="metric-note">Carregando identidade pública…</p>
+        <pre id="public-identity-key" class="control-summary" style="white-space:pre-wrap;overflow-wrap:anywhere">—</pre>
+        <button id="copy-public-identity" class="control-button secondary" type="button" disabled>Copiar chave pública</button>
+        <p id="public-identity-feedback" class="control-feedback" role="status" aria-live="polite"></p>
+      </section>
+
+      <section id="worker-controls" class="worker-controls" aria-labelledby="controls-title" aria-busy="false">
+        <div class="section-heading control-heading">
+          <div>
+            <p class="section-kicker">Ação neste notebook</p>
+            <h2 id="controls-title">Controle local</h2>
+          </div>
+          <span id="control-state" class="status" data-tone="neutral">Verificando</span>
+        </div>
+        <div class="control-layout">
+          <div>
+            <p id="control-summary" class="control-summary">
+              Confirmando a disponibilidade dos controles locais.
+            </p>
+            <p class="metric-note">
+              Pausar bloqueia novos claims e mantém cada assignment ativo até heartbeat e finalização seguros.
+            </p>
+          </div>
+          <div class="control-actions" role="group" aria-label="Ações do worker local">
+            <label class="parallelism-control" for="control-parallelism">
+              <span>Processos paralelos</span>
+              <input id="control-parallelism" type="number" min="0" max="64" step="1" inputmode="numeric" value="1" disabled>
+            </label>
+            <button id="control-apply-parallelism" class="control-button" type="button" disabled>
+              Aplicar paralelismo
+            </button>
+            <button id="control-start" class="control-button primary" type="button" disabled>
+              Iniciar processamento
+            </button>
+            <button id="control-pause" class="control-button secondary" type="button" disabled>
+              Pausar processamento
+            </button>
+            <button id="control-stop" class="control-button danger" type="button" disabled>
+              Parar e cancelar ativos
+            </button>
+          </div>
+        </div>
+        <p id="control-feedback" class="control-feedback" role="status" aria-live="polite" aria-atomic="true"></p>
+      </section>
+
+      <section id="alerts-section" class="alerts" aria-labelledby="alerts-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Atenção operacional</p>
+            <h2 id="alerts-title">Alertas</h2>
+          </div>
+          <span id="alerts-count" class="count">0</span>
+        </div>
+        <ol id="alerts-list" class="alerts-list" aria-live="polite"></ol>
+      </section>
+
+      <section aria-labelledby="trust-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Canal e identidade</p>
+            <h2 id="trust-title">Conexão e confiança</h2>
+          </div>
+        </div>
+        <div class="card-grid trust-grid">
+          <article class="metric-card">
+            <p class="metric-label">Orquestrador</p>
+            <p id="connection-status" class="metric-value status-value">—</p>
+            <p id="connection-detail" class="metric-note">Sem confirmação recente</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Autenticação do nó</p>
+            <p id="authentication-status" class="metric-value status-value">—</p>
+            <p id="authentication-key" class="metric-note mono">Chave —</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">TLS e certificado</p>
+            <p id="tls-status" class="metric-value status-value">—</p>
+            <p id="certificate-detail" class="metric-note">Certificado —</p>
+          </article>
+          <article class="metric-card featured">
+            <p class="metric-label">Cadeia Ed25519</p>
+            <p id="ed25519-status" class="metric-value status-value">—</p>
+            <dl class="compact-details">
+              <div><dt>Raiz</dt><dd id="root-key" class="mono">—</dd></div>
+              <div><dt>Release</dt><dd id="release-key" class="mono">—</dd></div>
+              <div><dt>Manifesto</dt><dd id="manifest-sequence">—</dd></div>
+              <div><dt>Política</dt><dd id="policy-hash" class="mono">—</dd></div>
+            </dl>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="orchestration-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Presença independente da execução</p>
+            <h2 id="orchestration-title">Heartbeat e trabalhos futuros</h2>
+          </div>
+          <span id="orchestration-mode" class="status" data-tone="neutral">Indisponível</span>
+        </div>
+        <div class="card-grid flow-grid">
+          <article class="metric-card">
+            <p class="metric-label">Heartbeat do nó</p>
+            <p id="node-heartbeat-status" class="metric-value status-value">—</p>
+            <p id="node-heartbeat-detail" class="metric-note">Último — · próximo —</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Capacidade / slots</p>
+            <p id="orchestration-capacity" class="metric-value">—</p>
+            <p id="orchestration-capacity-detail" class="metric-note">Ativos — · motivo —</p>
+          </article>
+          <article class="metric-card featured">
+            <p class="metric-label">Trabalhos futuros na VPS</p>
+            <p id="future-work-total" class="metric-value">—</p>
+            <p id="future-work-detail" class="metric-note">Elegíveis — · gerando —</p>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="adaptive-work-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Política adaptativa assinada</p>
+            <h2 id="adaptive-work-title">Tamanho e progresso do trabalho</h2>
+          </div>
+          <span id="adaptive-work-availability" class="status" data-tone="neutral">Indisponível</span>
+        </div>
+        <div class="card-grid adaptive-summary-grid">
+          <article class="metric-card">
+            <p class="metric-label">Tier atual</p>
+            <p id="adaptive-tier" class="metric-value status-value">—</p>
+            <p id="adaptive-tier-detail" class="metric-note">Perfil — · rank —</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Teto de saída</p>
+            <p id="adaptive-token-ceiling" class="metric-value">—</p>
+            <p id="adaptive-minimum-unit" class="metric-note">Unidade mínima —</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Limiar / janela</p>
+            <p id="adaptive-window" class="metric-value">—</p>
+            <p id="adaptive-window-detail" class="metric-note">Tolerâncias de progresso —</p>
+          </article>
+          <article class="metric-card featured">
+            <p class="metric-label">Motivo do downshift</p>
+            <p id="adaptive-downshift-reason" class="metric-value status-value">—</p>
+            <p id="adaptive-downshift-updated" class="metric-note">Atualização —</p>
+          </article>
+        </div>
+        <div id="adaptive-work-list" class="adaptive-work-list" aria-live="polite">
+          <p class="adaptive-work-empty">Nenhum trabalho adaptativo ativo informado.</p>
+        </div>
+      </section>
+
+      <section aria-labelledby="resources-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Capacidade observada</p>
+            <h2 id="resources-title">Recursos</h2>
+          </div>
+        </div>
+        <div class="card-grid resources-grid">
+          <article class="metric-card split-card">
+            <div>
+              <p class="metric-label">CPU total</p>
+              <p id="cpu-total" class="metric-value">—</p>
+            </div>
+            <div>
+              <p class="metric-label">CPU média</p>
+              <p id="cpu-average" class="metric-value">—</p>
+            </div>
+          </article>
+          <article class="metric-card split-card">
+            <div>
+              <p class="metric-label">GPU total</p>
+              <p id="gpu-total" class="metric-value">—</p>
+            </div>
+            <div>
+              <p class="metric-label">GPU média</p>
+              <p id="gpu-average" class="metric-value">—</p>
+            </div>
+            <p id="gpu-status" class="metric-note full-width">GPU —</p>
+          </article>
+          <article class="metric-card split-card">
+            <div>
+              <p class="metric-label">Memória média/item</p>
+              <p id="memory-average" class="metric-value">—</p>
+            </div>
+            <div>
+              <p class="metric-label">Pico por item</p>
+              <p id="memory-peak" class="metric-value">—</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="flow-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Fluxo editorial</p>
+            <h2 id="flow-title">Produção e tráfego</h2>
+          </div>
+        </div>
+        <div class="card-grid flow-grid">
+          <article class="metric-card">
+            <p class="metric-label">Tempo médio/item</p>
+            <p id="processing-average" class="metric-value">—</p>
+            <p id="processing-total" class="metric-note">Tempo acumulado —</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Volume processado</p>
+            <p id="volume-total" class="metric-value">—</p>
+            <p id="volume-detail" class="metric-note">Entrada — · saída —</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Rede</p>
+            <p id="network-total" class="metric-value">—</p>
+            <p id="network-detail" class="metric-note">RX — · TX —</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Lotes</p>
+            <p id="batches-total" class="metric-value">—</p>
+            <p id="batches-detail" class="metric-note">Concluídos —</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Trabalhos</p>
+            <p id="jobs-total" class="metric-value">—</p>
+            <p id="jobs-detail" class="metric-note">Concluídos —</p>
+          </article>
+          <article class="metric-card live-card">
+            <p class="metric-label">Em execução</p>
+            <p id="jobs-running" class="metric-value">—</p>
+            <ul id="running-job-list" class="job-list"><li>Nenhum trabalho ativo</li></ul>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Capacidade desejada / concedida</p>
+            <p id="capacity-grant" class="metric-value">—</p>
+            <p id="capacity-detail" class="metric-note">Ativos — · motivo —</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="current-batch" aria-labelledby="batch-title">
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Agora</p>
+            <h2 id="batch-title">Lote atual</h2>
+          </div>
+          <span id="batch-status" class="status" data-tone="neutral">Sem lote</span>
+        </div>
+        <div id="batch-content" class="batch-content">
+          <p id="batch-id" class="batch-id mono">—</p>
+          <p id="batch-progress-text" class="muted">Nenhum lote em andamento.</p>
+          <div class="batch-progress-group">
+            <div class="batch-progress-heading"><span>Progresso do item atual</span><strong id="batch-item-percent">0%</strong></div>
+            <progress id="batch-progress" max="100" value="0" aria-label="Progresso do item atual">0%</progress>
+          </div>
+          <div class="batch-progress-group">
+            <div class="batch-progress-heading"><span>Itens em execução</span><strong id="batch-items-ratio">0/0</strong></div>
+            <progress id="batch-items-progress" max="1" value="0" aria-label="Itens em execução no lote">0/0</progress>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Painel local · controles fixos · nenhuma credencial ou conteúdo editorial é exibido</p>
+      <p id="telemetry-meta">Telemetria ainda não recebida</p>
+    </footer>
+
+    <dialog id="control-confirmation" aria-labelledby="control-confirmation-title" aria-describedby="control-confirmation-description">
+      <div class="confirmation-content">
+        <p class="section-kicker">Confirmação local</p>
+        <h2 id="control-confirmation-title">Confirmar ação</h2>
+        <p id="control-confirmation-description" class="muted"></p>
+        <div class="confirmation-actions">
+          <button id="control-confirmation-cancel" class="control-button secondary" type="button">Cancelar</button>
+          <button id="control-confirmation-submit" class="control-button primary" type="button">Confirmar</button>
+        </div>
+      </div>
+    </dialog>
+  </body>
+</html>

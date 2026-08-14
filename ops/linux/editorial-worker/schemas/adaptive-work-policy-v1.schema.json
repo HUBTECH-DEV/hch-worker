@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hubtech.online/schemas/hch.adaptive-work-policy-v1.schema.json",
+  "title": "HCH adaptive worker sizing policy v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "algorithmVersion", "windowMode", "minimumTierIgnoresWindow",
+    "livenessBasis", "processingWindowSeconds", "nearWindowRatio",
+    "firstProgressGraceSeconds", "stallAfterSeconds",
+    "finalizationGraceSeconds", "tiers"
+  ],
+  "properties": {
+    "algorithmVersion": { "const": "hch-adaptive-work-v1" },
+    "windowMode": { "const": "advisory" },
+    "minimumTierIgnoresWindow": { "const": true },
+    "livenessBasis": { "const": "progress" },
+    "processingWindowSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+    "nearWindowRatio": { "type": "number", "minimum": 0.5, "maximum": 0.95 },
+    "firstProgressGraceSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+    "stallAfterSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+    "finalizationGraceSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 },
+    "tiers": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "rank", "maxOutputTokens", "editorialProfile", "minimumUnit"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+          "rank": { "type": "integer", "minimum": 0, "maximum": 7 },
+          "maxOutputTokens": { "type": "integer", "minimum": 1, "maximum": 4096 },
+          "editorialProfile": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+          "minimumUnit": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
