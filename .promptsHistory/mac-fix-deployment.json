@@ -1,0 +1,17 @@
+{
+  "chatName": "mac-fix-deployment",
+  "createdAt": "2026-08-14T21:10:48-03:00",
+  "lastUpdated": "2026-08-14T21:29:53-03:00",
+  "messages": [
+    {
+      "timestamp": "2026-08-14T21:10:48-03:00",
+      "role": "user",
+      "content": "Github: hubtech-dev/hch-worker; é o novo repositório específico pro worker; Crie um projeto no Codex e implante a nova versão no meu mac. Até a implantação ser finalizada com sucesso, ele não deve ser tratado como uma nova versão. No máximo com um fix;"
+    },
+    {
+      "timestamp": "2026-08-14T21:29:53-03:00",
+      "role": "assistant",
+      "content": "Projeto local criado para HUBTECH-DEV/hch-worker. O candidato foi mantido como 3.0.0-fix.2aa47cf, corrigiu a telemetria de pressão no Darwin, passou 71 testes, foi implantado com backup e rollback, validou confiança, heartbeat, claim e conclusão batch-completed; nenhuma tag ou release foi criada."
+    }
+  ]
+}

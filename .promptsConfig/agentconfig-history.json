@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "1.0",
+  "projectName": "HCH Worker",
+  "currentVersion": 1,
+  "versions": [
+    {
+      "version": 1,
+      "timestamp": "2026-08-14T21:10:48-03:00",
+      "changedBy": "user",
+      "reason": "Criação do projeto específico do Worker e definição do gate de promoção pós-implantação.",
+      "summary": "Define o repositório canônico, rollout reversível e tratamento como fix até validação operacional completa.",
+      "previousVersion": null,
+      "newVersion": 1,
+      "snapshotFile": "history/v0001.json",
+      "rollback": null
+    }
+  ]
+}

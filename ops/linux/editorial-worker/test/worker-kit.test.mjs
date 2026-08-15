@@ -21,6 +21,7 @@ import { sha256Hex } from "../crypto.mjs";
 import { validateWorkerConfig } from "../lib/config.mjs";
 import {
   capacityPolicyHash,
+  sampleCapacityPressure,
   validateCapacityPolicy,
 } from "../lib/capacity.mjs";
 import {
@@ -555,6 +556,23 @@ test("local /api/tags must expose the exact model digest", async (t) => {
   );
   await assert.rejects(readFile(join(fixture.stateDirectory, "applied-manifest.json")), /ENOENT/);
   assert.equal(fixture.control.attestations.length, 0);
+});
+
+test("Darwin omits misleading generic pressure unless availability is sampled", () => {
+  assert.deepEqual(sampleCapacityPressure({ platform: "darwin" }), {});
+  assert.deepEqual(sampleCapacityPressure({
+    platform: "darwin",
+    logicalProcessors: 4,
+    oneMinuteLoad: 2,
+    totalMemoryBytes: 100,
+  }), { cpuPercent: 50 });
+  assert.deepEqual(sampleCapacityPressure({
+    platform: "darwin",
+    logicalProcessors: 4,
+    oneMinuteLoad: 2,
+    totalMemoryBytes: 100,
+    availableMemoryBytes: 40,
+  }), { cpuPercent: 50, memoryPercent: 60 });
 });
 
 test("execute requires the current ready/applied gate and retries with one request id and new nonces", async (t) => {

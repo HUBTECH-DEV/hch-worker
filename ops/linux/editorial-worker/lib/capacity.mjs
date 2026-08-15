@@ -1,4 +1,4 @@
-import { cpus, freemem, loadavg, totalmem } from "node:os";
+import { cpus, freemem, loadavg, platform, totalmem } from "node:os";
 
 import { canonicalizeJson, sha256Hex } from "../crypto.mjs";
 import { WorkerKitError } from "./errors.mjs";
@@ -176,15 +176,25 @@ export function sampleCapacityPressure(resources = {}) {
   const oneMinuteLoad = resources.oneMinuteLoad ?? loadavg()[0];
   const memoryTotal = resources.totalMemoryBytes ?? totalmem();
   const memoryAvailable = resources.availableMemoryBytes ?? freemem();
-  const pressure = {
-    cpuPercent: roundPercentage(
+  const runtimePlatform = resources.platform ?? platform();
+  const pressure = {};
+  // Darwin load averages include runnable and blocked work, so they do not
+  // represent CPU utilization. Only report this optional reducing signal when
+  // a caller supplies a platform-aware sample.
+  if (runtimePlatform !== "darwin" || resources.oneMinuteLoad !== undefined) {
+    pressure.cpuPercent = roundPercentage(
       Math.max(0, Number(oneMinuteLoad)) / Math.max(1, Number(logicalProcessors)) * 100,
-    ),
-    memoryPercent: roundPercentage(
+    );
+  }
+  // On Darwin, os.freemem() excludes inactive and reclaimable pages and can
+  // overstate memory pressure. Omit it unless availability was sampled by a
+  // platform-aware collector.
+  if (runtimePlatform !== "darwin" || resources.availableMemoryBytes !== undefined) {
+    pressure.memoryPercent = roundPercentage(
       (Math.max(0, Number(memoryTotal)) - Math.max(0, Number(memoryAvailable))) /
         Math.max(1, Number(memoryTotal)) * 100,
-    ),
-  };
+    );
+  }
   if (resources.gpuPercent !== undefined && resources.gpuPercent !== null) {
     pressure.gpuPercent = resources.gpuPercent;
   }

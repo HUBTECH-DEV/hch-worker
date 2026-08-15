@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "1.0",
+  "projectName": "HCH Worker",
+  "createdAt": "2026-08-14T21:10:48-03:00",
+  "lastUpdated": "2026-08-14T21:10:48-03:00",
+  "currentVersion": 1,
+  "agentConfigurationPrompt": "Manter o repositório HUBTECH-DEV/hch-worker como fonte canônica do Worker HCH e implantar alterações com rollout reversível e evidência operacional antes de qualquer promoção de versão.",
+  "agentProfile": "Principal Implementation Engineer / Deployment Engineer; Principal Git Engineer",
+  "projectRules": [
+    "HUBTECH-DEV/hch-worker é o repositório específico e a fonte canônica do Worker HCH.",
+    "Uma versão nova somente pode ser reconhecida depois de uma implantação concluída com sucesso.",
+    "Antes da validação completa, qualquer candidato deve ser tratado no máximo como fix da versão estável atual.",
+    "Preservar aprovação e publicação automáticas desabilitadas."
+  ],
+  "communicationRules": [
+    "Responder em português.",
+    "Distinguir candidato de fix, versão implantada e release publicada com evidências explícitas."
+  ],
+  "technicalRules": [
+    "Executar testes antes da implantação.",
+    "Aplicar drain, backup e rollback verificável antes de substituir o runtime ativo.",
+    "Exigir bootstrap, validação de confiança, heartbeat, claim e conclusão de assignment para promover uma nova versão.",
+    "Não criar tag ou release antes da validação operacional completa."
+  ],
+  "customInstructions": [
+    "Usar o HGC como interface central de configuração e o HubICG Enterprise como governança ativa.",
+    "Preservar chaves privadas, tokens de enrollment e configurações específicas do host fora do repositório."
+  ],
+  "metadata": {
+    "githubRepository": "HUBTECH-DEV/hch-worker",
+    "canonicalPath": "${HOME}/Documents/hch-worker",
+    "stableVersionAtCreation": "3.0.0",
+    "upstreamCandidateVersion": "3.1.0",
+    "upstreamCandidateCommit": "2aa47cf0bc6735d899a201279d356c09c631855f",
+    "promotionState": "fix-candidate"
+  }
+}
