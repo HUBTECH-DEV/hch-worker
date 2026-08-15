@@ -20,6 +20,7 @@ import {
   withWorkerLock,
 } from "./storage.mjs";
 import { WorkerKitError, errorCode } from "./errors.mjs";
+import { bootstrapWorkerLocked } from "./bootstrap.mjs";
 
 export const ASSIGNMENT_HEARTBEAT_INTERVAL_SECONDS = 30;
 
@@ -34,6 +35,7 @@ export async function runPortableSupervisor(config, options = {}) {
 }
 
 async function runPortableSupervisorLocked(config, options = {}) {
+  const stateRoot = await ensurePrivateDirectory(config.stateDirectory);
   const wait = options.delay ?? delay;
   const now = options.now ?? Date.now;
   const heartbeatOnce = options.nodeHeartbeat ?? nodeHeartbeat;
@@ -48,6 +50,7 @@ async function runPortableSupervisorLocked(config, options = {}) {
     if (options.shouldStop?.() ?? false) break;
     let snapshot = null;
     try {
+      await renewReadyAttestation(config, stateRoot, options);
       snapshot = await heartbeatOnce(config, options);
       const target = claimTarget(snapshot);
       while (workPromises.size < target) {
@@ -72,6 +75,16 @@ async function runPortableSupervisorLocked(config, options = {}) {
     await Promise.allSettled([...workPromises]);
   }
   return { cycles, activeWorkers: workPromises.size };
+}
+
+export async function renewReadyAttestation(config, stateRoot, options = {}) {
+  const ready = await readOptionalJson(stateRoot, "ready.json");
+  const refreshBeforeMilliseconds = (options.readyRefreshBeforeSeconds ?? 3000) * 1000;
+  const remaining = Date.parse(ready?.readyUntil ?? "") - (options.now?.() ?? Date.now());
+  if (ready?.ready === true && Number.isFinite(remaining) && remaining > refreshBeforeMilliseconds) {
+    return ready;
+  }
+  return (options.bootstrapWorkerLocked ?? bootstrapWorkerLocked)(config, stateRoot, options);
 }
 
 export async function runOnePortableAssignment(config, options = {}) {

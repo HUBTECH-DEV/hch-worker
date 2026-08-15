@@ -263,6 +263,14 @@ test("assignment progress heartbeat tolerates transient transport failure and st
   assert.match(cycle, /Completion is idempotent on the orchestrator/);
 });
 
+test("service heartbeat renews readiness without enabling claims", () => {
+  const heartbeat = readFileSync(join(kitRoot, "Send-WorkerNodeHeartbeat.ps1"), "utf8");
+  assert.match(heartbeat, /Assert-HchClaimGate/);
+  assert.match(heartbeat, /Invoke-HchWorkerBootstrap/);
+  assert.match(heartbeat, /RequestedCapacity \$capacity/);
+  assert.doesNotMatch(heartbeat, /Invoke-HchWorkerClaim|editorial-generator/);
+});
+
 test("release artifact gate requires integrity, publisher identity, and timestamp", () => {
   const verifier = readFileSync(join(kitRoot, "Test-HchWorkerReleaseArtifact.ps1"), "utf8");
   const signer = readFileSync(join(kitRoot, "Sign-HchWorkerReleaseArtifact.ps1"), "utf8");
