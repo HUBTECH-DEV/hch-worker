@@ -11,6 +11,16 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'Hch.EditorialWorker.psm1') -Force
 $config = Import-HchWorkerConfig -Path $ConfigPath
+$ready = $null
+try { $ready = Assert-HchClaimGate -Config $config } catch { }
+$refreshBefore = if ($config.ContainsKey('ReadyRefreshBeforeSeconds')) {
+  [int]$config.ReadyRefreshBeforeSeconds
+} else { 3000 }
+if ($null -eq $ready -or
+    ([DateTimeOffset]::Parse([string]$ready.readyUntil) - [DateTimeOffset]::UtcNow).TotalSeconds -le $refreshBefore) {
+  # This runner belongs to the service heartbeat loop. Renewal does not claim.
+  [void](Invoke-HchWorkerBootstrap -Config $config)
+}
 $control = Get-HchWorkerControl -Config $config
 $capacity = if ($RequestedCapacity -ge 0) {
   $RequestedCapacity

@@ -47,7 +47,12 @@ import {
 } from "./adaptive-work.mjs";
 
 export async function bootstrapWorker(config, options = {}) {
-  return withWorkerLock(config.stateDirectory, async (stateRoot) => {
+  return withWorkerLock(config.stateDirectory, (stateRoot) =>
+    bootstrapWorkerLocked(config, stateRoot, options));
+}
+
+// Used only by the long-lived supervisor, which already owns the worker lock.
+export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
     const startedAt = Date.now();
     const cpuStarted = process.cpuUsage();
     const traffic = createTrafficCounter();
@@ -379,7 +384,6 @@ export async function bootstrapWorker(config, options = {}) {
       }).catch(() => {});
       throw error;
     }
-  });
 }
 
 export async function resolveEnrollmentToken(config, options = {}) {

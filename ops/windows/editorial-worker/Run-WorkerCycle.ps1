@@ -490,6 +490,19 @@ try {
     if (Test-Path -LiteralPath $script:JournalPath -PathType Leaf) { return $recovery }
   }
 
+  # Readiness is a renewable service lease, not a claim permission. Keep it
+  # alive while paused/drained; the control checks below still block claims.
+  $ready = $null
+  try { $ready = Assert-HchClaimGate -Config $config } catch { }
+  $refreshBefore = if ($config.ContainsKey('ReadyRefreshBeforeSeconds')) {
+    [int]$config.ReadyRefreshBeforeSeconds
+  } else { 3000 }
+  if ($null -eq $ready -or
+      ([DateTimeOffset]::Parse([string]$ready.readyUntil) - [DateTimeOffset]::UtcNow).TotalSeconds -le $refreshBefore) {
+    [void](Invoke-HchWorkerBootstrap -Config $config)
+    $ready = Assert-HchClaimGate -Config $config
+  }
+
   $control = Get-HchWorkerControl -Config $config
   if (-not [bool]$control.acceptingClaims -or [int]$control.requestedParallelism -eq 0) {
     $capacityPath = Join-Path ([string]$config.StateRoot) 'capacity.json'
@@ -512,14 +525,6 @@ try {
     return Write-HchCycleSummary -State 'drained' -Code 'new-claims-disabled'
   }
 
-  $ready = Assert-HchClaimGate -Config $config
-  $refreshBefore = if ($config.ContainsKey('ReadyRefreshBeforeSeconds')) {
-    [int]$config.ReadyRefreshBeforeSeconds
-  } else { 3000 }
-  if (([DateTimeOffset]::Parse([string]$ready.readyUntil) - [DateTimeOffset]::UtcNow).TotalSeconds -le $refreshBefore) {
-    [void](Invoke-HchWorkerBootstrap -Config $config)
-    $ready = Assert-HchClaimGate -Config $config
-  }
   [void](Invoke-HchGeneratorPreflight)
 
   $capacityPolicy = Get-HchInstalledCapacityPolicy -Config $config -Ready $ready

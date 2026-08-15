@@ -300,6 +300,13 @@ function addConnectionAlerts(state, alerts) {
 }
 
 function addSecurityAlerts(state, alerts, now) {
+  if (state.trust.errorCode === "ready-attestation-expired") {
+    alerts.push(alert(
+      "ready-attestation-expired",
+      "critical",
+      "A atestação de prontidão expirou; o manifesto assinado permanece válido.",
+    ));
+  }
   if (state.authentication.status !== "authenticated") {
     alerts.push(alert(
       "worker-authentication",
