@@ -81,8 +81,112 @@ import {
   parseAdaptiveWorkSizing,
   parseNativeActiveWork,
 } from "../lib/adaptive-work.mjs";
+import { compareVersions, createReleaseMonitor } from "../lib/releases.mjs";
+import { runUpdateHandoff } from "../../worker-updater/hch-worker-update.mjs";
 
 const T0 = new Date("2026-08-11T21:00:00.000Z");
+
+test("release monitor detects only newer stable semantic releases", async () => {
+  const payload = {
+    tag_name: "v3.2.0",
+    draft: false,
+    prerelease: false,
+    html_url: "https://github.com/HUBTECH-DEV/hch-worker/releases/tag/v3.2.0",
+    published_at: "2026-08-15T12:00:00Z",
+  };
+  const monitor = createReleaseMonitor({
+    now: new Date("2026-08-15T12:05:00Z"),
+    fetchImpl: async () => new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+  });
+  const outdated = await monitor.snapshot("3.1.0");
+  assert.equal(outdated.updateAvailable, true);
+  assert.equal(outdated.latestVersion, "3.2.0");
+  assert.equal(outdated.channel, "stable");
+  assert.equal((await monitor.snapshot("3.2.0")).updateAvailable, false);
+  assert.equal(compareVersions("3.10.0", "3.2.9"), 1);
+  assert.equal(compareVersions("3.2.0", "3.2.0-rc.1"), 1);
+});
+
+test("release monitor fails closed for absent or malformed releases", async () => {
+  const absent = createReleaseMonitor({
+    now: T0,
+    fetchImpl: async () => new Response(null, { status: 404 }),
+  });
+  assert.deepEqual(
+    await absent.snapshot("3.1.0"),
+    {
+      repository: "HUBTECH-DEV/hch-worker",
+      channel: "stable",
+      currentVersion: "3.1.0",
+      latestVersion: null,
+      updateAvailable: false,
+      releaseUrl: null,
+      publishedAt: null,
+      checkedAt: T0.toISOString(),
+      status: "no-release",
+      errorCode: null,
+    },
+  );
+  const malformed = createReleaseMonitor({
+    now: T0,
+    fetchImpl: async () => new Response(JSON.stringify({
+      tag_name: "v999",
+      draft: false,
+      prerelease: false,
+      html_url: "https://attacker.invalid/release",
+      published_at: "invalid",
+    }), { status: 200 }),
+  });
+  const snapshot = await malformed.snapshot("3.1.0");
+  assert.equal(snapshot.updateAvailable, false);
+  assert.equal(snapshot.status, "error");
+  assert.equal(snapshot.errorCode, "release-version-invalid");
+});
+
+test("update handoff invokes only the fixed backend and records a sanitized result", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const backendRoot = join(directory, "backend");
+  const stateDirectory = join(directory, "state");
+  await mkdir(backendRoot);
+  await mkdir(stateDirectory);
+  const backend = join(backendRoot, "hch-worker-update-backend");
+  await writeFile(backend, "placeholder\n", "utf8");
+  const calls = [];
+  const result = await runUpdateHandoff(
+    ["apply", "--target-version", "3.2.0"],
+    {
+      backendRoot: await realpath(backendRoot),
+      stateDirectory: await realpath(stateDirectory),
+      backend: await realpath(backend),
+      execFileImpl(file, args, options, callback) {
+        calls.push({ file, args, options });
+        queueMicrotask(() => callback(null, "private output", "private error"));
+      },
+    },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.targetVersion, "3.2.0");
+  assert.deepEqual(calls.map(({ file, args }) => ({ file, args })), [{
+    file: await realpath(backend),
+    args: ["apply", "--target-version", "3.2.0"],
+  }]);
+  assert.equal(calls[0].options.shell, false);
+  const status = JSON.parse(await readFile(join(stateDirectory, "worker-release-update.json"), "utf8"));
+  assert.equal(status.status, "succeeded");
+  assert.equal(status.targetVersion, "3.2.0");
+  assert.equal(JSON.stringify(status).includes("private"), false);
+  await assert.rejects(
+    runUpdateHandoff(["apply", "--target-version", "3.2.0;evil"], {
+      backend: await realpath(backend),
+      backendRoot: await realpath(backendRoot),
+      stateDirectory: await realpath(stateDirectory),
+    }),
+    /usage:/,
+  );
+});
 
 test("dashboard reads the native HCH worker status and metrics contracts", async (t) => {
   const directory = await mkdtemp(join(tmpdir(),"hch-native-dashboard-"));
@@ -764,6 +868,7 @@ test("dashboard serves an accessible page and a no-store status API", async (t) 
     host: "127.0.0.1",
     port: 0,
     dataDirectory: directory,
+    releaseFetch: async () => new Response(null, { status: 404 }),
     now: new Date("2026-08-11T21:01:05Z"),
     processStartedAt: new Date("2026-08-11T21:00:55Z"),
   });
@@ -792,6 +897,7 @@ test("dashboard serves an accessible page and a no-store status API", async (t) 
   }]);
   assert.deepEqual(status.control, {
     available: false,
+    updateEnabled: false,
     busy: false,
     lastAction: null,
     lastActionAt: null,
@@ -1045,11 +1151,15 @@ test("fixed Node.js worker control executes only the canonical local script", as
   const scriptDirectory = join(directory, "control");
   await mkdir(scriptDirectory, { recursive: true });
   const controlScriptPath = join(scriptDirectory, "hch-worker-control.mjs");
+  const updateScriptPath = join(scriptDirectory, "hch-worker-update.mjs");
   await writeFile(controlScriptPath, "export {};\n", "utf8");
+  await writeFile(updateScriptPath, "export {};\n", "utf8");
   const options = {
     driver: "fixed-node-script",
     controlScriptPath: await realpath(controlScriptPath),
     controlScriptRootPath: await realpath(scriptDirectory),
+    updateScriptPath: await realpath(updateScriptPath),
+    updateScriptRootPath: await realpath(scriptDirectory),
     controlTimeoutMilliseconds: 10_000,
   };
   const config = resolveWorkerControlConfig(options);
@@ -1071,10 +1181,15 @@ test("fixed Node.js worker control executes only the canonical local script", as
     await executeWorkerControlAction(config, { action: "set-parallelism", parallelism: 6 }, { execFileImpl }),
     { ok: true, action: "set-parallelism", requestedState: "parallelism-updating", parallelism: 6 },
   );
+  assert.deepEqual(
+    await executeWorkerControlAction(config, { action: "update", targetVersion: "3.2.0" }, { execFileImpl }),
+    { ok: true, action: "update", requestedState: "updating" },
+  );
   assert.deepEqual(calls.map((call) => call.args), [
     ["--", options.controlScriptPath, "start"],
     ["--", options.controlScriptPath, "stop"],
     ["--", options.controlScriptPath, "set-parallelism", "6"],
+    ["--", options.updateScriptPath, "apply", "--target-version", "3.2.0"],
   ]);
   for (const call of calls) {
     assert.equal(call.file, realpathSync(process.execPath));
@@ -1085,7 +1200,7 @@ test("fixed Node.js worker control executes only the canonical local script", as
       LANG: "C",
       LC_ALL: "C",
     });
-    assert.ok(call.args.length === 3 || call.args.length === 4);
+    assert.ok(call.args.length === 3 || call.args.length === 4 || call.args.length === 5);
   }
   const wrongScript = join(scriptDirectory, "worker.mjs");
   await writeFile(wrongScript, "export {};\n", "utf8");
@@ -1105,6 +1220,7 @@ test("control API enforces same-origin CSRF and never exposes command output", a
     host: "127.0.0.1",
     port: 0,
     dataDirectory: fixture.dataDirectory,
+    releaseFetch: async () => new Response(null, { status: 404 }),
     ...fixture,
     controlCsrfToken: "A".repeat(43),
     controlExecFile(file, args, options, callback) {
@@ -1164,6 +1280,11 @@ test("control API enforces same-origin CSRF and never exposes command output", a
   const unsupportedAction = await postControl(base, contract.csrfToken, { action: "configure" });
   assert.equal(unsupportedAction.status, 400);
 
+  const noReleaseUpdate = await postControl(base, contract.csrfToken, { action: "update" });
+  assert.equal(noReleaseUpdate.status, 409);
+  assert.equal((await noReleaseUpdate.json()).error, "worker-update-not-available");
+  assert.equal(calls.length, 0);
+
   const malformed = await postControl(base, contract.csrfToken, "{");
   assert.equal(malformed.status, 400);
 
@@ -1219,6 +1340,7 @@ test("control API serializes actions and sanitizes execution failures", async (t
     host: "127.0.0.1",
     port: 0,
     dataDirectory: fixture.dataDirectory,
+    releaseFetch: async () => new Response(null, { status: 404 }),
     ...fixture,
     controlCsrfToken: "C".repeat(43),
     controlExecFile(_file, _args, _options, callback) {
@@ -1268,6 +1390,7 @@ test("disabled control endpoint never invokes an executor", async (t) => {
     host: "127.0.0.1",
     port: 0,
     dataDirectory: directory,
+    releaseFetch: async () => new Response(null, { status: 404 }),
     controlExecFile() { invocations += 1; },
   });
   t.after(() => new Promise((resolvePromise) => running.server.close(resolvePromise)));
@@ -1289,7 +1412,12 @@ test("unsafe, oversized, and malformed snapshots are rejected without path discl
   assert.deepEqual(state, { ok: false, code: "invalid-json" });
   assert.deepEqual(metrics, { ok: false, code: "too-large" });
 
-  const running = await listenDashboard({ host: "127.0.0.1", port: 0, dataDirectory: directory });
+  const running = await listenDashboard({
+    host: "127.0.0.1",
+    port: 0,
+    dataDirectory: directory,
+    releaseFetch: async () => new Response(null, { status: 404 }),
+  });
   t.after(() => new Promise((resolvePromise) => running.server.close(resolvePromise)));
   const response = await fetch(`http://127.0.0.1:${running.address.port}/api/status`);
   const body = await response.text();

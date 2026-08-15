@@ -428,7 +428,7 @@ test("cycle, persistent Windows Service and CLI are opt-in and fail closed by st
   assert.match(serviceSource, /RunDashboardSupervisor/);
   assert.match(serviceSource, /"--host", "127\.0\.0\.1"/);
   assert.match(dashboardControlSource, /shell:\s*false/);
-  assert.match(dashboardControlSource, /new Set\(\["start", "pause", "stop", "set-parallelism"\]\)/);
+  assert.match(dashboardControlSource, /new Set\(\["start", "pause", "stop", "set-parallelism", "update"\]\)/);
   assert.doesNotMatch(dashboardControlSource, /shell:\s*true|"-Command"|'\-Command'/);
 });
 

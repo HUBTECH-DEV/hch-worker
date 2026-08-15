@@ -1,9 +1,6 @@
 {
-  "schemaVersion": "1.0",
-  "projectName": "HCH Worker",
-  "createdAt": "2026-08-14T21:10:48-03:00",
-  "lastUpdated": "2026-08-15T10:24:57-03:00",
-  "currentVersion": 2,
+  "version": 2,
+  "createdAt": "2026-08-15T10:24:57-03:00",
   "agentConfigurationPrompt": "Manter o repositório HUBTECH-DEV/hch-worker como fonte canônica do Worker HCH e implantar alterações com rollout reversível e evidência operacional antes de qualquer promoção de versão.",
   "agentProfile": "Principal Implementation Engineer / Deployment Engineer; Principal Git Engineer",
   "projectRules": [

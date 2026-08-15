@@ -227,7 +227,41 @@ function render(status) {
   renderRunningJobs(status.workload.runningJobIds);
   renderBatch(status.workload.currentBatch, status.workload, status.adaptiveWork);
   renderWorkerControl(status);
+  renderWorkerUpdate(status);
   byId("telemetry-meta").textContent = `Telemetria r${status.telemetry.revision} · ${status.telemetry.eventsAccepted} eventos · ${formatTime(status.telemetry.updatedAt)}`;
+}
+
+function renderWorkerUpdate(status) {
+  const panel = byId("worker-update");
+  const state = byId("update-state");
+  const summary = byId("update-summary");
+  const meta = byId("update-meta");
+  const button = byId("control-update");
+  const updates = status?.updates ?? {};
+  const busy = localControlBusy || status?.control?.busy === true || controlContract?.busy === true;
+  const canExecute = status?.control?.updateEnabled === true &&
+    controlContract?.updateEnabled === true && typeof controlCsrfToken === "string";
+  panel.setAttribute("aria-busy", String(busy));
+  button.hidden = updates.updateAvailable !== true;
+  button.disabled = updates.updateAvailable !== true || !canExecute || busy;
+  if (updates.status === "error") {
+    setControlState(state, "Consulta indisponível", "warning");
+    summary.textContent = "Não foi possível confirmar a release mais recente agora.";
+  } else if (updates.updateAvailable === true) {
+    setControlState(state, "Atualização disponível", "warning");
+    summary.textContent = `Worker ${updates.currentVersion ?? "—"}; release ${updates.latestVersion}.`;
+  } else if (updates.status === "no-release") {
+    setControlState(state, "Sem release", "neutral");
+    summary.textContent = "O repositório ainda não possui uma release estável publicada.";
+  } else {
+    setControlState(state, "Atualizado", "good");
+    summary.textContent = `Worker ${updates.currentVersion ?? "—"}; nenhuma versão mais nova foi encontrada.`;
+  }
+  meta.textContent = [
+    updates.checkedAt ? `Verificado ${formatTime(updates.checkedAt)}` : null,
+    updates.publishedAt ? `publicada ${formatTime(updates.publishedAt)}` : null,
+    updates.updateAvailable && !canExecute ? "executor administrativo não habilitado" : null,
+  ].filter(Boolean).join(" · ") || "Aguardando a primeira consulta.";
 }
 
 function renderAdaptiveWork(adaptiveWork) {
@@ -443,8 +477,8 @@ function setControlState(element, label, tone) {
   element.dataset.tone = tone;
 }
 
-function setControlFeedback(message, tone = "neutral") {
-  const feedback = byId("control-feedback");
+function setControlFeedback(message, tone = "neutral", target = "control-feedback") {
+  const feedback = byId(target);
   feedback.textContent = message;
   feedback.dataset.tone = tone;
 }
@@ -471,11 +505,14 @@ async function refreshControlContract() {
     controlContract = { available: false, busy: false };
     controlCsrfToken = null;
   }
-  if (latestStatus) renderWorkerControl(latestStatus);
+  if (latestStatus) {
+    renderWorkerControl(latestStatus);
+    renderWorkerUpdate(latestStatus);
+  }
 }
 
 function requestControlConfirmation(action, trigger) {
-  if (!new Set(["start", "pause", "stop"]).has(action) || localControlBusy) return;
+  if (!new Set(["start", "pause", "stop", "update"]).has(action) || localControlBusy) return;
   pendingControlAction = action;
   lastControlTrigger = trigger;
   const dialog = byId("control-confirmation");
@@ -490,10 +527,14 @@ function requestControlConfirmation(action, trigger) {
     title.textContent = "Pausar processamento?";
     description.textContent = "Novos claims serão bloqueados. Assignments já ativos não serão interrompidos e seguirão até uma finalização segura.";
     submit.textContent = "Pausar processamento";
-  } else {
+  } else if (action === "stop") {
     title.textContent = "Parar e cancelar trabalhos ativos?";
     description.textContent = "Novos claims serão bloqueados. Cada gerador ativo será cancelado e a falha operator-stop-requested será relatada ao orquestrador.";
     submit.textContent = "Parar e cancelar";
+  } else {
+    title.textContent = "Atualizar o worker?";
+    description.textContent = "O executor local bloqueará novos claims, aguardará o drain, aplicará a release e validará o worker. Em falha, deverá restaurar a versão anterior.";
+    submit.textContent = "Atualizar";
   }
   if (typeof dialog.showModal === "function") {
     if (!dialog.open) dialog.showModal();
@@ -512,16 +553,19 @@ function closeControlConfirmation() {
 }
 
 async function performControlAction(action, parallelism) {
-  if (!new Set(["start", "pause", "stop", "set-parallelism"]).has(action) ||
+  if (!new Set(["start", "pause", "stop", "set-parallelism", "update"]).has(action) ||
       localControlBusy || typeof controlCsrfToken !== "string") return;
   localControlBusy = true;
   renderWorkerControl(latestStatus);
+  renderWorkerUpdate(latestStatus);
   setControlFeedback(
     action === "start" ? "Solicitando início ao worker local…" :
       action === "pause" ? "Solicitando pausa sem interromper trabalhos ativos…" :
         action === "stop" ? "Solicitando cancelamento reportado dos trabalhos ativos…" :
-          `Aplicando paralelismo ${parallelism}…`,
+          action === "update" ? "Solicitando atualização segura ao executor local…" :
+            `Aplicando paralelismo ${parallelism}…`,
     "warning",
+    action === "update" ? "update-feedback" : "control-feedback",
   );
   try {
     const response = await fetch("/api/control", {
@@ -550,21 +594,37 @@ async function performControlAction(action, parallelism) {
           ? "Pausa aplicada. Assignments ativos continuarão até a finalização segura."
           : action === "stop"
             ? "Parada solicitada. Cancelamentos ativos serão relatados ao orquestrador."
+            : action === "update"
+              ? "Atualização entregue ao executor local. O painel acompanhará a nova versão após a reinicialização."
             : parallelism === 0
               ? "Paralelismo zero aplicado como pausa; trabalhos ativos foram preservados."
               : `Paralelismo ${parallelism} solicitado; a concessão efetiva permanece central.`,
       "good",
+      action === "update" ? "update-feedback" : "control-feedback",
     );
   } catch (error) {
-    setControlFeedback(controlErrorMessage(error?.publicCode, error?.statusCode), "critical");
+    setControlFeedback(
+      controlErrorMessage(error?.publicCode, error?.statusCode),
+      "critical",
+      action === "update" ? "update-feedback" : "control-feedback",
+    );
   } finally {
     await Promise.all([refreshControlContract(), refresh()]);
     localControlBusy = false;
-    if (latestStatus) renderWorkerControl(latestStatus);
+    if (latestStatus) {
+      renderWorkerControl(latestStatus);
+      renderWorkerUpdate(latestStatus);
+    }
   }
 }
 
 function controlErrorMessage(code, statusCode) {
+  if (code === "worker-update-not-available") {
+    return "A release foi revalidada e já não há uma atualização aplicável.";
+  }
+  if (code === "worker-update-unavailable") {
+    return "O executor administrativo de atualização não está habilitado neste host.";
+  }
   if (code === "worker-control-busy" || statusCode === 409) {
     return "Outra ação local ainda está em andamento. Aguarde e tente novamente.";
   }
@@ -631,6 +691,9 @@ byId("control-pause").addEventListener("click", (event) => {
 });
 byId("control-stop").addEventListener("click", (event) => {
   requestControlConfirmation("stop", event.currentTarget);
+});
+byId("control-update").addEventListener("click", (event) => {
+  requestControlConfirmation("update", event.currentTarget);
 });
 byId("control-apply-parallelism").addEventListener("click", () => {
   const value = Number(byId("control-parallelism").value);

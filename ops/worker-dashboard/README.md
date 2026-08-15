@@ -23,6 +23,9 @@ Ele apresenta:
   último progresso e liveness (`respondendo lentamente` ou `travado`);
 - botões com confirmação para `start` e `stop`, quando o launcher confiável
   fornece os caminhos locais fixos do kit.
+- descoberta periódica da última release estável e botão `Atualizar` somente
+  quando a versão instalada estiver atrás e o executor administrativo fixo
+  estiver habilitado.
 
 ## Componentes
 
@@ -67,11 +70,20 @@ Variáveis opcionais:
 HCH_WORKER_DASHBOARD_HOST=127.0.0.1
 HCH_WORKER_DASHBOARD_PORT=4319
 HCH_WORKER_DASHBOARD_DATA_DIR=/caminho/privado/worker-dashboard
+HCH_WORKER_RELEASE_REPOSITORY=HUBTECH-DEV/hch-worker
+HCH_WORKER_RELEASE_CHECK_INTERVAL_MS=900000
+HCH_WORKER_UPDATE_SCRIPT=/caminho-confiavel/hch-worker-update.mjs
+HCH_WORKER_UPDATE_SCRIPT_ROOT=/caminho-confiavel
 ```
 
 O host aceita somente `127.0.0.1`, `::1` ou `localhost`. Isso protege o painel
 local e não impõe qualquer bloqueio de IP à API central do orquestrador. Workers
 continuam podendo operar em redes e endereços variáveis.
+
+O GitHub é usado somente para descobrir a release. A instalação é entregue a
+um executor administrativo local fixo; o navegador nunca fornece versão, URL ou
+comando. O contrato completo de drain, verificação, instalação e rollback está
+em [`docs/worker-release-updates.md`](../../docs/worker-release-updates.md).
 
 ## Preparar os snapshots
 

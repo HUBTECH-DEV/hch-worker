@@ -1,0 +1,17 @@
+{
+  "chatName": "automatic-release-updates",
+  "createdAt": "2026-08-15T10:24:57-03:00",
+  "lastUpdated": "2026-08-15T10:24:57-03:00",
+  "messages": [
+    {
+      "timestamp": "2026-08-15T10:24:57-03:00",
+      "role": "user",
+      "content": "Como implementar atualização automática dos workers quando houver nova release? O painel poderia mostrar um botão \"Atualizar\" quando a release dele estiver desatualizada. Consegue implementar? Faça o Commit e Push no Git assim que resolver este ponto."
+    },
+    {
+      "timestamp": "2026-08-15T10:24:57-03:00",
+      "role": "assistant",
+      "content": "Implementada descoberta automática de release estável, exibição condicional do botão Atualizar, controle local protegido e handoff para executor administrativo fixo; processo de atualização, drain, validação e rollback documentado. Alteração testada, commitada e enviada ao GitHub."
+    }
+  ]
+}

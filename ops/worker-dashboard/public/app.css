@@ -249,6 +249,8 @@ main > section {
   cursor: pointer;
 }
 
+.control-button[hidden] { display: none !important; }
+
 .control-button.primary {
   color: #07100d;
   background: var(--accent);

@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 
 import { buildDashboardStatus } from "./lib/status.mjs";
+import { createReleaseMonitor } from "./lib/releases.mjs";
 import {
   executeWorkerControlAction,
   resolveWorkerControlConfig,
@@ -50,6 +51,10 @@ export function resolveDashboardConfig(options = {}) {
         DEFAULT_DATA_DIRECTORY,
     ),
     staleAfterMilliseconds: options.staleAfterMilliseconds ?? 120_000,
+    releaseRepository: options.releaseRepository ??
+      process.env.HCH_WORKER_RELEASE_REPOSITORY ?? "HUBTECH-DEV/hch-worker",
+    releaseCheckIntervalMilliseconds: options.releaseCheckIntervalMilliseconds ??
+      process.env.HCH_WORKER_RELEASE_CHECK_INTERVAL_MS ?? 15 * 60_000,
     workerControl: resolveWorkerControlConfig({
       driver: options.controlDriver,
       workerCliPath: options.workerCliPath,
@@ -60,6 +65,8 @@ export function resolveDashboardConfig(options = {}) {
       workerConfigRootPath: options.workerConfigRootPath,
       powershellRootPath: options.powershellRootPath,
       controlScriptRootPath: options.controlScriptRootPath,
+      updateScriptPath: options.updateScriptPath ?? process.env.HCH_WORKER_UPDATE_SCRIPT,
+      updateScriptRootPath: options.updateScriptRootPath ?? process.env.HCH_WORKER_UPDATE_SCRIPT_ROOT,
       controlTimeoutMilliseconds: options.controlTimeoutMilliseconds,
       controlPlaneTimeoutSeconds: options.controlPlaneTimeoutSeconds,
     }),
@@ -74,6 +81,12 @@ export function createDashboardServer(options = {}) {
     now: options.controlNow,
     csrfToken: options.controlCsrfToken,
   });
+  const releaseMonitor = options.releaseMonitor ?? createReleaseMonitor({
+    repository: config.releaseRepository,
+    intervalMilliseconds: config.releaseCheckIntervalMilliseconds,
+    fetchImpl: options.releaseFetch,
+    now: options.releaseNow,
+  });
   const server = createServer(async (request, response) => {
     try {
       await handleRequest(request, response, {
@@ -81,6 +94,7 @@ export function createDashboardServer(options = {}) {
         processStartedAt,
         now: options.now,
         control,
+        releaseMonitor,
       });
     } catch {
       sendJson(response, 500, { error: "dashboard-internal-error" }, true);
@@ -150,8 +164,10 @@ async function handleRequest(request, response, context) {
       processStartedAt: context.processStartedAt,
       staleAfterMilliseconds: context.staleAfterMilliseconds,
     });
+    const updates = await context.releaseMonitor.snapshot(status.worker.version);
     sendJson(response, 200, {
       ...status,
+      updates,
       control: context.control.snapshot(false),
     }, true, method === "HEAD");
     return;
@@ -200,7 +216,20 @@ async function handleControlPost(request, response, context) {
   try {
     assertControlRequestHeaders(request, context.control);
     const payload = await readControlPayload(request);
-    const result = await context.control.run(payload);
+    let requested = payload;
+    if (payload.action === "update") {
+      const current = await buildDashboardStatus(context.dataDirectory, {
+        now: context.now,
+        processStartedAt: context.processStartedAt,
+        staleAfterMilliseconds: context.staleAfterMilliseconds,
+      });
+      const updates = await context.releaseMonitor.snapshot(current.worker.version, { force: true });
+      if (!updates.updateAvailable || !updates.latestVersion) {
+        throw new ControlHttpError(409, "worker-update-not-available");
+      }
+      requested = { action: "update", targetVersion: updates.latestVersion };
+    }
+    const result = await context.control.run(requested);
     const status = await buildDashboardStatus(context.dataDirectory, {
       now: context.now,
       processStartedAt: context.processStartedAt,
@@ -221,7 +250,8 @@ async function handleControlPost(request, response, context) {
       return;
     }
     if (error instanceof WorkerControlExecutionError) {
-      const statusCode = error.code === "worker-control-unavailable"
+      const statusCode = error.code === "worker-control-unavailable" ||
+        error.code === "worker-update-unavailable"
         ? 503
         : error.code === "worker-control-busy"
           ? 409
@@ -251,6 +281,7 @@ function createControlState(config, options = {}) {
     snapshot(includeToken) {
       return {
         available: config.enabled === true,
+        updateEnabled: config.enabled === true && config.updateEnabled === true,
         busy,
         lastAction,
         lastActionAt,
@@ -353,7 +384,7 @@ async function readControlPayload(request) {
   }
   const keys = value && typeof value === "object" && !Array.isArray(value)
     ? Object.keys(value) : [];
-  const simple = keys.length === 1 && new Set(["start", "pause", "stop"]).has(value?.action);
+  const simple = keys.length === 1 && new Set(["start", "pause", "stop", "update"]).has(value?.action);
   const parallel = keys.length === 2 && value?.action === "set-parallelism" &&
     keys.every((key) => new Set(["action", "parallelism"]).has(key)) &&
     Number.isSafeInteger(value.parallelism) && value.parallelism >= 0 && value.parallelism <= 64;
@@ -468,11 +499,23 @@ function parseCliArguments(argv) {
     else if (argument === "--control-script-root") {
       options.controlScriptRootPath = requiredValue(args, argument);
     }
+    else if (argument === "--update-script") {
+      options.updateScriptPath = requiredValue(args, argument);
+    }
+    else if (argument === "--update-script-root") {
+      options.updateScriptRootPath = requiredValue(args, argument);
+    }
     else if (argument === "--control-timeout-ms") {
       options.controlTimeoutMilliseconds = requiredValue(args, argument);
     }
     else if (argument === "--control-plane-timeout-seconds") {
       options.controlPlaneTimeoutSeconds = requiredValue(args, argument);
+    }
+    else if (argument === "--release-repository") {
+      options.releaseRepository = requiredValue(args, argument);
+    }
+    else if (argument === "--release-check-interval-ms") {
+      options.releaseCheckIntervalMilliseconds = requiredValue(args, argument);
     }
     else throw new TypeError("Unsupported dashboard argument.");
   }

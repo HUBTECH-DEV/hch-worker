@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0",
   "projectName": "HCH Worker",
-  "currentVersion": 1,
+  "currentVersion": 2,
   "versions": [
     {
       "version": 1,
@@ -12,6 +12,17 @@
       "previousVersion": null,
       "newVersion": 1,
       "snapshotFile": "history/v0001.json",
+      "rollback": null
+    },
+    {
+      "version": 2,
+      "timestamp": "2026-08-15T10:24:57-03:00",
+      "changedBy": "user",
+      "reason": "Implementar descoberta automática de releases e atualização acionada pelo painel.",
+      "summary": "Adiciona descoberta automática com aplicação manual, executor local fixo e gates obrigatórios de drain, validação e rollback.",
+      "previousVersion": 1,
+      "newVersion": 2,
+      "snapshotFile": "history/v0002.json",
       "rollback": null
     }
   ]

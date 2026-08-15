@@ -8,7 +8,7 @@ import {
   resolve,
 } from "node:path";
 
-const ACTIONS = new Set(["start", "pause", "stop", "set-parallelism"]);
+const ACTIONS = new Set(["start", "pause", "stop", "set-parallelism", "update"]);
 const DRIVERS = new Set(["windows-powershell", "fixed-node-script"]);
 
 export class WorkerControlExecutionError extends Error {
@@ -28,7 +28,7 @@ export function resolveWorkerControlConfig(options = {}) {
   if (!DRIVERS.has(driver)) {
     throw new TypeError("Worker control driver is unsupported.");
   }
-  if (driver === "fixed-node-script") return resolveFixedNodeScriptConfig(options);
+  if (driver === "fixed-node-script") return withUpdateExecutor(resolveFixedNodeScriptConfig(options), options);
   const supplied = [
     options.workerCliPath,
     options.workerConfigPath,
@@ -38,7 +38,7 @@ export function resolveWorkerControlConfig(options = {}) {
     options.powershellRootPath,
   ];
   if (supplied.every((value) => value === undefined || value === null || value === "")) {
-    return Object.freeze({ enabled: false });
+    return withUpdateExecutor({ enabled: false }, options);
   }
   if (supplied.some((value) => typeof value !== "string" || !value.trim())) {
     throw new TypeError(
@@ -95,7 +95,7 @@ export function resolveWorkerControlConfig(options = {}) {
     3,
     30,
   );
-  return Object.freeze({
+  return withUpdateExecutor({
     enabled: true,
     driver: "windows-powershell",
     workerCliPath,
@@ -107,13 +107,16 @@ export function resolveWorkerControlConfig(options = {}) {
     workingDirectory: workerCliRootPath,
     timeoutMilliseconds,
     controlPlaneTimeoutSeconds,
-  });
+  }, options);
 }
 
 export async function executeWorkerControlAction(config,request,options = {}) {
   if (!config?.enabled) throw new WorkerControlExecutionError("worker-control-unavailable");
-  const { action, parallelism } = normalizeControlRequest(request);
+  const { action, parallelism, targetVersion } = normalizeControlRequest(request);
   if (!ACTIONS.has(action)) throw new WorkerControlExecutionError("worker-control-action-invalid");
+  if (action === "update") {
+    return executeUpdateAction(config, targetVersion, options);
+  }
   if (config.driver === "fixed-node-script") {
     return executeFixedNodeScriptAction(config, action, parallelism, options);
   }
@@ -273,17 +276,92 @@ function normalizeControlRequest(value) {
     }
     return { action: request.action, parallelism: request.parallelism };
   }
+  if (request.action === "update") {
+    if (typeof request.targetVersion !== "string" ||
+        !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(request.targetVersion)) {
+      throw new WorkerControlExecutionError("worker-control-update-version-invalid");
+    }
+    return { action: request.action, parallelism: undefined, targetVersion: request.targetVersion };
+  }
   if (request.parallelism !== undefined) {
     throw new WorkerControlExecutionError("worker-control-action-invalid");
   }
-  return { action: request.action, parallelism: undefined };
+  return { action: request.action, parallelism: undefined, targetVersion: undefined };
 }
 
 function requestedState(action, parallelism) {
   if (action === "start") return "starting";
   if (action === "pause") return "pausing";
   if (action === "stop") return "stopping";
+  if (action === "update") return "updating";
   return parallelism === 0 ? "pausing" : "parallelism-updating";
+}
+
+function withUpdateExecutor(base, options) {
+  const supplied = [options.updateScriptPath, options.updateScriptRootPath];
+  if (supplied.every((value) => value === undefined || value === null || value === "")) {
+    return Object.freeze({ ...base, updateEnabled: false });
+  }
+  if (supplied.some((value) => typeof value !== "string" || !value.trim())) {
+    throw new TypeError("Worker update requires a fixed updater script and trusted-root path.");
+  }
+  const updateScriptRootPath = trustedCanonicalDirectory(
+    options.updateScriptRootPath,
+    "worker update script root",
+  );
+  const updateScriptPath = trustedDirectChild(
+    options.updateScriptPath,
+    "worker update script",
+    updateScriptRootPath,
+  );
+  if (basename(updateScriptPath) !== "hch-worker-update.mjs") {
+    throw new TypeError("Worker update script must be hch-worker-update.mjs.");
+  }
+  return Object.freeze({
+    ...base,
+    updateEnabled: true,
+    updateScriptPath,
+    updateScriptRootPath,
+  });
+}
+
+async function executeUpdateAction(config, targetVersion, options) {
+  if (!config.updateEnabled) {
+    throw new WorkerControlExecutionError("worker-update-unavailable");
+  }
+  const updateConfig = withUpdateExecutor({}, {
+    updateScriptPath: config.updateScriptPath,
+    updateScriptRootPath: config.updateScriptRootPath,
+  });
+  const execFileImpl = options.execFileImpl ?? nodeExecFile;
+  await executeFixedFile(execFileImpl, process.execPath, [
+    "--",
+    updateConfig.updateScriptPath,
+    "apply",
+    "--target-version",
+    targetVersion,
+  ], {
+    cwd: updateConfig.updateScriptRootPath,
+    timeout: config.timeoutMilliseconds ?? 300_000,
+    windowsHide: process.platform === "win32",
+    env: {
+      PATH: process.platform === "win32" ? process.env.PATH ?? "" : "/usr/bin:/bin:/usr/sbin:/sbin",
+      LANG: "C",
+      LC_ALL: "C",
+      ...(typeof process.env.HCH_EDITORIAL_WORKER_CONFIG === "string"
+        ? { HCH_EDITORIAL_WORKER_CONFIG: process.env.HCH_EDITORIAL_WORKER_CONFIG }
+        : {}),
+      ...absoluteEnvironment("HCH_WORKER_UPDATE_STATE_DIR"),
+      ...absoluteEnvironment("HCH_WORKER_UPDATE_BACKEND"),
+      ...absoluteEnvironment("HCH_WORKER_UPDATE_BACKEND_ROOT"),
+    },
+  });
+  return Object.freeze({ ok: true, action: "update", requestedState: "updating" });
+}
+
+function absoluteEnvironment(name) {
+  const value = process.env[name];
+  return typeof value === "string" && isAbsolute(value) ? { [name]: value } : {};
 }
 
 function executeFixedFile(execFileImpl, file, args, options) {

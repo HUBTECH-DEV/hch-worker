@@ -84,6 +84,28 @@
         <p id="control-feedback" class="control-feedback" role="status" aria-live="polite" aria-atomic="true"></p>
       </section>
 
+      <section id="worker-update" class="worker-controls" aria-labelledby="update-title" aria-busy="false">
+        <div class="section-heading control-heading">
+          <div>
+            <p class="section-kicker">Canal estável</p>
+            <h2 id="update-title">Atualização do worker</h2>
+          </div>
+          <span id="update-state" class="status" data-tone="neutral">Verificando</span>
+        </div>
+        <div class="control-layout">
+          <div>
+            <p id="update-summary" class="control-summary">Consultando releases publicadas.</p>
+            <p id="update-meta" class="metric-note">A instalação exige o executor administrativo local.</p>
+          </div>
+          <div class="control-actions">
+            <button id="control-update" class="control-button primary" type="button" hidden disabled>
+              Atualizar
+            </button>
+          </div>
+        </div>
+        <p id="update-feedback" class="control-feedback" role="status" aria-live="polite" aria-atomic="true"></p>
+      </section>
+
       <section id="alerts-section" class="alerts" aria-labelledby="alerts-title">
         <div class="section-heading">
           <div>
