@@ -1778,7 +1778,9 @@ function Set-HchWorkerStatus {
     $script:LastTrustObservation
   } elseif ($null -ne $ready) {
     [ordered]@{
-      status = if ($isReady) { 'verified' } else { 'expired' }
+      # The renewable ready lease can expire without invalidating the verified
+      # root/release/manifest signature chain.
+      status = 'verified'
       rootKeyId = Get-HchNestedValue -InputObject $ready -Path @('rootKeyId') -Default $null
       releaseKeyId = Get-HchNestedValue -InputObject $ready -Path @('releaseKeyId') -Default $null
       manifestSequence = [long]$ready.manifestSequence
@@ -2722,6 +2724,24 @@ function New-HchUpdateReceipt {
 function Invoke-HchWorkerBootstrap {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][hashtable]$Config)
+  # Cycle and node-heartbeat run in separate service processes. Serialize the
+  # trust/update transaction so both cannot replace trust-state.json together.
+  $bootstrapLockPath = Join-Path ([string]$Config.StateRoot) 'bootstrap.lock'
+  $bootstrapLock = $null
+  $lockDeadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
+  while ($null -eq $bootstrapLock -and [DateTimeOffset]::UtcNow -lt $lockDeadline) {
+    try {
+      $bootstrapLock = [IO.File]::Open(
+        $bootstrapLockPath,
+        [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None
+      )
+    } catch [IO.IOException] {
+      Start-Sleep -Milliseconds 250
+    }
+  }
+  if ($null -eq $bootstrapLock) { throw 'worker-bootstrap-already-running' }
   $transaction = $null
   $timer = [Diagnostics.Stopwatch]::StartNew()
   try {
@@ -2750,13 +2770,17 @@ function Invoke-HchWorkerBootstrap {
     Disable-HchWorkerReady -Config $Config -Reason 'manifest-update-started'
     Set-HchWorkerStatus -Config $Config -State 'updating'
     $nonce = Get-HchChallenge -Config $Config -Identity $identity -Purpose 'bootstrap'
+    $bootstrapControl = Get-HchWorkerControl -Config $Config
+    $bootstrapRequestedCapacity = if ([bool]$bootstrapControl.acceptingClaims) {
+      [int]$bootstrapControl.requestedParallelism
+    } else { 0 }
     $bootstrapBody = [ordered]@{
       nodeId = [string]$Config.NodeId
       workerKeyId = [string]$identity.keyId
       platform = 'windows'
       architecture = [string]$env:PROCESSOR_ARCHITECTURE
       hostname = [Environment]::MachineName
-      requestedCapacity = [int](Get-HchConfigValue $Config 'RequestedCapacity' 1)
+      requestedCapacity = $bootstrapRequestedCapacity
       manifestSequence = [long]$manifest.Payload.sequence
       manifestHash = [string]$manifest.ManifestHash
       workerRuntimeVersion = $script:KitVersion
@@ -2949,6 +2973,7 @@ function Invoke-HchWorkerBootstrap {
     throw
   } finally {
     $timer.Stop()
+    $bootstrapLock.Dispose()
   }
 }
 

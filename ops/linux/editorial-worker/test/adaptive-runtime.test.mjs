@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
@@ -25,6 +25,7 @@ import {
 } from "../lib/generator.mjs";
 import {
   runPortableSupervisor,
+  renewReadyAttestation,
   startAssignmentHeartbeat,
   stopHeartbeatBeforeComplete,
 } from "../lib/supervisor.mjs";
@@ -358,6 +359,7 @@ test("portable supervisor keeps heartbeat at capacity zero and never claims", as
       return heartbeatSnapshot(0, false);
     },
     runAssignment: async () => { workStarts += 1; },
+    bootstrapWorkerLocked: async () => ({ ready: true }),
   });
   assert.equal(result.cycles, 3);
   assert.equal(heartbeats, 3);
@@ -389,12 +391,28 @@ test("portable supervisor honors the orchestrator parallel-work target", async (
       await held;
       active -= 1;
     },
+    bootstrapWorkerLocked: async () => ({ ready: true }),
   });
   assert.equal(result.cycles, 3);
   assert.equal(result.activeWorkers, 3);
   assert.equal(starts, 3);
   assert.equal(maximumActive, 3);
   release();
+});
+
+test("portable readiness renewal is independent from capacity zero", async (t) => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "hch-portable-ready-"));
+  t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  await writeFile(join(stateRoot, "ready.json"), JSON.stringify({
+    ready: true,
+    readyUntil: "2026-08-15T00:15:00.000Z",
+  }));
+  let renewals = 0;
+  await renewReadyAttestation({ requestedCapacity: 0 }, stateRoot, {
+    now: () => Date.parse("2026-08-15T00:14:00.000Z"),
+    bootstrapWorkerLocked: async () => { renewals += 1; return { ready: true }; },
+  });
+  assert.equal(renewals, 1);
 });
 
 function heartbeatSnapshot(capacity, allowed, recommendedCount = allowed ? 1 : 0) {

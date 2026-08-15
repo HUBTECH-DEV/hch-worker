@@ -1,5 +1,20 @@
 # HCH Editorial Worker Kit para Windows
 
+## Instalação simplificada
+
+O instalador gráfico recomendado é gerado por:
+
+```powershell
+.\ops\windows\installer\Build-HchWorkerSetup.ps1
+```
+
+Ele produz `HCH-Worker-Setup-<versão>-x64.exe`, assinado quando a chave de
+publicação está disponível, e os manifests para futura distribuição via
+`winget install Hubtech.HCHWorker`. O usuário confirma a publicadora, informa o
+token e escolhe o paralelismo inicial; `0` instala o serviço em pausa, mantendo
+heartbeat e renovação da atestação. Consulte
+[`../installer/README.md`](../installer/README.md) para build e segurança.
+
 Versão do kit: **3.1.0**. Este diretório implementa o bootstrap, o gate de
 confiança e o ciclo editorial local do HCH Editorial Orchestration Trust
 Protocol v2. O processamento é hospedado por um Windows Service nativo,
