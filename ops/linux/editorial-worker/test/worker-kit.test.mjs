@@ -64,6 +64,17 @@ test("macOS installer retires conflicting legacy agents and preserves Ollama", a
   }
   assert.doesNotMatch(source, /legacy_label=.*com\.hubtech\.hch-orchestrator-ollama/);
 });
+
+test("macOS cycle is not deferred as a background launchd process", async () => {
+  const source = await readFile(
+    new URL(
+      "../../../macos/editorial-worker/launchd/online.hubtech.hch.editorial-worker.cycle.plist.in",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /<key>ProcessType<\/key>/);
+});
 import {
   bootstrapWorker,
   resolveEnrollmentToken,
