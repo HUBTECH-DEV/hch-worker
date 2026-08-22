@@ -1116,10 +1116,19 @@ function Test-HchSignedManifest {
   $payloadPath = Join-Path ([IO.Path]::GetTempPath()) ('hch-manifest-payload-' + [guid]::NewGuid().ToString('n') + '.json')
   try {
     Write-HchUtf8File -Path $envelopePath -Content ($Envelope | ConvertTo-Json -Depth 100 -Compress)
-    $verified = Invoke-HchCrypto -Config $Config -Arguments @(
+    $verifyArguments = @(
       'verify-chain', '--root', $rootPath, '--envelope', $envelopePath,
       '--output', $payloadPath, '--clock-skew', [string](Get-HchConfigValue $Config 'ClockSkewSeconds' 60)
     )
+    $appliedPath = Join-Path ([string]$Config.StateRoot) 'applied-manifest.json'
+    if (Test-Path -LiteralPath $appliedPath -PathType Leaf) {
+      try {
+        $applied = Read-HchJsonFile -Path $appliedPath
+        $appliedHash = Get-HchNormalizedHash -Value ([string]$applied.manifestHash)
+        $verifyArguments += @('--allow-expired-hash', $appliedHash)
+      } catch { throw 'worker-applied-manifest-invalid' }
+    }
+    $verified = Invoke-HchCrypto -Config $Config -Arguments $verifyArguments
     $payload = Read-HchJsonFile -Path $payloadPath
   } catch {
     $script:LastTrustObservation = [ordered]@{
@@ -2838,7 +2847,7 @@ function Invoke-HchWorkerBootstrap {
       manifestSequence = [long]$manifest.Payload.sequence
       manifestHash = [string]$manifest.ManifestHash
       challenge = [string]$bootstrap.challenge
-      workerRuntimeVersion = [string]$manifest.Payload.runtime.workerVersion
+      workerRuntimeVersion = [string]$script:KitVersion
       policyHash = [string]$editorial.policyHash
       adaptiveWorkPolicyHash = $adaptiveWorkPolicyHash
       promptConfigHash = [string]$editorial.promptConfigHash

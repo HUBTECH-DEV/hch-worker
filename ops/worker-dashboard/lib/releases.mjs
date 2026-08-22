@@ -66,6 +66,8 @@ export function createReleaseMonitor(options = {}) {
         currentVersion: current,
         latestVersion: latest,
         updateAvailable: current !== null && latest !== null && compareVersions(latest, current) > 0,
+        compatibility: release?.compatibility ?? "unspecified",
+        contentImpact: release?.contentImpact ?? "unspecified",
         releaseUrl: release?.htmlUrl ?? null,
         publishedAt: release?.publishedAt ?? null,
         checkedAt: lastCheckedAt,
@@ -100,7 +102,37 @@ function validateRelease(value, repository) {
     throw new ReleaseCheckError("release-url-invalid");
   }
   const publishedAt = normalizedTimestamp(value.published_at);
-  return Object.freeze({ version, htmlUrl: value.html_url, publishedAt });
+  const compatibility = releaseMarker(
+    value.body,
+    "HCH-Worker-Compatibility",
+    new Set(["compatible", "incompatible"]),
+  );
+  const contentImpact = releaseMarker(
+    value.body,
+    "HCH-Worker-Content-Impact",
+    new Set(["none", "generated-content"]),
+  );
+  if (
+    (compatibility === "incompatible") !== (contentImpact === "generated-content")
+  ) {
+    throw new ReleaseCheckError("release-compatibility-declaration-invalid");
+  }
+  return Object.freeze({
+    version,
+    htmlUrl: value.html_url,
+    publishedAt,
+    compatibility: compatibility ?? "unspecified",
+    contentImpact: contentImpact ?? "unspecified",
+  });
+}
+
+function releaseMarker(body, name, allowed) {
+  if (typeof body !== "string") return null;
+  const match = new RegExp(`(?:^|\\n)${name}:\\s*([a-z-]+)\\s*(?:\\n|$)`, "i").exec(body);
+  if (!match) return null;
+  const value = match[1].toLowerCase();
+  if (!allowed.has(value)) throw new ReleaseCheckError("release-compatibility-declaration-invalid");
+  return value;
 }
 
 function normalizeRepository(value) {

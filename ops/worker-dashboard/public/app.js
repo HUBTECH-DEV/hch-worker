@@ -248,8 +248,16 @@ function renderWorkerUpdate(status) {
     setControlState(state, "Consulta indisponível", "warning");
     summary.textContent = "Não foi possível confirmar a release mais recente agora.";
   } else if (updates.updateAvailable === true) {
-    setControlState(state, "Atualização disponível", "warning");
-    summary.textContent = `Worker ${updates.currentVersion ?? "—"}; release ${updates.latestVersion}.`;
+    const incompatible = updates.compatibility === "incompatible" &&
+      updates.contentImpact === "generated-content";
+    setControlState(
+      state,
+      incompatible ? "Atualização incompatível disponível" : "Atualização disponível",
+      "warning",
+    );
+    summary.textContent = incompatible
+      ? `Worker ${updates.currentVersion ?? "—"}; release ${updates.latestVersion} altera o resultado do conteúdo. Novos trabalhos exigem atualização.`
+      : `Worker ${updates.currentVersion ?? "—"}; release ${updates.latestVersion} disponível sem interromper o processamento atual.`;
   } else if (updates.status === "no-release") {
     setControlState(state, "Sem release", "neutral");
     summary.textContent = "O repositório ainda não possui uma release estável publicada.";
@@ -260,6 +268,8 @@ function renderWorkerUpdate(status) {
   meta.textContent = [
     updates.checkedAt ? `Verificado ${formatTime(updates.checkedAt)}` : null,
     updates.publishedAt ? `publicada ${formatTime(updates.publishedAt)}` : null,
+    updates.compatibility && updates.compatibility !== "unspecified"
+      ? `compatibilidade: ${translated(updates.compatibility)}` : null,
     updates.updateAvailable && !canExecute ? "executor administrativo não habilitado" : null,
   ].filter(Boolean).join(" · ") || "Aguardando a primeira consulta.";
 }

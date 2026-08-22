@@ -41,6 +41,7 @@ try {
         required("envelope"),
         required("output"),
         Number(argumentsByName.get("clock-skew") ?? 60),
+        argumentsByName.get("allow-expired-hash") ?? null,
       );
       break;
     default:
@@ -92,7 +93,13 @@ function canonicalizeFile(inputPath, outputPath) {
   print({ canonicalized: true });
 }
 
-async function verifyManifestChain(rootPath, envelopePath, outputPath, clockSkewSeconds) {
+async function verifyManifestChain(
+  rootPath,
+  envelopePath,
+  outputPath,
+  clockSkewSeconds,
+  allowExpiredHash,
+) {
   if (!Number.isSafeInteger(clockSkewSeconds) || clockSkewSeconds < 0 || clockSkewSeconds > 300) {
     throw new Error("invalid-clock-skew");
   }
@@ -115,6 +122,7 @@ async function verifyManifestChain(rootPath, envelopePath, outputPath, clockSkew
     {
     expectedReleaseKeyId: undefined,
     clockSkewSeconds,
+    allowExpired: allowExpiredHash !== null,
   });
   if (!verified.ok) throw new Error(`manifest-chain-invalid:${verified.code}`);
   if (verified.delegationProtectedHeader.kid !== rootKeyId) {
@@ -126,7 +134,8 @@ async function verifyManifestChain(rootPath, envelopePath, outputPath, clockSkew
     .update(canonicalizeJson(outer.delegation))
     .digest("hex");
   if (payload?.schemaVersion !== "2.0") throw new Error("manifest-schema-unsupported");
-  if (Date.parse(payload.expiresAt) <= Date.now() - clockSkewSeconds * 1000) {
+  const payloadExpired = Date.parse(payload.expiresAt) <= Date.now() - clockSkewSeconds * 1000;
+  if (payloadExpired && allowExpiredHash === null) {
     throw new Error("manifest-payload-expired");
   }
   const { hash, ...unsignedPayload } = payload;
@@ -143,6 +152,9 @@ async function verifyManifestChain(rootPath, envelopePath, outputPath, clockSkew
     .update(canonicalizeJson(legacyUnsignedPayload)).digest("hex");
   if (calculated !== hash && legacyCalculated !== hash) {
     throw new Error("manifest-payload-hash-mismatch");
+  }
+  if (payloadExpired && String(hash).toLowerCase() !== String(allowExpiredHash).toLowerCase()) {
+    throw new Error("manifest-expired-update-refused");
   }
   writeFileSync(outputPath, canonicalizeJson(payload), { encoding: "utf8", flag: "wx", mode: 0o600 });
   print({

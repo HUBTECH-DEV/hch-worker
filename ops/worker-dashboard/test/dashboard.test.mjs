@@ -93,6 +93,7 @@ test("release monitor detects only newer stable semantic releases", async () => 
     prerelease: false,
     html_url: "https://github.com/HUBTECH-DEV/hch-worker/releases/tag/v3.2.0",
     published_at: "2026-08-15T12:00:00Z",
+    body: "HCH-Worker-Compatibility: compatible\nHCH-Worker-Content-Impact: none\n",
   };
   const monitor = createReleaseMonitor({
     now: new Date("2026-08-15T12:05:00Z"),
@@ -105,6 +106,8 @@ test("release monitor detects only newer stable semantic releases", async () => 
   assert.equal(outdated.updateAvailable, true);
   assert.equal(outdated.latestVersion, "3.2.0");
   assert.equal(outdated.channel, "stable");
+  assert.equal(outdated.compatibility, "compatible");
+  assert.equal(outdated.contentImpact, "none");
   assert.equal((await monitor.snapshot("3.2.0")).updateAvailable, false);
   assert.equal(compareVersions("3.10.0", "3.2.9"), 1);
   assert.equal(compareVersions("3.2.0", "3.2.0-rc.1"), 1);
@@ -123,6 +126,8 @@ test("release monitor fails closed for absent or malformed releases", async () =
       currentVersion: "3.1.0",
       latestVersion: null,
       updateAvailable: false,
+      compatibility: "unspecified",
+      contentImpact: "unspecified",
       releaseUrl: null,
       publishedAt: null,
       checkedAt: T0.toISOString(),
