@@ -847,6 +847,43 @@ test("zero parallelism remains heartbeat-only and cannot receive work", async (t
   assert.equal(status.capacity.effectiveGrantedCapacity, 0);
 });
 
+test("node heartbeat refreshes status without overwriting active work", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  const statusPath = join(fixture.stateDirectory, "status.json");
+  const status = await jsonFile(fixture.stateDirectory, "status.json");
+  const batch = {
+    batchId: "heartbeat-active",
+    assignmentIds: ["assignment-active"],
+    jobs: 1,
+    completedJobs: 0,
+    startedAt: "2026-08-22T20:00:00.000Z",
+  };
+  await writeFile(statusPath, JSON.stringify({
+    ...status,
+    observedAt: "2026-08-22T20:00:00.000Z",
+    state: "processing",
+    running: true,
+    standby: false,
+    currentBatch: batch,
+    code: "assignment-processing",
+  }));
+
+  await nodeHeartbeat(fixture.config, { fetchImpl: fixture.control.fetch });
+
+  const refreshed = await jsonFile(fixture.stateDirectory, "status.json");
+  assert.notEqual(refreshed.observedAt, "2026-08-22T20:00:00.000Z");
+  assert.equal(refreshed.state, "processing");
+  assert.equal(refreshed.running, true);
+  assert.equal(refreshed.standby, false);
+  assert.deepEqual(refreshed.currentBatch, batch);
+  assert.equal(refreshed.code, "assignment-processing");
+});
+
 test("bootstrap with requested capacity zero attests directly into drain", async (t) => {
   const fixture = await createFixture(t);
   const drainConfig = validateWorkerConfig({

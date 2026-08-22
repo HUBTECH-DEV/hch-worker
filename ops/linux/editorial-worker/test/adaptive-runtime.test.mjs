@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
@@ -431,6 +431,15 @@ test("portable readiness renewal preserves an active work lifecycle", async (t) 
     },
   });
   assert.equal(receivedOptions.preserveLifecycle, true);
+});
+
+test("portable assignment start leaves standby telemetry", async () => {
+  const source = await readFile(new URL("../lib/supervisor.mjs", import.meta.url), "utf8");
+  const markProcessing = source.slice(
+    source.indexOf("async function markProcessing"),
+    source.indexOf("async function markFinished"),
+  );
+  assert.match(markProcessing, /leaveStandby\(metrics\)/);
 });
 
 function heartbeatSnapshot(capacity, allowed, recommendedCount = allowed ? 1 : 0) {

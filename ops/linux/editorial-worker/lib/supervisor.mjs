@@ -11,6 +11,7 @@ import {
 import { generateEditorialDraft } from "./generator.mjs";
 import {
   enterStandby,
+  leaveStandby,
   updateMetrics,
   updateStatus,
 } from "./local-state.mjs";
@@ -333,6 +334,7 @@ async function markProcessing(stateRoot, config, claim, assignment) {
     },
   });
   await updateMetrics(stateRoot, config, (metrics) => {
+    leaveStandby(metrics);
     metrics.batches.total += 1;
     metrics.jobs.claimed += 1;
     metrics.jobs.running = 1;

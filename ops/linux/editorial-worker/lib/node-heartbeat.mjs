@@ -7,7 +7,7 @@ import {
 } from "./capacity.mjs";
 import { signedPost } from "./http.mjs";
 import { ensureWorkerIdentity } from "./identity.mjs";
-import { assertSecretFree } from "./local-state.mjs";
+import { assertSecretFree, updateStatus } from "./local-state.mjs";
 import {
   atomicWriteJson,
   ensurePrivateDirectory,
@@ -110,6 +110,7 @@ export async function nodeHeartbeat(config, options = {}) {
         source: "node-heartbeat",
       });
     }
+    await updateStatus(stateRoot, config, {});
     return {
       ...snapshot,
       requestId: response.requestId,

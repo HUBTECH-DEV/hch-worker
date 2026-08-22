@@ -16,8 +16,15 @@ import {
 const KIT_VERSION = "3.1.0";
 const PROCESS_STARTED_AT = Date.now();
 const PLATFORM = workerPlatform();
+let statusWriteQueue = Promise.resolve();
 
-export async function updateStatus(stateRoot, config, patch) {
+export function updateStatus(stateRoot, config, patch) {
+  const write = statusWriteQueue.then(() => writeStatus(stateRoot, config, patch));
+  statusWriteQueue = write.catch(() => {});
+  return write;
+}
+
+async function writeStatus(stateRoot, config, patch) {
   const defaults = defaultStatus(config);
   const [storedStatus, capacitySnapshot, control] = await Promise.all([
     readOptionalJson(stateRoot, "status.json"),
