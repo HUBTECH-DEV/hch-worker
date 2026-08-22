@@ -315,7 +315,7 @@ function claimTarget(snapshot) {
   );
 }
 
-function assertClaimGate(config, control, ready, applied, orchestration) {
+export function assertClaimGate(config, control, ready, applied, orchestration) {
   const heartbeatAge = Date.now() - Date.parse(orchestration?.heartbeat?.lastSuccessAt ?? "");
   if (
     effectiveRequestedCapacity(control) < 1 ||
@@ -324,7 +324,7 @@ function assertClaimGate(config, control, ready, applied, orchestration) {
     ready.manifestHash !== applied?.manifestHash ||
     orchestration?.nodeId !== config.nodeId ||
     orchestration?.heartbeat?.status !== "succeeded" ||
-    !Number.isFinite(heartbeatAge) || heartbeatAge < 0 || heartbeatAge > 120_000 ||
+    !Number.isFinite(heartbeatAge) || Math.abs(heartbeatAge) > 120_000 ||
     orchestration?.claim?.allowed !== true || orchestration.claim.recommendedCount < 1
   ) {
     throw new WorkerKitError("claims-gates-closed", "Portable worker is paused, stale, or not ready to claim.");

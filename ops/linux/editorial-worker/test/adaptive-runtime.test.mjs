@@ -24,6 +24,7 @@ import {
   validatePublicSourceUrl,
 } from "../lib/generator.mjs";
 import {
+  assertClaimGate,
   runPortableSupervisor,
   renewReadyAttestation,
   startAssignmentHeartbeat,
@@ -418,6 +419,46 @@ test("portable supervisor reports completed assignment results", async (t) => {
     failed: 0,
     status: "pending-review",
   }]);
+});
+
+test("claim gate tolerates bounded control-plane clock skew", () => {
+  const manifestHash = "a".repeat(64);
+  assert.doesNotThrow(() => assertClaimGate(
+    { nodeId: "node-1" },
+    { acceptingClaims: true, drainRequested: false, requestedCapacity: 1 },
+    {
+      ready: true,
+      readyUntil: new Date(Date.now() + 60_000).toISOString(),
+      manifestHash,
+    },
+    { manifestHash },
+    {
+      nodeId: "node-1",
+      heartbeat: {
+        status: "succeeded",
+        lastSuccessAt: new Date(Date.now() + 5_000).toISOString(),
+      },
+      claim: { allowed: true, recommendedCount: 1 },
+    },
+  ));
+  assert.throws(() => assertClaimGate(
+    { nodeId: "node-1" },
+    { acceptingClaims: true, drainRequested: false, requestedCapacity: 1 },
+    {
+      ready: true,
+      readyUntil: new Date(Date.now() + 60_000).toISOString(),
+      manifestHash,
+    },
+    { manifestHash },
+    {
+      nodeId: "node-1",
+      heartbeat: {
+        status: "succeeded",
+        lastSuccessAt: new Date(Date.now() + 121_000).toISOString(),
+      },
+      claim: { allowed: true, recommendedCount: 1 },
+    },
+  ), (error) => error?.code === "claims-gates-closed");
 });
 
 test("portable readiness renewal is independent from capacity zero", async (t) => {
