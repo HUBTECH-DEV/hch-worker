@@ -821,6 +821,12 @@ test("zero parallelism remains heartbeat-only and cannot receive work", async (t
     fetchImpl: fixture.control.fetch,
     pressure: { cpuPercent: 25, memoryPercent: 40 },
   });
+  const heartbeatStatus = await jsonFile(fixture.stateDirectory, "status.json");
+  assert.equal(heartbeatStatus.state, "draining");
+  assert.equal(heartbeatStatus.running, false);
+  assert.equal(heartbeatStatus.standby, true);
+  assert.equal(heartbeatStatus.currentBatch, null);
+  assert.equal(heartbeatStatus.code, "drain-requested");
   const executeCountBefore = fixture.control.paths.filter(
     (path) => path === "/api/editorial/orchestrator/execute",
   ).length;

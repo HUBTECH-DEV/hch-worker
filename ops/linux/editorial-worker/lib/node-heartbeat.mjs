@@ -110,7 +110,22 @@ export async function nodeHeartbeat(config, options = {}) {
         source: "node-heartbeat",
       });
     }
-    await updateStatus(stateRoot, config, {});
+    const [status, metrics] = await Promise.all([
+      readOptionalJson(stateRoot, "status.json"),
+      readOptionalJson(stateRoot, "metrics.json"),
+    ]);
+    const activeWork = status?.running === true || status?.currentBatch !== null &&
+      typeof status?.currentBatch === "object" || metrics?.jobs?.running > 0 ||
+      metrics?.currentBatch !== null && typeof metrics?.currentBatch === "object";
+    await updateStatus(stateRoot, config, activeWork
+      ? {}
+      : {
+          state: requestedCapacity === 0 ? "draining" : "standby",
+          running: false,
+          standby: true,
+          currentBatch: null,
+          code: requestedCapacity === 0 ? "drain-requested" : "ready",
+        });
     return {
       ...snapshot,
       requestId: response.requestId,
