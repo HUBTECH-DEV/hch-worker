@@ -32,6 +32,20 @@ import {
   stopLocalWorker,
   validateLocalWorker,
 } from "../lib/control.mjs";
+
+test("CLI entrypoint resolves release symlinks before executing", async () => {
+  const source = await readFile(new URL("../worker.mjs", import.meta.url), "utf8");
+  assert.match(source, /realpathSync\(resolve\(process\.argv\[1\]\)\)/);
+});
+
+test("VPS timer uses the portable claim lifecycle", async () => {
+  const source = await readFile(
+    new URL("../../../../scripts/run-editorial-republication.sh", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /HCH_EDITORIAL_WORKER_ENTRYPOINT\}\" run-one/);
+  assert.doesNotMatch(source, /HCH_EDITORIAL_WORKER_ENTRYPOINT\}\" execute/);
+});
 import {
   bootstrapWorker,
   resolveEnrollmentToken,

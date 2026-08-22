@@ -345,6 +345,8 @@ test("cycle, persistent Windows Service and CLI are opt-in and fail closed by st
   assert.match(moduleSource, /generationPlanHash/);
   assert.match(moduleSource, /Assert-HchAssignmentProgress/);
   assert.match(moduleSource, /Assert-HchGeneratorStalledResponse/);
+  assert.match(moduleSource, /bootstrap\.lock/);
+  assert.match(moduleSource, /FileShare\]::None/);
   assert.match(moduleSource, /orchestrator-generator-stalled-plan-mismatch/);
   assert.match(moduleSource, /orchestrator-claim-capacity-contract-required/);
   assert.match(moduleSource, /commitAccepted/);
@@ -370,6 +372,9 @@ test("cycle, persistent Windows Service and CLI are opt-in and fail closed by st
   assert.doesNotMatch(cycleSource, /processingWindowSeconds[\s\S]{0,120}(?:Kill|Stop-Process)/);
   assert.match(cycleSource, /capacityPolicy\.absoluteRequestedMaximum/);
   assert.match(cycleSource, /claim\.capacity\.availableSlots/);
+  const readinessRenewal = cycleSource.indexOf("Invoke-HchWorkerBootstrap -Config $config");
+  const drainBoundary = cycleSource.indexOf("drain-no-new-claims");
+  assert.ok(readinessRenewal >= 0 && readinessRenewal < drainBoundary);
   const finalClaimBoundary = cycleSource.slice(
     cycleSource.indexOf("[void](Invoke-HchGeneratorPreflight)"),
     cycleSource.indexOf("$claim = Invoke-HchWorkerClaim"),

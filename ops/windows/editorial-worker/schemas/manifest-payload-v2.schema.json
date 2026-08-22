@@ -11,7 +11,7 @@
   ],
   "properties": {
     "schemaVersion": { "const": "2.0" },
-    "bootstrapVersion": { "enum": ["2.0.0", "2.1.0", "2.2.0"] },
+    "bootstrapVersion": { "enum": ["2.0.0", "2.1.0", "2.2.0", "2.3.0", "3.0.0"] },
     "sequence": { "type": "integer", "minimum": 1 },
     "minimumAcceptedSequence": { "type": "integer", "minimum": 1 },
     "previousManifestHash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },

@@ -223,7 +223,11 @@ $previousDelayedAutoStart = if ($null -ne $existing) {
       -Destination (Join-Path $installedLibRoot $libraryName) -Force
   }
   Copy-Item -LiteralPath ([IO.Path]::GetFullPath($ConfigPath)) -Destination $installedConfigPath -Force
-  Copy-Item -LiteralPath $nodeSourcePath -Destination $installedNodePath -Force
+  $nodeSourceFullPath = [IO.Path]::GetFullPath($nodeSourcePath)
+  $installedNodeFullPath = [IO.Path]::GetFullPath($installedNodePath)
+  if (-not $nodeSourceFullPath.Equals($installedNodeFullPath, [StringComparison]::OrdinalIgnoreCase)) {
+    Copy-Item -LiteralPath $nodeSourceFullPath -Destination $installedNodeFullPath -Force
+  }
 
   # Remove Zone.Identifier only after proving that every installed file is an
   # exact byte-for-byte copy of the locally selected kit. This lets the host

@@ -3,6 +3,7 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 
 import { loadWorkerConfig } from "./lib/config.mjs";
 import { bootstrapWorker } from "./lib/bootstrap.mjs";
@@ -182,7 +183,7 @@ function parseArguments(argv) {
 }
 
 const entrypoint = process.argv[1]
-  ? pathToFileURL(resolve(process.argv[1])).href
+  ? pathToFileURL(realpathSync(resolve(process.argv[1]))).href
   : null;
 if (entrypoint === import.meta.url) {
   process.exitCode = await runWorkerCli();

@@ -49,7 +49,7 @@ export async function verifyManifestResponse(
       "The manifest root identity does not match the locally pinned root key.",
     );
   }
-  const verified = await verifyManifestWithDelegation(
+  let verified = await verifyManifestWithDelegation(
     response.manifest,
     response.delegation,
     rootPublicKeyPem,
@@ -58,13 +58,26 @@ export async function verifyManifestResponse(
       expectedKeyId: config.rootKeyId,
     },
   );
+  if (!verified.ok && isExpiryFailure(verified.code) && appliedState?.manifestHash) {
+    verified = await verifyManifestWithDelegation(
+      response.manifest,
+      response.delegation,
+      rootPublicKeyPem,
+      {
+        now: options.now,
+        expectedKeyId: config.rootKeyId,
+        allowExpired: true,
+      },
+    );
+  }
   if (!verified.ok) {
     throw new WorkerKitError(
       `manifest-${verified.code}`,
       "The root → release → manifest signature chain is invalid.",
     );
   }
-  const manifest = validateManifestPayload(verified.payload, options.now);
+  const allowExpired = Date.parse(verified.payload?.expiresAt) <= normalizedNow(options.now);
+  const manifest = validateManifestPayload(verified.payload, options.now, process.platform, { allowExpired });
   const hashless = { ...manifest };
   delete hashless.hash;
   const calculatedHash = await sha256Hex(canonicalizeJson(hashless));
@@ -72,6 +85,16 @@ export async function verifyManifestResponse(
     throw new WorkerKitError(
       "manifest-hash-mismatch",
       "The canonical manifest hash does not match its payload.",
+    );
+  }
+  if (allowExpired && (
+    !appliedState ||
+    manifest.hash !== appliedState.manifestHash ||
+    manifest.sequence !== appliedState.manifestSequence
+  )) {
+    throw new WorkerKitError(
+      "manifest-expired-update-refused",
+      "An expired manifest may only renew an already applied identical content contract.",
     );
   }
   const delegationSequence = verified.delegation.sequence;
@@ -100,7 +123,12 @@ export async function verifyManifestResponse(
   };
 }
 
-export function validateManifestPayload(value, nowValue, platformValue = process.platform) {
+export function validateManifestPayload(
+  value,
+  nowValue,
+  platformValue = process.platform,
+  options = {},
+) {
   const manifest = record(value, "manifest");
   if (manifest.schemaVersion !== "2.0" || manifest.protocolVersion !== "2.0") {
     throw new WorkerKitError("manifest-version-unsupported", "Only manifest protocol 2.0 is supported.");
@@ -125,7 +153,7 @@ export function validateManifestPayload(value, nowValue, platformValue = process
       : Date.now();
   if (
     Date.parse(issuedAt) > now + 5 * 60_000 ||
-    Date.parse(expiresAt) <= now ||
+    (Date.parse(expiresAt) <= now && options.allowExpired !== true) ||
     Date.parse(expiresAt) <= Date.parse(issuedAt)
   ) {
     throw new WorkerKitError("manifest-expired", "Manifest payload is expired or has an invalid validity window.");
@@ -215,6 +243,16 @@ export function validateManifestPayload(value, nowValue, platformValue = process
     throw new WorkerKitError("manifest-chain-invalid", "previousManifestHash is invalid.");
   }
   return { ...manifest, capacityPolicy, adaptiveWorkPolicy, artifacts };
+}
+
+function normalizedNow(value) {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "number") return value < 10_000_000_000 ? value * 1_000 : value;
+  return Date.now();
+}
+
+function isExpiryFailure(code) {
+  return new Set(["expired", "delegation-expired"]).has(String(code));
 }
 
 export function enforceDelegationAntiRollback(
