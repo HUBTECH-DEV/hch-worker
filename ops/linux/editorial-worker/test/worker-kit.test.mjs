@@ -46,6 +46,24 @@ test("VPS timer uses the portable claim lifecycle", async () => {
   assert.match(source, /HCH_EDITORIAL_WORKER_ENTRYPOINT\}\" run-one/);
   assert.doesNotMatch(source, /HCH_EDITORIAL_WORKER_ENTRYPOINT\}\" execute/);
 });
+
+test("macOS installer retires conflicting legacy agents and preserves Ollama", async () => {
+  const source = await readFile(
+    new URL("../../../macos/editorial-worker/install-launch-agents.sh", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /online\.hubtech\.hch\.editorial-worker\.cycle\.plist\.in/);
+  for (const label of [
+    "online.hubtech.hch.editorial-worker.bootstrap",
+    "online.hubtech.hch.editorial-worker.heartbeat",
+    "com.hubtech.hch-orchestrator-listener",
+    "com.hubtech.hch-mac-worker",
+    "com.hubtech.hch-worker-dashboard",
+  ]) {
+    assert.match(source, new RegExp(label.replaceAll(".", "\\.")));
+  }
+  assert.doesNotMatch(source, /legacy_label=.*com\.hubtech\.hch-orchestrator-ollama/);
+});
 import {
   bootstrapWorker,
   resolveEnrollmentToken,
