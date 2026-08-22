@@ -16,6 +16,7 @@ import {
 } from "../lib/adaptive-work.mjs";
 import {
   ollamaGenerationRequest,
+  modelEvidenceExcerpt,
   assertPublicSourceDestination,
   resolvePublicSourceDestination,
   readBoundedResponseBody,
@@ -122,6 +123,12 @@ test("Ollama request uses portable JSON mode and exact signed num_predict", () =
   assert.equal(request.stream, true);
   assert.equal(request.options.num_predict, 768);
   assert.equal(request.format, "json");
+});
+
+test("model evidence is bounded for first-token portability", () => {
+  const excerpt = modelEvidenceExcerpt(`  ${"e".repeat(4_000)}  `);
+  assert.equal(excerpt.length, 2_998);
+  assert.doesNotMatch(excerpt, /^\s|\s$/);
 });
 
 test("NDJSON progress counts only content bytes and has no total-window deadline", async () => {

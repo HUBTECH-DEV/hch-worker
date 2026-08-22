@@ -15,6 +15,7 @@ import { WorkerKitError } from "./errors.mjs";
 
 const MAX_SOURCE_BYTES = 2_000_000;
 const MAX_EVIDENCE_CHARACTERS = 8_000;
+const MAX_MODEL_EVIDENCE_CHARACTERS = 3_000;
 const SOURCE_TIMEOUT_MS = 25_000;
 const MAX_GENERATOR_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_GENERATION_ATTEMPTS = 2;
@@ -43,7 +44,7 @@ export async function generateEditorialDraft(
     signal: options.signal,
     sourceTimeoutMilliseconds: options.sourceTimeoutMilliseconds,
   });
-  const sourceExcerpt = evidence.text;
+  const sourceExcerpt = modelEvidenceExcerpt(evidence.text);
   const source = {
     sourceId: "S1",
     canonicalUrl: assignment.entry.source_url,
@@ -181,6 +182,10 @@ export function ollamaGenerationRequest(input) {
       },
     ],
   };
+}
+
+export function modelEvidenceExcerpt(value) {
+  return String(value).slice(0, MAX_MODEL_EVIDENCE_CHARACTERS).trim();
 }
 
 /**
