@@ -85,7 +85,7 @@ export async function renewReadyAttestation(config, stateRoot, options = {}) {
     readOptionalJson(stateRoot, "status.json"),
     readWorkerControl(stateRoot, config),
   ]);
-  const refreshBeforeMilliseconds = (options.readyRefreshBeforeSeconds ?? 3000) * 1000;
+  const refreshBeforeMilliseconds = (options.readyRefreshBeforeSeconds ?? 300) * 1000;
   const remaining = Date.parse(ready?.readyUntil ?? "") - (options.now?.() ?? Date.now());
   const requestedCapacity = effectiveRequestedCapacity(control);
   if (
