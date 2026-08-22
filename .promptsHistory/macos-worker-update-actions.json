@@ -1,0 +1,26 @@
+{
+  "name": "macos-worker-update-actions",
+  "targetBranch": "MacBook-Pro-de-Paulo",
+  "createdAt": "2026-08-22T13:30:00-03:00",
+  "status": "pending-on-mac",
+  "sourceBranch": "NB-PE0FHWM9",
+  "requiredCommits": [
+    "6731c1b",
+    "57fe4ce"
+  ],
+  "actions": [
+    "fetch-and-merge-device-branch",
+    "run-tests",
+    "drain-without-cancelling-active-assignment",
+    "backup-config-state-trust-and-launch-agents",
+    "install-public-root-and-verify-fingerprint",
+    "install-immutable-runtime-and-launch-agents",
+    "validate-manifest-sequence-5-and-heartbeat",
+    "run-single-capacity-canary",
+    "verify-progress-and-pending-review-result",
+    "set-final-parallelism",
+    "commit-and-push-results-on-mac-branch"
+  ],
+  "runbook": "docs/operations/macos-worker-update-actions.md",
+  "secretsAllowedInGit": false
+}
