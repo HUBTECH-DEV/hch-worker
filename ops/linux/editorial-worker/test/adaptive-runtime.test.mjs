@@ -422,6 +422,10 @@ test("portable readiness renewal preserves an active work lifecycle", async (t) 
     ready: true,
     readyUntil: "2026-08-15T00:15:00.000Z",
   }));
+  await writeFile(join(stateRoot, "status.json"), JSON.stringify({
+    running: true,
+    currentBatch: { batchId: "active" },
+  }));
   let receivedOptions = null;
   await renewReadyAttestation({ requestedCapacity: 1 }, stateRoot, {
     now: () => Date.parse("2026-08-15T00:14:00.000Z"),
@@ -431,6 +435,28 @@ test("portable readiness renewal preserves an active work lifecycle", async (t) 
     },
   });
   assert.equal(receivedOptions.preserveLifecycle, true);
+});
+
+test("portable readiness renewal resets a completed lifecycle", async (t) => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "hch-portable-complete-renewal-"));
+  t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  await writeFile(join(stateRoot, "ready.json"), JSON.stringify({
+    ready: true,
+    readyUntil: "2026-08-15T00:15:00.000Z",
+  }));
+  await writeFile(join(stateRoot, "status.json"), JSON.stringify({
+    running: false,
+    currentBatch: null,
+  }));
+  let receivedOptions = null;
+  await renewReadyAttestation({ requestedCapacity: 0 }, stateRoot, {
+    now: () => Date.parse("2026-08-15T00:14:00.000Z"),
+    bootstrapWorkerLocked: async (_config, _stateRoot, options) => {
+      receivedOptions = options;
+      return { ready: true };
+    },
+  });
+  assert.equal(receivedOptions.preserveLifecycle, false);
 });
 
 test("portable assignment start leaves standby telemetry", async () => {

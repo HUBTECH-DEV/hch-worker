@@ -79,7 +79,10 @@ async function runPortableSupervisorLocked(config, options = {}) {
 }
 
 export async function renewReadyAttestation(config, stateRoot, options = {}) {
-  const ready = await readOptionalJson(stateRoot, "ready.json");
+  const [ready, status] = await Promise.all([
+    readOptionalJson(stateRoot, "ready.json"),
+    readOptionalJson(stateRoot, "status.json"),
+  ]);
   const refreshBeforeMilliseconds = (options.readyRefreshBeforeSeconds ?? 3000) * 1000;
   const remaining = Date.parse(ready?.readyUntil ?? "") - (options.now?.() ?? Date.now());
   if (ready?.ready === true && Number.isFinite(remaining) && remaining > refreshBeforeMilliseconds) {
@@ -87,7 +90,8 @@ export async function renewReadyAttestation(config, stateRoot, options = {}) {
   }
   return (options.bootstrapWorkerLocked ?? bootstrapWorkerLocked)(config, stateRoot, {
     ...options,
-    preserveLifecycle: ready?.ready === true,
+    preserveLifecycle: ready?.ready === true && status?.running === true &&
+      status?.currentBatch !== null && typeof status?.currentBatch === "object",
   });
 }
 
@@ -361,11 +365,13 @@ async function markFinished(stateRoot, config, succeeded, code) {
     metrics.currentBatch = null;
     enterStandby(metrics);
   });
+  const control = await readWorkerControl(stateRoot, config);
+  const draining = effectiveRequestedCapacity(control) === 0;
   await updateStatus(stateRoot, config, {
-    state: succeeded ? "standby" : "connection-error",
+    state: draining ? "draining" : succeeded ? "standby" : "connection-error",
     running: false,
-    standby: succeeded,
-    code,
+    standby: draining || succeeded,
+    code: draining ? "drain-requested" : code,
     currentBatch: null,
   });
 }
