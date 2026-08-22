@@ -34,6 +34,7 @@ import {
 import { WorkerKitError } from "../lib/errors.mjs";
 import { canonicalizeJson } from "../crypto.mjs";
 import { createGenerationPlan, generationPlanHash } from "../../../../lib/editorial-work-sizing.mjs";
+import { validationErrorCodes } from "../worker.mjs";
 
 const policy = Object.freeze({
   algorithmVersion: "hch-adaptive-work-v1",
@@ -129,6 +130,17 @@ test("model evidence is bounded for first-token portability", () => {
   const excerpt = modelEvidenceExcerpt(`  ${"e".repeat(4_000)}  `);
   assert.equal(excerpt.length, 2_998);
   assert.doesNotMatch(excerpt, /^\s|\s$/);
+});
+
+test("worker logs only bounded validation codes", () => {
+  assert.deepEqual(validationErrorCodes({
+    validation: { errors: [
+      { code: "BODY_WORD_COUNT" },
+      { code: "BODY_WORD_COUNT" },
+      { code: "unsafe content" },
+      { message: "missing code" },
+    ] },
+  }), ["BODY_WORD_COUNT"]);
 });
 
 test("NDJSON progress counts only content bytes and has no total-window deadline", async () => {

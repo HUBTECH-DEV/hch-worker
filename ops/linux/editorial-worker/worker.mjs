@@ -121,10 +121,12 @@ async function superviseWithDashboard(config, configPath, options = {}) {
         process.stdout.write(`${JSON.stringify({ ok: true, event: "assignment-result", ...result })}\n`);
       }),
       onWorkError: options.onWorkError ?? ((error) => {
+        const validationCodes = validationErrorCodes(error);
         process.stderr.write(`${JSON.stringify({
           ok: false,
           event: "assignment-error",
           code: errorCode(error),
+          ...(validationCodes.length ? { validationCodes } : {}),
         })}\n`);
       }),
     });
@@ -133,6 +135,14 @@ async function superviseWithDashboard(config, configPath, options = {}) {
     process.removeListener("SIGTERM", stop);
     if (dashboard && !dashboard.killed) dashboard.kill("SIGTERM");
   }
+}
+
+export function validationErrorCodes(error) {
+  if (!Array.isArray(error?.validation?.errors)) return [];
+  return [...new Set(error.validation.errors
+    .map((entry) => entry?.code)
+    .filter((code) => typeof code === "string" && /^[A-Z0-9][A-Z0-9._-]{0,79}$/.test(code)))]
+    .slice(0, 20);
 }
 
 function parseArguments(argv) {
