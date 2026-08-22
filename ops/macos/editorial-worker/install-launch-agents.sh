@@ -32,6 +32,20 @@ node_xml=${node_bin}
 logs_xml=${logs_dir}
 domain="gui/$(id -u)"
 
+# Since 3.1.0 the long-lived cycle process owns bootstrap renewal, presence,
+# claims and the loopback dashboard. Retire every predecessor before starting
+# the replacement, so no process can race for the same worker state or port.
+# The local Ollama LaunchAgent is intentionally preserved.
+for legacy_label in \
+  online.hubtech.hch.editorial-worker.bootstrap \
+  online.hubtech.hch.editorial-worker.heartbeat \
+  com.hubtech.hch-orchestrator-listener \
+  com.hubtech.hch-mac-worker \
+  com.hubtech.hch-worker-dashboard; do
+  /bin/launchctl bootout "${domain}/${legacy_label}" >/dev/null 2>&1 || true
+  rm -f "${agents_dir}/${legacy_label}.plist"
+done
+
 for template in "${kit_dir}"/launchd/online.hubtech.hch.editorial-worker.cycle.plist.in; do
   name=$(basename "${template}" .in)
   destination="${agents_dir}/${name}"
@@ -50,20 +64,6 @@ for template in "${kit_dir}"/launchd/online.hubtech.hch.editorial-worker.cycle.p
   label=$(basename "${name}" .plist)
   /bin/launchctl bootout "${domain}/${label}" >/dev/null 2>&1 || true
   /bin/launchctl bootstrap "${domain}" "${destination}"
-done
-
-# Since 3.1.0 the long-lived cycle process owns bootstrap renewal, presence,
-# claims and the loopback dashboard. Retire every predecessor that can hold the
-# same worker lock, publish a competing heartbeat, claim work or bind port 4319.
-# The local Ollama LaunchAgent is intentionally preserved.
-for legacy_label in \
-  online.hubtech.hch.editorial-worker.bootstrap \
-  online.hubtech.hch.editorial-worker.heartbeat \
-  com.hubtech.hch-orchestrator-listener \
-  com.hubtech.hch-mac-worker \
-  com.hubtech.hch-worker-dashboard; do
-  /bin/launchctl bootout "${domain}/${legacy_label}" >/dev/null 2>&1 || true
-  rm -f "${agents_dir}/${legacy_label}.plist"
 done
 
 printf '%s\n' '{"ok":true,"state":"installed-draining","automaticPublication":false}'
