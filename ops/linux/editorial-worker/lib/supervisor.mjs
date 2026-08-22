@@ -57,6 +57,7 @@ async function runPortableSupervisorLocked(config, options = {}) {
       while (workPromises.size < target) {
         const workPromise = Promise.resolve()
           .then(() => runAssignment(config, options))
+          .then((result) => options.onWorkResult?.(result))
           .catch((error) => options.onWorkError?.(error))
           .finally(() => { workPromises.delete(workPromise); });
         workPromises.add(workPromise);

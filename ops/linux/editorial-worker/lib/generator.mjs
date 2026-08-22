@@ -150,7 +150,11 @@ export function ollamaGenerationRequest(input) {
   return {
     model: input.profile.model,
     stream: true,
-    format: candidateSchema(input.editorialProfile),
+    // Ollama's JSON-schema grammar can terminate complex constrained output
+    // with HTTP 500 before the worker can validate or repair the candidate.
+    // JSON mode keeps transport portable; the signed editorial policy remains
+    // authoritative in buildDraft/validateEditorialDraft below.
+    format: "json",
     options: {
       temperature: input.profile.temperature,
       num_ctx: input.profile.contextWindow,
@@ -367,33 +371,6 @@ function buildDraft(input) {
       maxOutputTokens: input.generationPlan.maxOutputTokens,
     },
     review: { status: "pending-editorial-review" },
-  };
-}
-
-function candidateSchema(profile) {
-  const constraints = profile === "EDITORIAL_LONG_FORM"
-    ? { minimum: 650, maximum: 1100, paragraphs: 5, excerptMaximum: 360 }
-    : profile === "EDITORIAL_COMPACT"
-      ? { minimum: 450, maximum: 900, paragraphs: 2, excerptMaximum: 360 }
-      : profile === "EDITORIAL_MINIMUM"
-        ? { minimum: 320, maximum: 800, paragraphs: 1, excerptMaximum: 360 }
-        : profile === "EVENT_LISTING"
-          ? { minimum: 220, maximum: 500, paragraphs: 1, excerptMaximum: 500 }
-          : { minimum: 240, maximum: 480, paragraphs: 1, excerptMaximum: 480 };
-  return {
-    type: "object",
-    required: ["title", "excerpt", "paragraphs"],
-    properties: {
-      title: { type: "string", minLength: 8, maxLength: 160 },
-      excerpt: { type: "string", minLength: 20, maxLength: constraints.excerptMaximum },
-      paragraphs: {
-        type: "array",
-        minItems: constraints.paragraphs,
-        maxItems: constraints.paragraphs,
-        items: { type: "string", minLength: constraints.minimum, maxLength: constraints.maximum },
-      },
-    },
-    additionalProperties: false,
   };
 }
 

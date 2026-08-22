@@ -107,7 +107,7 @@ test("new attempt resets counters while same-attempt progress remains cumulative
   assert.throws(() => progress.startAttempt(1), /cannot regress/);
 });
 
-test("Ollama request uses stream NDJSON and exact signed num_predict", () => {
+test("Ollama request uses portable JSON mode and exact signed num_predict", () => {
   const request = ollamaGenerationRequest({
     profile: { model: "qwen", temperature: 0.2, contextWindow: 8192 },
     generationPlan: { maxOutputTokens: 768 },
@@ -120,8 +120,7 @@ test("Ollama request uses stream NDJSON and exact signed num_predict", () => {
   });
   assert.equal(request.stream, true);
   assert.equal(request.options.num_predict, 768);
-  assert.equal(request.format.properties.paragraphs.minItems, 1);
-  assert.equal(request.format.properties.paragraphs.maxItems, 1);
+  assert.equal(request.format, "json");
 });
 
 test("NDJSON progress counts only content bytes and has no total-window deadline", async () => {
@@ -398,6 +397,27 @@ test("portable supervisor honors the orchestrator parallel-work target", async (
   assert.equal(starts, 3);
   assert.equal(maximumActive, 3);
   release();
+});
+
+test("portable supervisor reports completed assignment results", async (t) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "hch-portable-result-"));
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
+  const observed = [];
+  const result = await runPortableSupervisor({ stateDirectory }, {
+    maximumCycles: 1,
+    now: () => 0,
+    nodeHeartbeat: async () => heartbeatSnapshot(1, true, 1),
+    runAssignment: async () => ({ claimed: 1, completed: 1, failed: 0, status: "pending-review" }),
+    onWorkResult: (workResult) => observed.push(workResult),
+    bootstrapWorkerLocked: async () => ({ ready: true }),
+  });
+  assert.equal(result.cycles, 1);
+  assert.deepEqual(observed, [{
+    claimed: 1,
+    completed: 1,
+    failed: 0,
+    status: "pending-review",
+  }]);
 });
 
 test("portable readiness renewal is independent from capacity zero", async (t) => {

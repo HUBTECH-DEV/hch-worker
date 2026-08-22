@@ -117,6 +117,16 @@ async function superviseWithDashboard(config, configPath, options = {}) {
     return await runPortableSupervisor(config, {
       ...options,
       shouldStop: () => controller.signal.aborted || options.shouldStop?.() === true,
+      onWorkResult: options.onWorkResult ?? ((result) => {
+        process.stdout.write(`${JSON.stringify({ ok: true, event: "assignment-result", ...result })}\n`);
+      }),
+      onWorkError: options.onWorkError ?? ((error) => {
+        process.stderr.write(`${JSON.stringify({
+          ok: false,
+          event: "assignment-error",
+          code: errorCode(error),
+        })}\n`);
+      }),
     });
   } finally {
     process.removeListener("SIGINT", stop);
