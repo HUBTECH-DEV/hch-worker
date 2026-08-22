@@ -112,6 +112,9 @@ function validateRelease(value, repository) {
     "HCH-Worker-Content-Impact",
     new Set(["none", "generated-content"]),
   );
+  if (compareVersions(version, "3.2.0") >= 0 && (!compatibility || !contentImpact)) {
+    throw new ReleaseCheckError("release-compatibility-declaration-missing");
+  }
   if (
     (compatibility === "incompatible") !== (contentImpact === "generated-content")
   ) {
