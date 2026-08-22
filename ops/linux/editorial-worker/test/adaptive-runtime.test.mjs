@@ -495,22 +495,6 @@ test("portable readiness renewal is independent from capacity zero", async (t) =
   assert.equal(renewals, 1);
 });
 
-test("portable readiness renews immediately when requested capacity changes", async (t) => {
-  const stateRoot = await mkdtemp(join(tmpdir(), "hch-portable-capacity-renewal-"));
-  t.after(() => rm(stateRoot, { recursive: true, force: true }));
-  await writeFile(join(stateRoot, "ready.json"), JSON.stringify({
-    ready: true,
-    requestedCapacity: 0,
-    readyUntil: "2026-08-15T02:00:00.000Z",
-  }));
-  let renewals = 0;
-  await renewReadyAttestation({ requestedCapacity: 1 }, stateRoot, {
-    now: () => Date.parse("2026-08-15T00:00:00.000Z"),
-    bootstrapWorkerLocked: async () => { renewals += 1; return { ready: true }; },
-  });
-  assert.equal(renewals, 1);
-});
-
 test("portable readiness does not renew more than five minutes early", async (t) => {
   const stateRoot = await mkdtemp(join(tmpdir(), "hch-portable-ready-window-"));
   t.after(() => rm(stateRoot, { recursive: true, force: true }));
