@@ -77,6 +77,7 @@ test("macOS cycle is not deferred as a background launchd process", async () => 
 });
 import {
   bootstrapWorker,
+  bootstrapWorkerLocked,
   resolveEnrollmentToken,
 } from "../lib/bootstrap.mjs";
 import { executeWorkerCycle } from "../lib/execute.mjs";
@@ -341,6 +342,55 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
     assert.match(request.nonce, /^client-[0-9a-f-]+-[0-9a-f-]+$/);
     assert.equal(request.signatureValid, true);
   }
+});
+
+test("readiness renewal does not overwrite an active assignment lifecycle", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "administrative-test-value",
+    fetchImpl: fixture.control.fetch,
+  });
+  const batch = {
+    batchId: "batch-active",
+    assignmentIds: ["assignment-active"],
+    jobs: 1,
+    completedJobs: 0,
+    startedAt: "2026-08-22T19:40:00.000Z",
+  };
+  const status = await jsonFile(fixture.stateDirectory, "status.json");
+  await writeFile(join(fixture.stateDirectory, "status.json"), JSON.stringify({
+    ...status,
+    state: "processing",
+    running: true,
+    standby: false,
+    currentBatch: batch,
+    code: "assignment-processing",
+  }));
+  const metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  await writeFile(join(fixture.stateDirectory, "metrics.json"), JSON.stringify({
+    ...metrics,
+    jobs: { ...metrics.jobs, running: 1 },
+    standby: { ...metrics.standby, active: false, since: null },
+    currentBatch: batch,
+  }));
+
+  await bootstrapWorkerLocked(fixture.config, fixture.stateDirectory, {
+    fetchImpl: fixture.control.fetch,
+    preserveLifecycle: true,
+  });
+
+  const renewedStatus = await jsonFile(fixture.stateDirectory, "status.json");
+  const renewedMetrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(renewedStatus.state, "processing");
+  assert.equal(renewedStatus.running, true);
+  assert.equal(renewedStatus.standby, false);
+  assert.deepEqual(renewedStatus.currentBatch, batch);
+  assert.equal(renewedStatus.code, "assignment-processing");
+  assert.equal(renewedStatus.ready, true);
+  assert.equal(renewedMetrics.jobs.running, 1);
+  assert.equal(renewedMetrics.standby.active, false);
+  assert.deepEqual(renewedMetrics.currentBatch, batch);
 });
 
 test("anti-rollback rejects an older signed manifest before bootstrap or artifacts", async (t) => {

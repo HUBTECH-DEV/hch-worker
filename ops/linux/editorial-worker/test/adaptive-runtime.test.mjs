@@ -415,6 +415,24 @@ test("portable readiness renewal is independent from capacity zero", async (t) =
   assert.equal(renewals, 1);
 });
 
+test("portable readiness renewal preserves an active work lifecycle", async (t) => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "hch-portable-active-renewal-"));
+  t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  await writeFile(join(stateRoot, "ready.json"), JSON.stringify({
+    ready: true,
+    readyUntil: "2026-08-15T00:15:00.000Z",
+  }));
+  let receivedOptions = null;
+  await renewReadyAttestation({ requestedCapacity: 1 }, stateRoot, {
+    now: () => Date.parse("2026-08-15T00:14:00.000Z"),
+    bootstrapWorkerLocked: async (_config, _stateRoot, options) => {
+      receivedOptions = options;
+      return { ready: true };
+    },
+  });
+  assert.equal(receivedOptions.preserveLifecycle, true);
+});
+
 function heartbeatSnapshot(capacity, allowed, recommendedCount = allowed ? 1 : 0) {
   return {
     heartbeat: { status: "succeeded" },

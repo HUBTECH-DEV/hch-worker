@@ -84,7 +84,10 @@ export async function renewReadyAttestation(config, stateRoot, options = {}) {
   if (ready?.ready === true && Number.isFinite(remaining) && remaining > refreshBeforeMilliseconds) {
     return ready;
   }
-  return (options.bootstrapWorkerLocked ?? bootstrapWorkerLocked)(config, stateRoot, options);
+  return (options.bootstrapWorkerLocked ?? bootstrapWorkerLocked)(config, stateRoot, {
+    ...options,
+    preserveLifecycle: ready?.ready === true,
+  });
 }
 
 export async function runOnePortableAssignment(config, options = {}) {

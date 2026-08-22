@@ -56,16 +56,19 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
     const startedAt = Date.now();
     const cpuStarted = process.cpuUsage();
     const traffic = createTrafficCounter();
-    await updateStatus(stateRoot, config, {
-      state: "updating",
-      running: false,
-      standby: false,
-      ready: false,
-      code: "bootstrap-started",
-    });
+    const preserveLifecycle = options.preserveLifecycle === true;
+    await updateStatus(stateRoot, config, preserveLifecycle
+      ? { ready: false }
+      : {
+          state: "updating",
+          running: false,
+          standby: false,
+          ready: false,
+          code: "bootstrap-started",
+        });
     await updateMetrics(stateRoot, config, (metrics) => {
       metrics.updates.attempts += 1;
-      leaveStandby(metrics);
+      if (!preserveLifecycle) leaveStandby(metrics);
     });
     try {
       const identity = await ensureWorkerIdentity(config, stateRoot);
@@ -109,7 +112,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         traffic,
       });
       await updateStatus(stateRoot, config, {
-        state: "updating",
+        ...(!preserveLifecycle ? { state: "updating" } : {}),
         connection: {
           api: "connected",
           tls: "verified",
@@ -195,10 +198,12 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       );
 
       await updateStatus(stateRoot, config, {
-        state: "updating",
+        ...(!preserveLifecycle ? {
+          state: "updating",
+          code: "applying-manifest",
+        } : {}),
         manifestSequence: published.manifest.sequence,
         manifestHash: published.manifest.hash,
-        code: "applying-manifest",
         connection: {
           api: "connected",
           tls: "verified",
@@ -314,14 +319,16 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       };
       await atomicWriteJson(stateRoot, "ready.json", readyState);
       await updateStatus(stateRoot, config, {
-        state: requestedCapacity === 0 ? "draining" : "standby",
-        running: false,
-        standby: true,
+        ...(!preserveLifecycle ? {
+          state: requestedCapacity === 0 ? "draining" : "standby",
+          running: false,
+          standby: true,
+          code: requestedCapacity === 0 ? "drain-requested" : "ready",
+        } : {}),
         ready: true,
         readyUntil: readyState.readyUntil,
         manifestSequence: readyState.manifestSequence,
         manifestHash: readyState.manifestHash,
-        code: requestedCapacity === 0 ? "drain-requested" : "ready",
         trust: {
           status: "verified",
           rootKeyId: acceptedTrust.rootKeyId,
@@ -337,7 +344,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         metrics.updates.succeeded += 1;
         recordNetwork(metrics, traffic);
         recordDuration(metrics, Date.now() - startedAt, { cpuStarted });
-        enterStandby(metrics);
+        if (!preserveLifecycle) enterStandby(metrics);
       });
       return {
         nodeId: config.nodeId,
@@ -351,12 +358,14 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
     } catch (error) {
       const code = errorCode(error, "bootstrap-failed");
       await updateStatus(stateRoot, config, {
-        state: "update-failed",
-        running: false,
-        standby: false,
+        ...(!preserveLifecycle ? {
+          state: "update-failed",
+          running: false,
+          standby: false,
+          code,
+        } : {}),
         ready: false,
         readyUntil: null,
-        code,
         connection: {
           api: "error",
           ...(code === "network-request-failed" ? { tls: "error" } : {}),
