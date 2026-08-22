@@ -80,13 +80,20 @@ async function runPortableSupervisorLocked(config, options = {}) {
 }
 
 export async function renewReadyAttestation(config, stateRoot, options = {}) {
-  const [ready, status] = await Promise.all([
+  const [ready, status, control] = await Promise.all([
     readOptionalJson(stateRoot, "ready.json"),
     readOptionalJson(stateRoot, "status.json"),
+    readWorkerControl(stateRoot, config),
   ]);
   const refreshBeforeMilliseconds = (options.readyRefreshBeforeSeconds ?? 3000) * 1000;
   const remaining = Date.parse(ready?.readyUntil ?? "") - (options.now?.() ?? Date.now());
-  if (ready?.ready === true && Number.isFinite(remaining) && remaining > refreshBeforeMilliseconds) {
+  const requestedCapacity = effectiveRequestedCapacity(control);
+  if (
+    ready?.ready === true &&
+    ready.requestedCapacity === requestedCapacity &&
+    Number.isFinite(remaining) &&
+    remaining > refreshBeforeMilliseconds
+  ) {
     return ready;
   }
   return (options.bootstrapWorkerLocked ?? bootstrapWorkerLocked)(config, stateRoot, {

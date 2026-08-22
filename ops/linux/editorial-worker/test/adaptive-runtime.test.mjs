@@ -348,7 +348,7 @@ test("portable supervisor keeps heartbeat at capacity zero and never claims", as
   let clock = 0;
   let heartbeats = 0;
   let workStarts = 0;
-  const result = await runPortableSupervisor({ stateDirectory }, {
+  const result = await runPortableSupervisor({ stateDirectory, requestedCapacity: 0 }, {
     maximumCycles: 3,
     waitForWorkOnStop: false,
     now: () => clock,
@@ -374,7 +374,7 @@ test("portable supervisor honors the orchestrator parallel-work target", async (
   let starts = 0;
   let release;
   const held = new Promise((resolve) => { release = resolve; });
-  const result = await runPortableSupervisor({ stateDirectory }, {
+  const result = await runPortableSupervisor({ stateDirectory, requestedCapacity: 3 }, {
     maximumCycles: 3,
     waitForWorkOnStop: false,
     now: () => clock,
@@ -403,7 +403,7 @@ test("portable supervisor reports completed assignment results", async (t) => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "hch-portable-result-"));
   t.after(() => rm(stateDirectory, { recursive: true, force: true }));
   const observed = [];
-  const result = await runPortableSupervisor({ stateDirectory }, {
+  const result = await runPortableSupervisor({ stateDirectory, requestedCapacity: 1 }, {
     maximumCycles: 1,
     now: () => 0,
     nodeHeartbeat: async () => heartbeatSnapshot(1, true, 1),
@@ -430,6 +430,22 @@ test("portable readiness renewal is independent from capacity zero", async (t) =
   let renewals = 0;
   await renewReadyAttestation({ requestedCapacity: 0 }, stateRoot, {
     now: () => Date.parse("2026-08-15T00:14:00.000Z"),
+    bootstrapWorkerLocked: async () => { renewals += 1; return { ready: true }; },
+  });
+  assert.equal(renewals, 1);
+});
+
+test("portable readiness renews immediately when requested capacity changes", async (t) => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "hch-portable-capacity-renewal-"));
+  t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  await writeFile(join(stateRoot, "ready.json"), JSON.stringify({
+    ready: true,
+    requestedCapacity: 0,
+    readyUntil: "2026-08-15T02:00:00.000Z",
+  }));
+  let renewals = 0;
+  await renewReadyAttestation({ requestedCapacity: 1 }, stateRoot, {
+    now: () => Date.parse("2026-08-15T00:00:00.000Z"),
     bootstrapWorkerLocked: async () => { renewals += 1; return { ready: true }; },
   });
   assert.equal(renewals, 1);
