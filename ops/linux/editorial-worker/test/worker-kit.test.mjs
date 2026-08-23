@@ -47,6 +47,15 @@ test("VPS timer uses the portable claim lifecycle", async () => {
   assert.doesNotMatch(source, /HCH_EDITORIAL_WORKER_ENTRYPOINT\}\" execute/);
 });
 
+test("VPS supervisor uses the installed pinned Node runtime", async () => {
+  const source = await readFile(
+    new URL("../../../systemd/hch-editorial-worker.service", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /ExecStart=\/usr\/local\/libexec\/hch-node .*worker\.mjs supervise/);
+  assert.doesNotMatch(source, /ExecStart=\/usr\/bin\/node/);
+});
+
 test("macOS installer retires conflicting legacy agents and preserves Ollama", async () => {
   const source = await readFile(
     new URL("../../../macos/editorial-worker/install-launch-agents.sh", import.meta.url),
