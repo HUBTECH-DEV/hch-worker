@@ -312,7 +312,7 @@ export async function requestOllamaNdjson(urlValue, requestBody, options) {
             : "generator-stalled");
       throw new WorkerKitError(code, "The local generator stopped demonstrating progress.");
     }
-    throw error;
+    throw normalizeGeneratorError(error);
   } finally {
     clearTimeout(watchdog);
   }
@@ -739,7 +739,19 @@ function normalizeGeneratorError(error) {
   if (error?.code === "generator-stalled") return error;
   if (error?.code === "generator-first-progress-timeout") return error;
   if (error?.code === "generator-finalization-stalled") return error;
-  return error instanceof Error ? error : new Error("worker-generation-failed");
+  if (error instanceof WorkerKitError) return error;
+  if (error instanceof SyntaxError) {
+    return new WorkerKitError(
+      "local-generator-response-invalid",
+      "Ollama returned an invalid streaming response.",
+      { cause: error },
+    );
+  }
+  return new WorkerKitError(
+    "local-generator-transport-failed",
+    "The local generator transport failed.",
+    error instanceof Error ? { cause: error } : {},
+  );
 }
 
 function boundedRepairCandidate(candidate) {

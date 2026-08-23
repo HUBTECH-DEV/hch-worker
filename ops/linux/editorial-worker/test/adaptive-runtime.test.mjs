@@ -214,6 +214,36 @@ test("Ollama completion requires done true and done_reason stop without exposing
   );
 });
 
+test("Ollama transport and malformed streams use safe actionable codes", async () => {
+  const plan = {
+    firstProgressGraceSeconds: 1,
+    stallAfterSeconds: 1,
+    finalizationGraceSeconds: 1,
+  };
+  await assert.rejects(
+    requestOllamaNdjson("http://127.0.0.1:11434/api/chat", "{}", {
+      generationPlan: plan,
+      fetcher: async () => { throw new TypeError("socket details must stay private"); },
+    }),
+    (error) => error?.code === "local-generator-transport-failed" &&
+      !String(error.message).includes("socket details"),
+  );
+
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("not-json\n"));
+      controller.close();
+    },
+  });
+  await assert.rejects(
+    requestOllamaNdjson("http://127.0.0.1:11434/api/chat", "{}", {
+      generationPlan: plan,
+      fetcher: async () => new Response(stream, { status: 200 }),
+    }),
+    (error) => error?.code === "local-generator-response-invalid",
+  );
+});
+
 test("server generator-stalled heartbeat aborts work fail-closed", async () => {
   const progress = createAssignmentProgress();
   const cancellation = new AbortController();
