@@ -129,21 +129,29 @@ export async function withWorkerLock(stateDirectory, operation) {
   const lockPath = resolve(root, ".worker.lock");
   let handle;
   try {
-    handle = await open(
-      lockPath,
-      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
-      0o600,
-    );
+    handle = await openWorkerLock(lockPath);
+  } catch (error) {
+    if (error?.code !== "EEXIST" || !await reclaimDeadWorkerLock(lockPath)) {
+      if (error?.code === "EEXIST") {
+        throw new Error("Another worker-kit operation is already in progress.");
+      }
+      throw error;
+    }
+    try {
+      handle = await openWorkerLock(lockPath);
+    } catch (retryError) {
+      if (retryError?.code === "EEXIST") {
+        throw new Error("Another worker-kit operation is already in progress.");
+      }
+      throw retryError;
+    }
+  }
+  try {
     await handle.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
     await handle.sync();
   } catch (error) {
-    if (handle) {
-      await handle.close().catch(() => {});
-      await rm(lockPath, { force: true }).catch(() => {});
-    }
-    if (error?.code === "EEXIST") {
-      throw new Error("Another worker-kit operation is already in progress.");
-    }
+    await handle.close().catch(() => {});
+    await rm(lockPath, { force: true }).catch(() => {});
     throw error;
   }
   try {
@@ -152,6 +160,43 @@ export async function withWorkerLock(stateDirectory, operation) {
     await handle.close().catch(() => {});
     await rm(lockPath, { force: true }).catch(() => {});
   }
+}
+
+function openWorkerLock(lockPath) {
+  return open(
+    lockPath,
+    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+    0o600,
+  );
+}
+
+async function reclaimDeadWorkerLock(lockPath) {
+  let lock;
+  try {
+    const bytes = await readSafeFile(lockPath, 1024);
+    lock = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    return false;
+  }
+  if (
+    !lock || typeof lock !== "object" || Array.isArray(lock) ||
+    !Number.isSafeInteger(lock.pid) || lock.pid < 1 ||
+    typeof lock.at !== "string" || !Number.isFinite(Date.parse(lock.at))
+  ) return false;
+  try {
+    process.kill(lock.pid, 0);
+    return false;
+  } catch (error) {
+    if (error?.code !== "ESRCH") return false;
+  }
+  const quarantined = `${lockPath}.stale.${lock.pid}.${randomUUID()}`;
+  try {
+    await rename(lockPath, quarantined);
+  } catch {
+    return false;
+  }
+  await rm(quarantined, { force: true }).catch(() => {});
+  return true;
 }
 
 async function readSafeFile(target, maximumBytes) {

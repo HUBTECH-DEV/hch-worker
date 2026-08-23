@@ -32,6 +32,7 @@ import {
   stopHeartbeatBeforeComplete,
 } from "../lib/supervisor.mjs";
 import { WorkerKitError } from "../lib/errors.mjs";
+import { withWorkerLock } from "../lib/storage.mjs";
 import { canonicalizeJson } from "../crypto.mjs";
 import { createGenerationPlan, generationPlanHash } from "../../../../lib/editorial-work-sizing.mjs";
 import { validationErrorCodes } from "../worker.mjs";
@@ -319,6 +320,23 @@ test("completion gate rechecks heartbeat loss after stopAndWait", async () => {
   await assert.rejects(
     stopHeartbeatBeforeComplete(heartbeat),
     (error) => error?.code === "lease-lost-discard-result",
+  );
+});
+
+test("worker lock reclaims a proven dead PID and keeps malformed locks fail-closed", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hch-stale-lock-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    join(root, ".worker.lock"),
+    JSON.stringify({ pid: 2_147_483_647, at: new Date().toISOString() }),
+    { mode: 0o600 },
+  );
+  assert.equal(await withWorkerLock(root, async () => "recovered"), "recovered");
+
+  await writeFile(join(root, ".worker.lock"), "malformed", { mode: 0o600 });
+  await assert.rejects(
+    withWorkerLock(root, async () => "unsafe"),
+    /Another worker-kit operation is already in progress/,
   );
 });
 
