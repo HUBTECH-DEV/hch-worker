@@ -118,13 +118,28 @@ test("Ollama request uses portable JSON mode and exact signed num_predict", () =
     prompt: "system",
     editorialProfile: "EDITORIAL_MINIMUM",
     input: { locale: "pt-BR" },
+    platform: "darwin",
     attempt: 1,
     lastValidation: null,
     previousCandidate: null,
   });
   assert.equal(request.stream, true);
   assert.equal(request.options.num_predict, 768);
+  assert.equal(request.options.num_batch, 256);
   assert.equal(request.format, "json");
+
+  const linuxRequest = ollamaGenerationRequest({
+    profile: { model: "qwen", temperature: 0.2, contextWindow: 8192 },
+    generationPlan: { maxOutputTokens: 768 },
+    prompt: "system",
+    editorialProfile: "EDITORIAL_MINIMUM",
+    input: { locale: "pt-BR" },
+    platform: "linux",
+    attempt: 1,
+    lastValidation: null,
+    previousCandidate: null,
+  });
+  assert.equal(Object.hasOwn(linuxRequest.options, "num_batch"), false);
 });
 
 test("model evidence is bounded for first-token portability", () => {

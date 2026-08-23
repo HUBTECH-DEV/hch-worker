@@ -90,6 +90,7 @@ export async function generateEditorialDraft(
       prompt,
       editorialProfile,
       input,
+      platform: options.platform ?? process.platform,
       attempt,
       lastValidation,
       previousCandidate,
@@ -159,6 +160,10 @@ export function ollamaGenerationRequest(input) {
     options: {
       temperature: input.profile.temperature,
       num_ctx: input.profile.contextWindow,
+      // Large Darwin prefill batches can make Ollama fail with HTTP 500 under
+      // memory pressure before the first progress chunk. Keep the signed
+      // context/output budgets intact while lowering only the local batch.
+      ...(input.platform === "darwin" ? { num_batch: 256 } : {}),
       // The immutable generation plan owns the exact output budget. Never
       // infer, increase, or renegotiate it locally.
       num_predict: input.generationPlan.maxOutputTokens,
