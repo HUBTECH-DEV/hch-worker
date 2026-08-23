@@ -127,6 +127,10 @@ test("Ollama request uses portable JSON mode and exact signed num_predict", () =
   assert.equal(request.options.num_predict, 768);
   assert.equal(request.options.num_batch, 256);
   assert.equal(request.format, "json");
+  const userPayload = JSON.parse(request.messages[1].content);
+  assert.deepEqual(userPayload.requiredResponseKeys, ["title", "excerpt", "paragraphs"]);
+  assert.deepEqual(Object.keys(userPayload.responseShape), ["title", "excerpt", "paragraphs"]);
+  assert.match(userPayload.responseRules.join(" "), /não renomeie title, excerpt ou paragraphs/);
 
   const linuxRequest = ollamaGenerationRequest({
     profile: { model: "qwen", temperature: 0.2, contextWindow: 8192 },

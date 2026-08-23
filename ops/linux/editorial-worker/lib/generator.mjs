@@ -179,6 +179,17 @@ export function ollamaGenerationRequest(input) {
           operation: input.attempt === 1
             ? "generate-editorial-content"
             : "repair-editorial-content",
+          requiredResponseKeys: ["title", "excerpt", "paragraphs"],
+          responseShape: {
+            title: "Título editorial em português brasileiro",
+            excerpt: "Resumo editorial em português brasileiro",
+            paragraphs: ["Texto corrido do parágrafo encerrado com [S1]"],
+          },
+          responseRules: [
+            "retorne o objeto de conteúdo, não um schema ou objeto wrapper",
+            "paragraphs deve ser um array de strings com a contagem exigida",
+            "não renomeie title, excerpt ou paragraphs",
+          ],
           requirements: requirements(input.editorialProfile),
           input: input.input,
           validationFeedback: input.lastValidation?.errors ?? [],
