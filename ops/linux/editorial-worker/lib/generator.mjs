@@ -149,6 +149,7 @@ export async function generateEditorialDraft(
 }
 
 export function ollamaGenerationRequest(input) {
+  const profileRequirements = requirements(input.editorialProfile);
   return {
     model: input.profile.model,
     stream: true,
@@ -180,17 +181,24 @@ export function ollamaGenerationRequest(input) {
             ? "generate-editorial-content"
             : "repair-editorial-content",
           requiredResponseKeys: ["title", "excerpt", "paragraphs"],
-          responseShape: {
-            title: "Título editorial em português brasileiro",
-            excerpt: "Resumo editorial em português brasileiro",
-            paragraphs: ["Texto corrido do parágrafo encerrado com [S1]"],
+          fieldRequirements: {
+            title: "string final autoral em português brasileiro, com pelo menos 8 caracteres",
+            excerpt: "string final autoral em português brasileiro, com pelo menos 20 caracteres",
+            paragraphs: {
+              type: "array de strings finais autorais",
+              exactCount: profileRequirements.paragraphs,
+              characterRange: profileRequirements.characters ?? null,
+              wordRange: profileRequirements.words ?? null,
+              minimumWordsPerParagraph: profileRequirements.minimumWordsPerParagraph ?? null,
+            },
           },
           responseRules: [
             "retorne o objeto de conteúdo, não um schema ou objeto wrapper",
             "paragraphs deve ser um array de strings com a contagem exigida",
             "não renomeie title, excerpt ou paragraphs",
+            "os valores devem ser o conteúdo editorial final, nunca descrições, instruções ou placeholders",
           ],
-          requirements: requirements(input.editorialProfile),
+          requirements: profileRequirements,
           input: input.input,
           validationFeedback: input.lastValidation?.errors ?? [],
           previousCandidate: input.previousCandidate,

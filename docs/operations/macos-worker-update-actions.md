@@ -1,116 +1,240 @@
-# Ações de atualização do HCH Worker no Mac
+# Atualização do HCH Worker no macOS
 
-Este roteiro deve ser executado **no Mac**, na branch
-`MacBook-Pro-de-Paulo`. Ele incorpora os fixes validados no Windows/VPS sem
-transportar tokens ou chaves privadas pelo Git.
+Este runbook descreve a atualização reversível do nó `mac-worker-01`. A fonte
+canônica é `HUBTECH-DEV/hch-worker`, e o desenvolvimento deve ocorrer na branch
+do dispositivo `MacBook-Pro-de-Paulo`. Uma revisão só pode ser declarada como
+nova versão depois que instalação, trust, heartbeat e um canário real forem
+validados. Antes disso, trate-a como fix candidato.
 
-## 1. Atualizar e integrar o código
+## Evidência histórica de preparação em 2026-08-22
+
+- configuração: `$HOME/workspaces/hch-mac-worker-ops/orchestrator/worker-config.json`;
+- estado privado: `$HOME/workspaces/hch-mac-worker-ops/run/orchestrator/state`;
+- runtime imutável preparado em testes: `/usr/local/libexec/hch-editorial-runtime-6c5c9a0846f9`;
+- symlink de execução: `/usr/local/libexec/hch-editorial-runtime`;
+- versão declarada do kit: `3.1.0`;
+- Ollama: `0.32.6`, serviço único em `127.0.0.1:11434`;
+- modelo: `qwen2.5:1.5b-instruct`, digest
+  `65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b`;
+- manifesto: sequência `5`, hash
+  `9baff244f66727518f03b5a5b5a23a6ccfbf27803a8758af38ffc45f9588a8b9`;
+- backup da implantação:
+  `$HOME/workspaces/hch-mac-worker-ops/backups/device-update-20260822-134455`.
+
+O LaunchAgent contínuo é
+`online.hubtech.hch.editorial-worker.cycle`. Ele executa `worker.mjs supervise`,
+mantém heartbeat e abre o dashboard somente em `127.0.0.1:4319`. O Ollama é
+mantido separadamente por `com.hubtech.hch-orchestrator-ollama`.
+
+## Estado seguro e decisão operacional em 2026-08-23
+
+### Evidência confirmada
+
+- os testes direcionados da correção anti-placeholder e da recuperação segura
+  de lock passaram (`1/1` cada);
+- `npm test` passou: Linux `62/62` e dashboard `30/30`;
+- a suíte Windows terminou sem falhas: `36` passaram e `14` integrações
+  específicas da plataforma foram ignoradas (`50` no total);
+- no Mac, a leitura de `status.json` confirmou `state=draining`,
+  `running=false`, `currentBatch=null`, capacidades solicitada, concedida e
+  efetiva em `0` e zero assignments ativos; `worker-control.json` confirmou
+  `acceptingClaims=false` e `drainRequested=true`;
+- na VPS, o serviço contínuo foi reportado como ativo, mas os claims
+  permaneceram drenados; nenhum deploy ou canário foi autorizado nesta janela;
+- `3.1.0` continua sendo somente fix candidato: não há canário editorial
+  aprovado, validação de runtime, tag, release ou promoção para `main`.
+
+### Ensaio isolado inconclusivo
+
+- o primeiro ensaio recebeu HTTP 200, mas reprovou a validação editorial; a
+  tentativa de reparo terminou em HTTP 500 com stream fechado;
+- o segundo ensaio recebeu HTTP 200, porém não preservou stdout nem o JSON final
+  necessário para provar o resultado;
+- nenhum ensaio produziu um `pass` editorial reproduzível. Foi enviado `TERM`
+  ao PID `37040` às `20:59:17-03`, `7 s` após o deadline; a saída foi
+  confirmada em `<=5 s`; nenhum PID operacional foi tocado.
+
+O resultado permanece **inconclusivo**. Não execute nova inferência nem trate
+HTTP 200 isolado como validação de runtime.
+
+### Concorrência externa observada
+
+Durante a janela, os contadores mudaram de `claimed=86`/`failed=24` para
+`claimed=88`/`failed=26`. `worker-control.json` foi gravado às
+`20:48:42-03` (`updatedAt=2026-08-23T23:48:42.552Z`) com `updatedBy=stop`,
+`acceptingClaims=false` e capacidade `0`; `metrics.json` e o log de erro foram
+gravados às `20:48:43-03`, terminando em `operator-stop-requested` e nos
+contadores `88/26`.
+
+As duas operações concluídas às `20:45:35-03` e `20:45:38-03` não registram
+ação nem ator. A auditoria dos rollouts Codex da data não encontrou
+`control-start`, `control-stop`, `set-parallelism` ou POST para a API de
+controle nessa janela; o harness isolado chamou `generateEditorialDraft`
+diretamente em diretório temporário, sem fila ou controle. A única atribuição
+suportada é: ação externa ao harness, por um caminho que gravou
+`updatedBy=stop`. A origem do `operator-stop-requested` é indeterminável pela
+ausência de access/audit log durável. Dashboard, CLI, outro processo e a
+identidade do ator também são indetermináveis. Não atribua pessoa.
+
+### Gate atual
+
+Canário, deploy e reabertura de claims estão bloqueados. Mantenha Mac e VPS em
+drain, `acceptingClaims=false` e capacidade `0/0` até nova autorização explícita
+do chat principal e até existir evidência editorial reproduzível.
+
+## 1. Sincronizar sem alterar `main`
 
 ```sh
 git fetch origin --prune
 git switch MacBook-Pro-de-Paulo
 git pull --ff-only origin MacBook-Pro-de-Paulo
-git merge --no-ff origin/NB-PE0FHWM9
-npm test
+git status --short --branch
+npm run test:linux
+npm run test:dashboard
+npm run test:windows
 ```
 
-O merge deve conter, no mínimo, os commits `6731c1b` (execução por symlink de
-release imutável) e `57fe4ce` (ciclo portátil `run-one`). Resolva conflitos
-preservando a integração macOS em `ops/macos/editorial-worker`.
+Pare diante de divergência. Não faça merge, rebase, force push ou promoção para
+`main` sem autorização separada. Antes do push, revise segredos e publique
+somente a branch do dispositivo.
 
-## 2. Colocar o worker em drain e fazer backup
+## 2. Entrar em drain e preservar o estado
+
+```sh
+export HCH_CONFIG="$HOME/workspaces/hch-mac-worker-ops/orchestrator/worker-config.json"
+export HCH_STATE="$HOME/workspaces/hch-mac-worker-ops/run/orchestrator/state"
+export HCH_RUNTIME="/usr/local/libexec/hch-editorial-runtime"
+
+node "$HCH_RUNTIME/ops/linux/editorial-worker/worker.mjs" \
+  control-pause --config "$HCH_CONFIG"
+jq '{state,running,currentBatch,capacity}' "$HCH_STATE/status.json"
+```
+
+Somente prossiga com `running=false`, `currentBatch=null` e capacidades
+solicitada/concedida/efetiva iguais a zero. Copie configuração, estado, plists,
+symlink atual e versão do Ollama para um diretório privado de backup. Chaves
+privadas e tokens nunca entram no Git.
+
+`pause` deixa o assignment atual terminar. Para cancelar trabalho ativo de
+forma auditável, use `control-stop`; o erro remoto deve ser
+`operator-stop-requested`.
+
+## 3. Validar o Ollama sem abrir claims
+
+A versão observada e usada nos ensaios deste Mac é `0.32.6`. Isso não valida o
+runtime editorial. O arquivo oficial `Ollama-darwin.zip` usado na preparação
+possuía SHA-256
+`cc708ee7a9366b73b97d3f2999e25bb24b0a86feb41a0d2ced784ff4d4855e6d`.
+O LaunchAgent deve manter:
+
+```text
+OLLAMA_HOST=127.0.0.1:11434
+OLLAMA_LOAD_TIMEOUT=30m
+OLLAMA_KEEP_ALIVE=10m
+OLLAMA_MAX_LOADED_MODELS=1
+OLLAMA_NUM_PARALLEL=1
+OLLAMA_NO_CLOUD=true
+```
+
+Valide sem claim:
+
+```sh
+/Applications/Ollama.app/Contents/Resources/ollama --version
+curl -fsS http://127.0.0.1:11434/api/tags | jq .
+curl -fsS http://127.0.0.1:11434/api/ps | jq .
+```
+
+Em máquinas com 8 GB, pressão de memória e HTTP 500 durante o prefill precisam
+ser registrados como diagnóstico, não como prova de compatibilidade ou
+incompatibilidade. Enquanto o gate de 2026-08-23 estiver ativo, não repita a
+inferência e não abra claims.
+
+## 4. Procedimento preparado para instalar uma revisão imutável
+
+Este procedimento não está autorizado pelo registro de 2026-08-23. Execute-o
+somente em uma janela aprovada, depois de backup e confirmação do drain.
 
 ```sh
 export HCH_REPO="$PWD"
-export HCH_CONFIG="$HOME/Library/Application Support/HCH/editorial-worker/config.json"
-export HCH_CTL="$HCH_REPO/ops/macos/editorial-worker/hch-editorial-workerctl"
-export HCH_BACKUP="$HOME/Library/Application Support/HCH/backups/$(date +%Y%m%d-%H%M%S)"
-mkdir -m 700 -p "$HCH_BACKUP"
-/bin/sh "$HCH_CTL" set-parallelism 0
-/bin/sh "$HCH_CTL" pause
-cp -p "$HCH_CONFIG" "$HCH_BACKUP/config.json"
-cp -Rp "$HOME/Library/Application Support/HCH/editorial-worker" "$HCH_BACKUP/state"
-cp -Rp "$HOME/Library/LaunchAgents"/online.hubtech.hch.editorial-worker.* "$HCH_BACKUP/" 2>/dev/null || true
-```
-
-Aguarde o trabalho atual terminar. `pause` e paralelismo `0` não cancelam o
-assignment em andamento. Não prossiga enquanto `currentBatch` não estiver
-vazio.
-
-## 3. Atualizar a confiança pública
-
-Transfira por canal confiável **somente** `root-public.pem`. Nunca transfira a
-chave raiz privada. Confirme fora do Git que o fingerprint recebido é:
-
-```text
-SHA256:wBbHjXmYqv63QAjNHKlKcLfEVrGjr7nva_h1t4zolLY
-```
-
-Faça backup do arquivo público e do `trust-state`, instale a nova chave no
-`rootPublicKeyPath` definido pela configuração e atualize apenas o fingerprint
-público configurado. Preserve identidade, chave privada, token e estado de
-assignments. Se for necessário reancorar a confiança, mova o `trust-state`
-anterior para o backup; não o apague.
-
-## 4. Instalar a release imutável e o LaunchAgent
-
-```sh
 export HCH_COMMIT="$(git rev-parse --short=12 HEAD)"
 export HCH_RELEASE_ROOT="/usr/local/libexec/hch-editorial-runtime-$HCH_COMMIT"
-export HCH_NODE_BIN="$(command -v node)"
+
+launchctl bootout "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/online.hubtech.hch.editorial-worker.cycle.plist" \
+  2>/dev/null || true
 sudo mkdir -p "$HCH_RELEASE_ROOT"
-sudo rsync -a --delete --exclude .git/ "$HCH_REPO/" "$HCH_RELEASE_ROOT/"
-sudo ln -sfn "$HCH_RELEASE_ROOT" /usr/local/libexec/hch-editorial-runtime
-HCH_RUNTIME_ROOT=/usr/local/libexec/hch-editorial-runtime \
-HCH_WORKER_CONFIG="$HCH_CONFIG" HCH_NODE_BIN="$HCH_NODE_BIN" \
-/bin/sh "$HCH_RELEASE_ROOT/ops/macos/editorial-worker/install-launch-agents.sh"
+sudo rsync -a --exclude=.git --exclude=node_modules --exclude=.DS_Store \
+  "$HCH_REPO/" "$HCH_RELEASE_ROOT/"
+sudo chown -R root:wheel "$HCH_RELEASE_ROOT"
+sudo chmod -R a-w "$HCH_RELEASE_ROOT"
+sudo ln -shf "$HCH_RELEASE_ROOT" /usr/local/libexec/hch-editorial-runtime
+launchctl bootstrap "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/online.hubtech.hch.editorial-worker.cycle.plist"
 ```
 
-O processo contínuo do `launchd` deve usar `supervise`/`run-one`. O endpoint
-legado `/execute` não faz parte do ciclo de execução.
+No ChatGPT Desktop, o mesmo bloco pode ser executado por `osascript` com
+`administrator privileges`, gerando o diálogo nativo. Confirme o alvo com
+`readlink`; no macOS, `mv` sobre symlink de diretório pode seguir o destino e
+não deve ser usado como substituição.
 
-## 5. Validar confiança, manifesto e execução
+O runtime 3.1.0 recupera `.worker.lock` somente quando o PID registrado é
+comprovadamente inexistente. Lock malformado, PID vivo ou erro de permissão
+permanecem fail-closed.
+
+## 5. Critérios preparados para um único canário
+
+Esta seção não autoriza execução. O chat principal precisa aprovar explicitamente
+o canário e a abertura temporária de capacidade `1`.
+
+Primeiro confirme o estado drenado:
 
 ```sh
-export HCH_RUNTIME_ROOT=/usr/local/libexec/hch-editorial-runtime
-export HCH_WORKER_CONFIG="$HCH_CONFIG"
-export HCH_NODE_BIN
-/bin/sh "$HCH_CTL" validate
-/bin/sh "$HCH_CTL" status
-/bin/sh "$HCH_CTL" set-parallelism 1
-/bin/sh "$HCH_CTL" start
 launchctl print "gui/$(id -u)/online.hubtech.hch.editorial-worker.cycle"
-open http://127.0.0.1:4319
+node "$HCH_RUNTIME/ops/linux/editorial-worker/worker.mjs" \
+  control-validate --config "$HCH_CONFIG"
+node "$HCH_RUNTIME/ops/linux/editorial-worker/worker.mjs" \
+  control-status --config "$HCH_CONFIG"
 ```
+
+Quando autorizado, o canário deve usar capacidade 1 e fechar a capacidade assim
+que o contador `jobs.claimed` aumentar em exatamente uma unidade. Não use um
+`sleep` fixo: monitore `metrics.json` e execute `control-pause` imediatamente
+após o claim.
 
 Critérios de aceite:
 
-- manifesto na sequência `5`, hash
-  `9baff244f66727518f03b5a5b5a23a6ccfbf27803a8758af38ffc45f9588a8b9`;
-- confiança verificada e heartbeat aceito;
-- capacidade solicitada e concedida igual a `1` no canário;
-- um assignment processado com progresso enviado nos heartbeats;
-- dashboard acessível somente em `127.0.0.1:4319`;
-- conclusão entregue como `pending-review`.
+- trust `verified`, root `hch-root-v3` e release `hch-release-v4`;
+- heartbeat aceito e manifesto sequência 5;
+- assignment no tier autorizado pelo servidor;
+- progresso do gerador renovando o lease;
+- conclusão `pending-review`;
+- `automaticApproval=false` e `automaticPublication=false`;
+- retorno final a `draining`, capacidade zero e `currentBatch=null`.
 
-Depois do canário, ajuste o paralelismo desejado (por exemplo, `2`). O valor
-`0` mantém pause sem cancelar o trabalho atual; `stop` cancela os trabalhos e
-relata o encerramento ao orquestrador.
+## 6. Limitação atual de tier do Mac
 
-## 6. Rollback e encerramento
+O control plane redefine o tier adaptativo para o maior nível (`full`) em toda
+nova atestação. Ensaios anteriores usaram teto `minimum`, mas não produziram
+validação editorial ponta a ponta. Alterar o banco manualmente não é uma solução
+durável e exige autorização separada: a próxima renovação de prontidão volta a
+`full`.
 
-Se qualquer critério falhar, volte para paralelismo `0`, descarregue os agentes
-candidatos, restaure os plists/configuração e a versão anterior do symlink a
-partir do backup. Não faça downgrade de um manifesto válido mais recente.
+Até que o HCH preserve um teto por nó durante a atestação, mantenha o Mac em
+drain. A correção pertence ao servidor HCH e deve ser aplicada na
+branch do dispositivo correspondente; não integre automaticamente uma branch
+divergente.
 
-Após aceite no Mac:
+## 7. Plano de rollback não executado
 
-```sh
-git status --short
-git add -A
-git commit -m "chore(mac): record worker deployment result"
-git push origin MacBook-Pro-de-Paulo
-```
+O plano abaixo é um critério de preparação; sua execução exige autorização.
 
-Registre no commit somente código, testes e evidências sem segredo. Não inclua
-configuração do host, tokens, chaves privadas, estado ou logs sensíveis.
+1. Execute `control-stop` se houver assignment ativo e aguarde a confirmação
+   remota.
+2. Descarregue o LaunchAgent do Worker.
+3. Reponte o symlink para o runtime anterior registrado no backup.
+4. Restaure somente configuração/plists necessários; preserve manifestos mais
+   novos e a identidade do nó.
+5. Recarregue em capacidade zero e revalide trust e heartbeat.
+
+Nunca faça downgrade de trust verificado, apague estado em massa ou reabra
+claims durante o rollback.
