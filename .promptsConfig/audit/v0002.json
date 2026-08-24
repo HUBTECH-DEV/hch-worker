@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "version": 2,
+  "timestamp": "2026-08-15T10:24:57-03:00",
+  "source": "user",
+  "action": "project-configuration-updated",
+  "summary": "Descoberta automática de release com aplicação manual e gates de drain, validação e rollback.",
+  "previousVersion": 1,
+  "newVersion": 2,
+  "rollback": null
+}

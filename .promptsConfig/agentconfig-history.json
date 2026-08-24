@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0",
   "projectName": "HCH Worker",
-  "currentVersion": 2,
+  "currentVersion": 3,
   "versions": [
     {
       "version": 1,
@@ -23,6 +23,17 @@
       "previousVersion": 1,
       "newVersion": 2,
       "snapshotFile": "history/v0002.json",
+      "rollback": null
+    },
+    {
+      "version": 3,
+      "timestamp": "2026-08-22T22:35:00-03:00",
+      "changedBy": "user",
+      "reason": "Padronizar publicação automática por branch do dispositivo e preservar main para integração expressamente autorizada.",
+      "summary": "Adiciona branch MacBook-Pro-de-Paulo, push automático sem force, parada em divergência e gate separado para main.",
+      "previousVersion": 2,
+      "newVersion": 3,
+      "snapshotFile": "history/v0003.json",
       "rollback": null
     }
   ]

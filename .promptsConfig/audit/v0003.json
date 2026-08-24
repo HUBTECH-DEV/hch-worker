@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "version": 3,
+  "timestamp": "2026-08-22T22:35:00-03:00",
+  "source": "user",
+  "action": "project-configuration-updated",
+  "summary": "Publicação automática sem force na branch do dispositivo, com main sujeita a autorização separada.",
+  "previousVersion": 2,
+  "newVersion": 3,
+  "rollback": null
+}
