@@ -421,9 +421,16 @@ function requirements(profile) {
   return { ...shared, paragraphs: 5, minimumBodyCharacters: 3200, minimumBodyWords: 450 };
 }
 
-function normalizeParagraphs(value, profile) {
+export function normalizeParagraphs(value, profile) {
   if (!Array.isArray(value)) return [];
-  return value.map((raw, index) => {
+  const normalizedValue = new Set([
+    "EDITORIAL_MINIMUM",
+    "CATALOG_SUMMARY",
+    "EVENT_LISTING",
+  ]).has(profile)
+    ? coalesceSingleParagraphCandidate(value)
+    : value;
+  return normalizedValue.map((raw, index) => {
     const requested = raw && typeof raw === "object" ? raw : {};
     const rawText = typeof raw === "string" ? raw : requested.text;
     const text = fitGeneratedParagraphToProfile(ensureCitation(sanitize(rawText)), profile);
@@ -444,6 +451,16 @@ function normalizeParagraphs(value, profile) {
       }],
     };
   });
+}
+
+function coalesceSingleParagraphCandidate(value) {
+  if (value.length <= 1) return value;
+  const text = value
+    .map((raw) => typeof raw === "string" ? raw : raw?.text)
+    .map((raw) => sanitize(raw).replace(/\s*\[S1\][.!?]?\s*$/i, "").trim())
+    .filter(Boolean)
+    .join(" ");
+  return text ? [text] : [];
 }
 
 export async function fetchSourceEvidence(entry, fetcher, options = {}) {

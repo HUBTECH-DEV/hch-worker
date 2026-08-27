@@ -688,9 +688,16 @@ function extractCandidate(payload) {
   return value;
 }
 
-function normalizeParagraphs(value, profile) {
+export function normalizeParagraphs(value, profile) {
   if (!Array.isArray(value)) return [];
-  return value.map((raw, index) => {
+  const normalizedValue = new Set([
+    "EDITORIAL_MINIMUM",
+    "CATALOG_SUMMARY",
+    "EVENT_LISTING",
+  ]).has(profile)
+    ? coalesceSingleParagraphCandidate(value)
+    : value;
+  return normalizedValue.map((raw, index) => {
     const paragraph = raw && typeof raw === "object" ? raw : {};
     const rawText = typeof raw === "string" ? raw : String(paragraph.text ?? "");
     const text = fitGeneratedParagraphToProfile(
@@ -729,6 +736,19 @@ function normalizeParagraphs(value, profile) {
       claims,
     };
   });
+}
+
+function coalesceSingleParagraphCandidate(value) {
+  if (value.length <= 1) return value;
+  const text = value
+    .map((raw) => typeof raw === "string" ? raw : raw?.text)
+    .map((raw) => sanitizeGeneratedText(raw).replace(/\s*\[S1\][.!?]?\s*$/i, "").trim())
+    .filter(Boolean)
+    .join(" ");
+  // Multiple source objects no longer describe one stable paragraph after
+  // coalescing and policy truncation. Rebuild metadata from the final text in
+  // normalizeParagraphs instead of retaining claims whose text may be gone.
+  return text ? [text] : [];
 }
 
 function generationRequirements(profile, policy) {

@@ -96,6 +96,8 @@ import {
   verifyRuntimeProfile,
 } from "../lib/runtime-profile.mjs";
 import {
+  KIT_VERSION,
+  assertWorkerRuntimeVersion,
   completeOperation,
   operationRequestId,
 } from "../lib/local-state.mjs";
@@ -131,6 +133,7 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
     fixture.manifest,
   );
   assert.equal(applied.manifestSequence, fixture.manifest.sequence);
+  assert.equal(applied.workerRuntimeVersion, KIT_VERSION);
   assert.deepEqual(applied.runtimeProfile, expectedRuntimeProfile);
   assert.equal(applied.runtimeProfileHash, expectedRuntimeProfile.runtimeProfileHash);
   assert.equal(applied.provider, fixture.manifest.engine.provider);
@@ -140,8 +143,10 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
     fixture.manifest.engine.adapterVersion,
   );
   assert.equal(ready.ready, true);
+  assert.equal(ready.workerRuntimeVersion, KIT_VERSION);
   assert.equal(ready.runtimeProfileHash, expectedRuntimeProfile.runtimeProfileHash);
   assert.equal(status.state, "standby");
+  assert.equal(status.kitVersion, KIT_VERSION);
   assert.equal(status.ready, true);
   assert.equal(status.connection.ed25519, true);
   assert.equal(status.transport.tlsStatus, "verified");
@@ -310,6 +315,10 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
     fixture.control.attestations[0].engineAdapterVersion,
     fixture.manifest.engine.adapterVersion,
   );
+  assert.equal(
+    fixture.control.attestations[0].workerRuntimeVersion,
+    KIT_VERSION,
+  );
   assert.deepEqual(Object.keys(fixture.control.attestations[0]).sort(), [
     "adaptiveWorkPolicyHash",
     "challenge",
@@ -422,6 +431,76 @@ test("anti-rollback rejects an older signed manifest before bootstrap or artifac
   assert.equal(rollback.sequence, fixture.manifest.sequence - 1);
   const newPaths = fixture.control.paths.slice(previousPathCount);
   assert.deepEqual(newPaths, ["/api/editorial/orchestrator/manifest"]);
+});
+
+test("manifest requiring 3.1.0 rejects an older executable kit", async (t) => {
+  const fixture = await createFixture(t);
+  assert.equal(fixture.manifest.runtime.workerVersion, KIT_VERSION);
+  assert.throws(
+    () => assertWorkerRuntimeVersion(fixture.manifest, "3.0.0"),
+    (error) => error?.code === "worker-runtime-version-incompatible",
+  );
+});
+
+test("bootstrap rejects a signed manifest for another worker runtime before apply", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.control.replaceManifest({
+    runtime: {
+      ...fixture.manifest.runtime,
+      workerVersion: "3.0.0",
+    },
+  });
+  const before = fixture.control.paths.length;
+  await assert.rejects(
+    bootstrapWorker(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "worker-runtime-version-incompatible",
+  );
+  assert.deepEqual(
+    fixture.control.paths.slice(before),
+    ["/api/editorial/orchestrator/manifest"],
+  );
+  assert.equal(fixture.control.attestations.length, 0);
+});
+
+test("a higher delegation is pinned before an incompatible runtime is rejected", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  const nextDelegation = await fixture.control.replaceDelegation({ sequence: 3 });
+  await fixture.control.replaceManifest({
+    sequence: fixture.manifest.sequence + 1,
+    previousManifestHash: fixture.manifest.hash,
+    runtime: {
+      ...fixture.manifest.runtime,
+      workerVersion: "3.0.0",
+    },
+  });
+  await assert.rejects(
+    bootstrapWorker(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "worker-runtime-version-incompatible",
+  );
+  const invalidatedReady = await jsonFile(fixture.stateDirectory, "ready.json");
+  assert.equal(invalidatedReady.ready, false);
+  assert.equal(invalidatedReady.reason, "manifest-update-required");
+  const pinnedTrust = await jsonFile(fixture.stateDirectory, "trust-state.json");
+  assert.equal(pinnedTrust.delegationSequence, 3);
+  assert.equal(
+    pinnedTrust.delegationHash,
+    await sha256Hex(canonicalizeJson(nextDelegation)),
+  );
+  await fixture.control.replaceDelegation({ sequence: 2 });
+  const beforeReplay = fixture.control.paths.length;
+  await assert.rejects(
+    bootstrapWorker(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "delegation-rollback-refused",
+  );
+  assert.deepEqual(
+    fixture.control.paths.slice(beforeReplay),
+    ["/api/editorial/orchestrator/manifest"],
+  );
 });
 
 test("delegation anti-rollback rejects an older still-valid root delegation", async (t) => {
@@ -772,6 +851,54 @@ test("execute does not contact the API when ready.json diverges", async (t) => {
   assert.equal(fixture.control.paths.length, before);
 });
 
+test("execute pins and invalidates a newer manifest under the same delegation", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  await nodeHeartbeat(fixture.config, { fetchImpl: fixture.control.fetch });
+  const nextManifest = await fixture.control.replaceManifest({
+    sequence: fixture.manifest.sequence + 1,
+    previousManifestHash: fixture.manifest.hash,
+  });
+  await assert.rejects(
+    executeWorkerCycle(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "update-required",
+  );
+  const [ready, trustState, status] = await Promise.all([
+    jsonFile(fixture.stateDirectory, "ready.json"),
+    jsonFile(fixture.stateDirectory, "trust-state.json"),
+    jsonFile(fixture.stateDirectory, "status.json"),
+  ]);
+  assert.equal(ready.ready, false);
+  assert.equal(ready.targetManifestHash, nextManifest.hash);
+  assert.equal(trustState.manifestHash, nextManifest.hash);
+  assert.equal(trustState.manifestSequence, nextManifest.sequence);
+  assert.equal(status.ready, false);
+});
+
+test("execute does not contact the API when the persisted runtime version diverges", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  await nodeHeartbeat(fixture.config, { fetchImpl: fixture.control.fetch });
+  const readyPath = join(fixture.stateDirectory, "ready.json");
+  const ready = JSON.parse(await readFile(readyPath, "utf8"));
+  ready.workerRuntimeVersion = "3.0.0";
+  await writeFile(readyPath, JSON.stringify(ready), "utf8");
+  const before = fixture.control.paths.length;
+  await assert.rejects(
+    executeWorkerCycle(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "worker-not-ready",
+  );
+  assert.equal(fixture.control.paths.length, before);
+});
+
 test("execute refuses an installed engine identity outside RuntimeProfile v2", async (t) => {
   const fixture = await createFixture(t);
   await bootstrapWorker(fixture.config, {
@@ -973,6 +1100,23 @@ test("local control CLI operations validate without claiming and stop during an 
   assert.equal(
     fixture.control.paths.slice(beforeValidate).includes("/api/editorial/orchestrator/execute"),
     false,
+  );
+});
+
+test("local validation rejects ready state from another worker runtime", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  const readyPath = join(fixture.stateDirectory, "ready.json");
+  const ready = JSON.parse(await readFile(readyPath, "utf8"));
+  ready.workerRuntimeVersion = "3.0.0";
+  await writeFile(readyPath, JSON.stringify(ready), "utf8");
+  await assert.rejects(
+    validateLocalWorker(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "worker-local-validation-failed",
   );
 });
 
@@ -1267,7 +1411,7 @@ async function createFixture(t, behavior = {}) {
     updateMode: "mandatory",
     configurationHash: "configuration-test",
     runtime: {
-      workerVersion: "2.0.0",
+      workerVersion: KIT_VERSION,
       supportedPlatforms: ["linux", "macos", "windows"],
       executableUpdatesRequireRoot: true,
     },

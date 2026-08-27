@@ -11,6 +11,7 @@ import {
   removeStateFile,
 } from "./storage.mjs";
 import { WorkerKitError } from "./errors.mjs";
+import { KIT_VERSION, assertWorkerRuntimeVersion } from "./local-state.mjs";
 
 const EDITORIAL_DESTINATIONS = new Map([
   ["policy", "runtime/editorial/policy.json"],
@@ -26,6 +27,7 @@ export async function stageApplyAndSelfTest(
   previousApplied,
   options = {},
 ) {
+  assertWorkerRuntimeVersion(manifest);
   const runtimeProfile = await createRuntimeProfileFromManifest(manifest);
   const signedCapacityPolicyHash = await capacityPolicyHash(manifest.capacityPolicy);
   const adaptiveWorkPolicy = validateAdaptiveWorkPolicy(manifest.adaptiveWorkPolicy);
@@ -77,7 +79,7 @@ export async function stageApplyAndSelfTest(
     manifestHash: manifest.hash,
     previousManifestHash: manifest.previousManifestHash,
     releaseId: manifest.releaseId,
-    workerRuntimeVersion: manifest.runtime.workerVersion,
+    workerRuntimeVersion: KIT_VERSION,
     policyHash: manifest.editorial.policyHash,
     promptConfigHash: manifest.editorial.promptConfigHash,
     pipelineVersion: manifest.editorial.pipelineVersion,
@@ -145,6 +147,7 @@ export async function stageApplyAndSelfTest(
       manifestSequence: manifest.sequence,
       manifestHash: manifest.hash,
       releaseId: manifest.releaseId,
+      workerRuntimeVersion: KIT_VERSION,
       receiptHash,
       receipt: receiptCore,
       actionResults: manifest.actions.map((action) => ({

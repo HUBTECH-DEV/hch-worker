@@ -17,6 +17,7 @@ import {
 import {
   ollamaGenerationRequest,
   modelEvidenceExcerpt,
+  normalizeParagraphs,
   assertPublicSourceDestination,
   resolvePublicSourceDestination,
   readBoundedResponseBody,
@@ -24,6 +25,7 @@ import {
   requestPinnedPublicSource,
   validatePublicSourceUrl,
 } from "../lib/generator.mjs";
+import { computeEditorialMetrics } from "../../../../lib/editorial-policy.mjs";
 import {
   assertClaimGate,
   runPortableSupervisor,
@@ -153,6 +155,33 @@ test("model evidence is bounded for first-token portability", () => {
   const excerpt = modelEvidenceExcerpt(`  ${"e".repeat(4_000)}  `);
   assert.equal(excerpt.length, 2_998);
   assert.doesNotMatch(excerpt, /^\s|\s$/);
+});
+
+test("single-paragraph profiles coalesce model spillover without inventing content", () => {
+  const first = Array.from({ length: 25 }, (_, index) => `alfa${index}`).join(" ");
+  const second = Array.from({ length: 25 }, (_, index) => `beta${index}`).join(" ");
+  const input = [`${first} [S1]`, `${second} [S1]`];
+  for (const profile of ["EDITORIAL_MINIMUM", "CATALOG_SUMMARY", "EVENT_LISTING"]) {
+    const [paragraph, ...extras] = normalizeParagraphs(input, profile);
+    assert.equal(extras.length, 0);
+    assert.match(paragraph.text, /\[S1\]$/);
+    assert.equal((paragraph.text.match(/\[S1\]/g) ?? []).length, 1);
+    assert.ok(paragraph.text.indexOf("alfa0") < paragraph.text.indexOf("beta0"));
+    assert.match(paragraph.text, /beta24/);
+  }
+  const paragraphs = normalizeParagraphs(input, "EDITORIAL_MINIMUM");
+  const metrics = computeEditorialMetrics(paragraphs);
+
+  assert.equal(paragraphs.length, 1);
+  assert.ok(metrics.bodyCharacters >= 320 && metrics.bodyCharacters <= 800);
+  assert.ok(metrics.bodyWords >= 50 && metrics.bodyWords <= 115);
+  assert.ok(metrics.minimumParagraphWords >= 50);
+  const wordOverflow = Array.from({ length: 130 }, (_, index) => `w${index}`).join(" ");
+  const overflowMetrics = computeEditorialMetrics(
+    normalizeParagraphs([wordOverflow], "EDITORIAL_MINIMUM"),
+  );
+  assert.equal(overflowMetrics.bodyWords, 115);
+  assert.deepEqual(normalizeParagraphs(["", { text: " " }], "EDITORIAL_MINIMUM"), []);
 });
 
 test("worker logs only bounded validation codes", () => {
@@ -512,6 +541,14 @@ test("portable supervisor reports completed assignment results", async (t) => {
 
 test("claim gate tolerates bounded control-plane clock skew", () => {
   const manifestHash = "a".repeat(64);
+  const manifestSequence = 5;
+  const policyHash = "b".repeat(64);
+  const status = {
+    ready: true,
+    manifestHash,
+    manifestSequence,
+    trust: { manifestHash, manifestSequence, policyHash },
+  };
   assert.doesNotThrow(() => assertClaimGate(
     { nodeId: "node-1" },
     { acceptingClaims: true, drainRequested: false, requestedCapacity: 1 },
@@ -519,8 +556,13 @@ test("claim gate tolerates bounded control-plane clock skew", () => {
       ready: true,
       readyUntil: new Date(Date.now() + 60_000).toISOString(),
       manifestHash,
+      manifestSequence,
+      policyHash,
+      workerRuntimeVersion: "3.1.0",
     },
-    { manifestHash },
+    { manifestHash, manifestSequence, policyHash, workerRuntimeVersion: "3.1.0" },
+    { manifestHash, manifestSequence, policyHash },
+    status,
     {
       nodeId: "node-1",
       heartbeat: {
@@ -537,8 +579,13 @@ test("claim gate tolerates bounded control-plane clock skew", () => {
       ready: true,
       readyUntil: new Date(Date.now() + 60_000).toISOString(),
       manifestHash,
+      manifestSequence,
+      policyHash,
+      workerRuntimeVersion: "3.1.0",
     },
-    { manifestHash },
+    { manifestHash, manifestSequence, policyHash, workerRuntimeVersion: "3.1.0" },
+    { manifestHash, manifestSequence, policyHash },
+    status,
     {
       nodeId: "node-1",
       heartbeat: {
@@ -548,6 +595,101 @@ test("claim gate tolerates bounded control-plane clock skew", () => {
       claim: { allowed: true, recommendedCount: 1 },
     },
   ), (error) => error?.code === "claims-gates-closed");
+});
+
+test("claim gate rejects ready or applied state from another worker runtime", () => {
+  const manifestHash = "a".repeat(64);
+  const manifestSequence = 5;
+  const policyHash = "b".repeat(64);
+  const control = { acceptingClaims: true, drainRequested: false, requestedCapacity: 1 };
+  const ready = {
+    ready: true,
+    readyUntil: new Date(Date.now() + 60_000).toISOString(),
+    manifestHash,
+    manifestSequence,
+    policyHash,
+    workerRuntimeVersion: "3.1.0",
+  };
+  const trustState = { manifestHash, manifestSequence, policyHash };
+  const status = {
+    ready: true,
+    manifestHash,
+    manifestSequence,
+    trust: trustState,
+  };
+  const orchestration = {
+    nodeId: "node-1",
+    heartbeat: { status: "succeeded", lastSuccessAt: new Date().toISOString() },
+    claim: { allowed: true, recommendedCount: 1 },
+  };
+  assert.throws(
+    () => assertClaimGate(
+      { nodeId: "node-1" }, control,
+      { ...ready, workerRuntimeVersion: "3.0.0" },
+      { manifestHash, manifestSequence, policyHash, workerRuntimeVersion: "3.1.0" },
+      trustState, status, orchestration,
+    ),
+    (error) => error?.code === "claims-gates-closed",
+  );
+  assert.throws(
+    () => assertClaimGate(
+      { nodeId: "node-1" }, control, ready,
+      { manifestHash, manifestSequence, policyHash, workerRuntimeVersion: "3.0.0" },
+      trustState, status, orchestration,
+    ),
+    (error) => error?.code === "claims-gates-closed",
+  );
+});
+
+test("claim gate and readiness renewal reject a crash window between trust and ready", async (t) => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "hch-portable-trust-window-"));
+  t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  const manifestHash = "a".repeat(64);
+  const policyHash = "b".repeat(64);
+  const ready = {
+    ready: true,
+    readyUntil: "2026-08-15T00:10:00.000Z",
+    manifestHash,
+    manifestSequence: 5,
+    policyHash,
+    workerRuntimeVersion: "3.1.0",
+  };
+  const applied = { ...ready, ready: undefined };
+  const advancedTrust = {
+    manifestHash: "c".repeat(64),
+    manifestSequence: 6,
+    policyHash: "d".repeat(64),
+  };
+  await writeFile(join(stateRoot, "ready.json"), JSON.stringify(ready));
+  await writeFile(join(stateRoot, "applied-manifest.json"), JSON.stringify(applied));
+  await writeFile(join(stateRoot, "trust-state.json"), JSON.stringify(advancedTrust));
+  let renewals = 0;
+  await renewReadyAttestation({ requestedCapacity: 1 }, stateRoot, {
+    now: () => Date.parse("2026-08-15T00:00:00.000Z"),
+    bootstrapWorkerLocked: async () => { renewals += 1; return { ready: false }; },
+  });
+  assert.equal(renewals, 1);
+  assert.throws(
+    () => assertClaimGate(
+      { nodeId: "node-1" },
+      { acceptingClaims: true, drainRequested: false, requestedCapacity: 1 },
+      ready,
+      applied,
+      advancedTrust,
+      {
+        ready: true,
+        manifestHash,
+        manifestSequence: 5,
+        trust: { manifestHash, manifestSequence: 5, policyHash },
+      },
+      {
+        nodeId: "node-1",
+        heartbeat: { status: "succeeded", lastSuccessAt: new Date().toISOString() },
+        claim: { allowed: true, recommendedCount: 1 },
+      },
+    ),
+    (error) => error?.code === "claims-gates-closed",
+  );
 });
 
 test("portable readiness renewal is independent from capacity zero", async (t) => {
@@ -568,10 +710,26 @@ test("portable readiness renewal is independent from capacity zero", async (t) =
 test("portable readiness does not renew more than five minutes early", async (t) => {
   const stateRoot = await mkdtemp(join(tmpdir(), "hch-portable-ready-window-"));
   t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  const stableState = {
+    manifestHash: "a".repeat(64),
+    manifestSequence: 5,
+    policyHash: "b".repeat(64),
+    workerRuntimeVersion: "3.1.0",
+  };
   await writeFile(join(stateRoot, "ready.json"), JSON.stringify({
     ready: true,
+    workerRuntimeVersion: "3.1.0",
     requestedCapacity: 0,
     readyUntil: "2026-08-15T00:10:00.000Z",
+    ...stableState,
+  }));
+  await writeFile(join(stateRoot, "applied-manifest.json"), JSON.stringify(stableState));
+  await writeFile(join(stateRoot, "trust-state.json"), JSON.stringify(stableState));
+  await writeFile(join(stateRoot, "status.json"), JSON.stringify({
+    ready: true,
+    manifestHash: stableState.manifestHash,
+    manifestSequence: stableState.manifestSequence,
+    trust: stableState,
   }));
   let renewals = 0;
   const ready = await renewReadyAttestation({ requestedCapacity: 0 }, stateRoot, {
@@ -580,6 +738,54 @@ test("portable readiness does not renew more than five minutes early", async (t)
   });
   assert.equal(renewals, 0);
   assert.equal(ready.requestedCapacity, 0);
+});
+
+test("portable readiness renews state produced by another worker runtime", async (t) => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "hch-portable-ready-runtime-"));
+  t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  const stableState = {
+    manifestHash: "a".repeat(64),
+    manifestSequence: 5,
+    policyHash: "b".repeat(64),
+  };
+  const ready = {
+    ready: true,
+    workerRuntimeVersion: "3.0.0",
+    readyUntil: "2026-08-15T00:10:00.000Z",
+    ...stableState,
+  };
+  await writeFile(join(stateRoot, "ready.json"), JSON.stringify(ready));
+  await writeFile(join(stateRoot, "applied-manifest.json"), JSON.stringify({
+    ...stableState,
+    workerRuntimeVersion: "3.1.0",
+  }));
+  await writeFile(join(stateRoot, "trust-state.json"), JSON.stringify(stableState));
+  await writeFile(join(stateRoot, "status.json"), JSON.stringify({
+    ready: true,
+    manifestHash: stableState.manifestHash,
+    manifestSequence: stableState.manifestSequence,
+    trust: stableState,
+  }));
+  let renewals = 0;
+  await renewReadyAttestation({ requestedCapacity: 0 }, stateRoot, {
+    now: () => Date.parse("2026-08-15T00:00:00.000Z"),
+    bootstrapWorkerLocked: async () => { renewals += 1; return { ready: true }; },
+  });
+  assert.equal(renewals, 1);
+
+  await writeFile(join(stateRoot, "ready.json"), JSON.stringify({
+    ...ready,
+    workerRuntimeVersion: "3.1.0",
+  }));
+  await writeFile(join(stateRoot, "applied-manifest.json"), JSON.stringify({
+    ...stableState,
+    workerRuntimeVersion: "3.0.0",
+  }));
+  await renewReadyAttestation({ requestedCapacity: 0 }, stateRoot, {
+    now: () => Date.parse("2026-08-15T00:00:00.000Z"),
+    bootstrapWorkerLocked: async () => { renewals += 1; return { ready: true }; },
+  });
+  assert.equal(renewals, 2);
 });
 
 test("portable readiness renewal preserves an active work lifecycle", async (t) => {

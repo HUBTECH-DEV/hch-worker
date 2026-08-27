@@ -23,6 +23,8 @@ import {
 } from "./capacity.mjs";
 import { stageApplyAndSelfTest } from "./apply.mjs";
 import {
+  KIT_VERSION,
+  assertWorkerRuntimeVersion,
   completeOperation,
   enterStandby,
   operationRequestId,
@@ -147,6 +149,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
           reason: "manifest-update-required",
         });
       }
+      assertWorkerRuntimeVersion(published.manifest);
 
       const bootstrapBody = {
         nodeId: config.nodeId,
@@ -182,6 +185,18 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       );
       pinnedTrustState = trustStateFromManifestVerification(sessionManifest);
       await atomicWriteJson(stateRoot, "trust-state.json", pinnedTrustState);
+      if (previousApplied?.manifestHash !== sessionManifest.manifest.hash) {
+        await atomicWriteJson(stateRoot, "ready.json", {
+          schemaVersion: 1,
+          ready: false,
+          nodeId: config.nodeId,
+          keyId: config.keyId,
+          targetManifestHash: sessionManifest.manifest.hash,
+          invalidatedAt: new Date().toISOString(),
+          reason: "manifest-update-required",
+        });
+      }
+      assertWorkerRuntimeVersion(sessionManifest.manifest);
       if (sessionManifest.manifest.hash !== published.manifest.hash) {
         throw new WorkerKitError(
           "bootstrap-manifest-changed",
@@ -244,7 +259,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         manifestSequence: published.manifest.sequence,
         manifestHash: published.manifest.hash,
         challenge: bootstrap.challenge,
-        workerRuntimeVersion: published.manifest.runtime.workerVersion,
+        workerRuntimeVersion: KIT_VERSION,
         policyHash: published.manifest.editorial.policyHash,
         adaptiveWorkPolicyHash: signedAdaptiveWorkPolicyHash,
         rootKeyId: acceptedTrust.rootKeyId,
@@ -304,6 +319,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         provider: applied.runtimeProfile.provider,
         engineAdapter: applied.runtimeProfile.engineAdapter,
         engineAdapterVersion: applied.runtimeProfile.engineAdapterVersion,
+        workerRuntimeVersion: KIT_VERSION,
         runtimeProfileHash: applied.runtimeProfile.runtimeProfileHash,
         capacityPolicyHash: await capacityPolicyHash(published.manifest.capacityPolicy),
         adaptiveWorkPolicyHash: signedAdaptiveWorkPolicyHash,
@@ -352,6 +368,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         state: requestedCapacity === 0 ? "draining" : "ready",
         manifestSequence: readyState.manifestSequence,
         manifestHash: readyState.manifestHash,
+        workerRuntimeVersion: readyState.workerRuntimeVersion,
         readyUntil: readyState.readyUntil,
         workStarted: false,
       };

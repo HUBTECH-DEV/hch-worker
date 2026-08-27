@@ -13,10 +13,21 @@ import {
   readWorkerControl,
 } from "./capacity.mjs";
 
-const KIT_VERSION = "3.1.0";
+export const KIT_VERSION = "3.1.0";
 const PROCESS_STARTED_AT = Date.now();
 const PLATFORM = workerPlatform();
 let statusWriteQueue = Promise.resolve();
+
+export function assertWorkerRuntimeVersion(manifest, actualVersion = KIT_VERSION) {
+  const requiredVersion = manifest?.runtime?.workerVersion;
+  if (requiredVersion !== actualVersion) {
+    throw new WorkerKitError(
+      "worker-runtime-version-incompatible",
+      `Manifest requires worker runtime ${requiredVersion ?? "unknown"}, but this kit is ${actualVersion}.`,
+    );
+  }
+  return actualVersion;
+}
 
 export function updateStatus(stateRoot, config, patch) {
   const write = statusWriteQueue.then(() => writeStatus(stateRoot, config, patch));

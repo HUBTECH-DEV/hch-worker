@@ -22,6 +22,7 @@ import {
 } from "./storage.mjs";
 import { WorkerKitError } from "./errors.mjs";
 import { adaptiveWorkPolicyHash, validateAdaptiveWorkPolicy } from "./adaptive-work.mjs";
+import { KIT_VERSION } from "./local-state.mjs";
 
 export async function configureLocalWorker(config) {
   return withWorkerLock(config.stateDirectory, async (stateRoot) => {
@@ -81,6 +82,8 @@ export async function validateLocalWorker(config, options = {}) {
     ready.nodeId !== config.nodeId ||
     ready.keyId !== config.keyId ||
     ready.manifestHash !== applied.manifestHash ||
+    ready.workerRuntimeVersion !== KIT_VERSION ||
+    applied.workerRuntimeVersion !== KIT_VERSION ||
     ready.manifestSequence !== applied.manifestSequence ||
     ready.policyHash !== applied.policyHash ||
     ready.runtimeProfileHash !== runtimeProfile.runtimeProfileHash ||

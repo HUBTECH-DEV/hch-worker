@@ -11,6 +11,7 @@ import {
 import { generateEditorialDraft } from "./generator.mjs";
 import {
   enterStandby,
+  KIT_VERSION,
   leaveStandby,
   updateMetrics,
   updateStatus,
@@ -80,14 +81,30 @@ async function runPortableSupervisorLocked(config, options = {}) {
 }
 
 export async function renewReadyAttestation(config, stateRoot, options = {}) {
-  const [ready, status] = await Promise.all([
+  const [ready, status, applied, trustState] = await Promise.all([
     readOptionalJson(stateRoot, "ready.json"),
     readOptionalJson(stateRoot, "status.json"),
+    readOptionalJson(stateRoot, "applied-manifest.json"),
+    readOptionalJson(stateRoot, "trust-state.json"),
   ]);
   const refreshBeforeMilliseconds = (options.readyRefreshBeforeSeconds ?? 300) * 1000;
   const remaining = Date.parse(ready?.readyUntil ?? "") - (options.now?.() ?? Date.now());
   if (
     ready?.ready === true &&
+    ready.workerRuntimeVersion === KIT_VERSION &&
+    applied?.workerRuntimeVersion === KIT_VERSION &&
+    ready.manifestHash === applied?.manifestHash &&
+    ready.manifestSequence === applied?.manifestSequence &&
+    ready.policyHash === applied?.policyHash &&
+    trustState?.manifestHash === applied?.manifestHash &&
+    trustState?.manifestSequence === applied?.manifestSequence &&
+    trustState?.policyHash === applied?.policyHash &&
+    status?.ready === true &&
+    status?.manifestHash === applied?.manifestHash &&
+    status?.manifestSequence === applied?.manifestSequence &&
+    status?.trust?.manifestHash === applied?.manifestHash &&
+    status?.trust?.manifestSequence === applied?.manifestSequence &&
+    status?.trust?.policyHash === applied?.policyHash &&
     Number.isFinite(remaining) &&
     remaining > refreshBeforeMilliseconds
   ) {
@@ -107,14 +124,16 @@ export async function runOnePortableAssignment(config, options = {}) {
 
 async function runOnePortableAssignmentLocked(config, options = {}) {
   const stateRoot = await ensurePrivateDirectory(config.stateDirectory);
-  const [identity, control, ready, applied, orchestration] = await Promise.all([
+  const [identity, control, ready, applied, trustState, status, orchestration] = await Promise.all([
     ensureWorkerIdentity(config, stateRoot),
     readWorkerControl(stateRoot, config),
     readOptionalJson(stateRoot, "ready.json"),
     readOptionalJson(stateRoot, "applied-manifest.json"),
+    readOptionalJson(stateRoot, "trust-state.json"),
+    readOptionalJson(stateRoot, "status.json"),
     readOptionalJson(stateRoot, "orchestration.json"),
   ]);
-  assertClaimGate(config, control, ready, applied, orchestration);
+  assertClaimGate(config, control, ready, applied, trustState, status, orchestration);
   const claim = await claimAssignments(config, identity, stateRoot, {
     ...options,
     requestedCapacity: 1,
@@ -312,13 +331,26 @@ function claimTarget(snapshot) {
   );
 }
 
-export function assertClaimGate(config, control, ready, applied, orchestration) {
+export function assertClaimGate(config, control, ready, applied, trustState, status, orchestration) {
   const heartbeatAge = Date.now() - Date.parse(orchestration?.heartbeat?.lastSuccessAt ?? "");
   if (
     effectiveRequestedCapacity(control) < 1 ||
     control.acceptingClaims !== true ||
     ready?.ready !== true || Date.parse(ready.readyUntil) <= Date.now() ||
     ready.manifestHash !== applied?.manifestHash ||
+    ready.manifestSequence !== applied?.manifestSequence ||
+    ready.policyHash !== applied?.policyHash ||
+    ready.workerRuntimeVersion !== KIT_VERSION ||
+    applied?.workerRuntimeVersion !== KIT_VERSION ||
+    trustState?.manifestHash !== applied?.manifestHash ||
+    trustState?.manifestSequence !== applied?.manifestSequence ||
+    trustState?.policyHash !== applied?.policyHash ||
+    status?.ready !== true ||
+    status?.manifestHash !== applied?.manifestHash ||
+    status?.manifestSequence !== applied?.manifestSequence ||
+    status?.trust?.manifestHash !== applied?.manifestHash ||
+    status?.trust?.manifestSequence !== applied?.manifestSequence ||
+    status?.trust?.policyHash !== applied?.policyHash ||
     orchestration?.nodeId !== config.nodeId ||
     orchestration?.heartbeat?.status !== "succeeded" ||
     !Number.isFinite(heartbeatAge) || Math.abs(heartbeatAge) > 120_000 ||
