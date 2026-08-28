@@ -5,9 +5,10 @@
   "type": "module",
   "engines": { "node": ">=22.13.0" },
   "scripts": {
-    "test": "npm run test:linux && npm run test:dashboard",
+    "test": "npm run test:linux && npm run test:dashboard && npm run test:hostinger-preflight",
     "test:linux": "node --test ops/linux/editorial-worker/test/*.test.mjs",
     "test:dashboard": "node --test ops/worker-dashboard/test/*.test.mjs",
+    "test:hostinger-preflight": "bash scripts/test/check-hostinger-gpu-worker.test.sh",
     "test:windows": "node --test ops/windows/editorial-worker/tests/*.test.mjs"
   }
 }

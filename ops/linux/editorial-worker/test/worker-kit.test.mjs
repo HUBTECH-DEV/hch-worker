@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
   mkdtemp,
@@ -55,6 +56,34 @@ test("VPS supervisor uses the installed pinned Node runtime", async () => {
   assert.match(source, /ExecStart=\/usr\/local\/libexec\/hch-node .*worker\.mjs supervise/);
   assert.doesNotMatch(source, /ExecStart=\/usr\/bin\/node/);
   assert.match(source, /^PrivateDevices=true$/m);
+});
+
+test("Hostinger GPU preflight rejects SSH options and gates the real dashboard contract", async () => {
+  const scriptUrl = new URL(
+    "../../../../scripts/check-hostinger-gpu-worker.sh",
+    import.meta.url,
+  );
+  const source = await readFile(scriptUrl, "utf8");
+  assert.match(source, /-\*\|\*\[!A-Za-z0-9\._-\]\*\|''\)/);
+  assert.match(source, /\.security\.ed25519Chain\.status == "valid"/);
+  assert.match(source, /\.resources\.gpu\.status == "available"/);
+  assert.match(source, /listener_scope=non-loopback/);
+  assert.match(source, /listener_%s=loopback/);
+  assert.match(source, /\.adaptiveWork\.activeWork \| type == "array"/);
+  assert.match(source, /\.operatorControl\.drainRequested == true/);
+  assert.match(source, /printf 'preflight=blocked\\n'/);
+  assert.match(source, /exit 1/);
+  assert.doesNotMatch(source, /\.metrics\.gpu/);
+
+  const refused = spawnSync("/bin/bash", [scriptUrl.pathname], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HCH_GPU_SSH_ALIAS: "-oProxyCommand=forbidden",
+    },
+  });
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /invalid SSH alias/);
 });
 
 test("macOS installer retires conflicting legacy agents and preserves Ollama", async () => {
