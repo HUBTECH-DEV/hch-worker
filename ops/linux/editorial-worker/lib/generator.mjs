@@ -271,6 +271,7 @@ export async function requestOllamaNdjson(urlValue, requestBody, options) {
   let received = 0;
   let content = "";
   let finalChunk = null;
+  let terminalSeen = false;
   try {
     const signal = externalSignal
       ? AbortSignal.any([controller.signal, externalSignal])
@@ -302,6 +303,12 @@ export async function requestOllamaNdjson(urlValue, requestBody, options) {
     const consumeLine = (line) => {
       const trimmed = line.trim();
       if (!trimmed) return;
+      if (terminalSeen) {
+        throw new WorkerKitError(
+          "local-generator-response-invalid",
+          "Ollama returned data after the terminal streaming event.",
+        );
+      }
       const chunk = JSON.parse(trimmed);
       if (typeof chunk?.error === "string" && chunk.error.trim()) {
         throw new WorkerKitError("local-generator-error", "Ollama returned an inference error.");
@@ -318,7 +325,10 @@ export async function requestOllamaNdjson(urlValue, requestBody, options) {
         );
         options.onContent?.(bytes);
       }
-      if (chunk?.done === true) finalChunk = chunk;
+      if (chunk?.done === true) {
+        terminalSeen = true;
+        finalChunk = chunk;
+      }
     };
     while (true) {
       const { done, value } = await reader.read();
@@ -342,18 +352,35 @@ export async function requestOllamaNdjson(urlValue, requestBody, options) {
       generationPlan.finalizationGraceSeconds,
       "generator-finalization-stalled",
     );
-    if (finalChunk?.done === true && finalChunk.done_reason === "length") {
+    if (finalChunk?.done !== true) {
+      throw new WorkerKitError(
+        "generator-output-terminal-missing",
+        "Ollama ended the stream without a terminal event.",
+      );
+    }
+    if (finalChunk.done_reason === "length") {
       throw new WorkerKitError(
         "generator-output-budget-exhausted",
         "Ollama reached the attested output budget before completing the response.",
       );
     }
-    if (
-      !content.trim() ||
-      finalChunk?.done !== true ||
-      finalChunk.done_reason !== "stop"
-    ) {
-      throw new WorkerKitError("generator-output-incomplete", "Ollama did not complete the response.");
+    if (typeof finalChunk.done_reason !== "string" || !finalChunk.done_reason.trim()) {
+      throw new WorkerKitError(
+        "generator-output-terminal-reason-missing",
+        "Ollama ended the stream without an accepted terminal reason.",
+      );
+    }
+    if (finalChunk.done_reason !== "stop") {
+      throw new WorkerKitError(
+        "generator-output-terminal-reason-unknown",
+        "Ollama ended the stream with an unsupported terminal reason.",
+      );
+    }
+    if (!content.trim()) {
+      throw new WorkerKitError(
+        "generator-output-empty",
+        "Ollama completed the stream without generated content.",
+      );
     }
     const candidate = JSON.parse(content);
     clearTimeout(watchdog);

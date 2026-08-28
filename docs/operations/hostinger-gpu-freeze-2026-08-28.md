@@ -41,7 +41,9 @@ The four tracked worktree changes were also preserved separately as:
 ```
 
 - Patch SHA-256: `08381c6a1a0d7b4f8b815ef0e2e57d7d0e5c190300e5dfc0714438c59cd9e089`.
-- The unrelated `.codex-gpu-benchmark.mjs` is not in this patch.
+- At the initial freeze, `.codex-gpu-benchmark.mjs` was not in this patch. It
+  was subsequently used as the off-queue diagnostic harness and included in
+  the device branch by the user's explicit instruction to persist all work.
 
 Before any restore, verify the archive without extracting it:
 
@@ -60,7 +62,10 @@ scripts/check-hostinger-gpu-worker.sh
 scripts/test/check-hostinger-gpu-worker.test.sh
 ```
 
-The unrelated untracked file `.codex-gpu-benchmark.mjs` must remain outside any commit and release archive.
+At this initial checkpoint, `.codex-gpu-benchmark.mjs` remained outside the
+commit and release archive. The later continuation checkpoint below supersedes
+that handling for the Git device branch; it is still not part of an installed
+worker runtime unless a future release explicitly includes it.
 
 Implemented but not published:
 
@@ -140,3 +145,84 @@ changing its identity:
 
 The worker remained drained throughout this resume verification. No assignment
 was claimed before the candidate runtime deployment and controlled canary.
+
+## Continuation freeze — 2026-08-28T15:51:42Z
+
+Execution was interrupted again for continuation from another notebook. The
+durable Git state and the remote runtime state at this boundary are:
+
+- device branch before the final checkpoint commit:
+  `MacBook-Pro-de-Paulo@79e0e71a3b53fde1005a9caeb6be4fd2dacd4bc7`;
+- the same commit was already present at
+  `origin/MacBook-Pro-de-Paulo` without force;
+- active runtime symlink:
+  `/usr/local/libexec/hch-editorial-runtime-79e0e71a3b53`;
+- preserved older runtimes:
+  `/usr/local/libexec/hch-editorial-runtime-ac556b698ff1` and
+  `/usr/local/libexec/hch-editorial-runtime-5d4f6b1c86c7`;
+- `hch-editorial-worker.service=inactive` and `ollama.service=inactive`;
+- no `worker.mjs`, benchmark, `llama-server` or `ollama serve` process remained;
+- control stayed fail-closed: `acceptingClaims=false`, `drainRequested=true`,
+  `requestedCapacity=0`, `updatedBy=pause`;
+- the service was stopped only after there were no active assignments.
+
+The immutable candidate was built from commit `79e0e71` and installed after
+the full deterministic matrix passed. Its single controlled real canary
+claimed only assignment `44f433dc-76ea-43b0-8696-99742016bf28`, then claims
+were closed immediately. The assignment failed with
+`generator-output-incomplete`; no second assignment was claimed. The worker
+ended with two historical jobs claimed and two failed, zero running jobs and
+`currentBatch=null`. This is a failed canary, not an operational promotion.
+
+The Ollama evidence for that failure was HTTP 200, approximately 754 generated
+tokens and `truncated=0`. A simple non-streaming probe completed with
+`done=true` and `done_reason=stop`, so the failure is specific to the longer
+streaming path. Ollama version `0.33.1` was installed.
+
+The final source checkpoint adds fail-closed diagnostic categories without
+accepting any new terminal condition:
+
+- `generator-output-terminal-missing`;
+- `generator-output-terminal-reason-missing`;
+- `generator-output-terminal-reason-unknown`;
+- `generator-output-empty`;
+- data after the unique terminal event is rejected as an invalid response;
+- the only retryable terminal remains the exact `done_reason=length`, once,
+  with the same signed output budget.
+
+The targeted adaptive runtime suite passed `50/50` for this diagnostic patch.
+An off-queue synthetic `1x1` run against a temporary copy of the patched
+runtime did not mutate the queue and left claims closed. It completed the
+Ollama protocol but failed editorial validation with
+`LEN-001`, `LEN-002` and `LEN-004` in `5.991s`. This distinguishes a valid
+terminal/JSON response from an editorial success: the configured
+`qwen2.5:1.5b-instruct` remains unproven for the signed long-form contract.
+
+Models present at the checkpoint were `qwen2.5:1.5b-instruct` and
+`llama3.2:3b`. The GPU was an NVIDIA RTX PRO 6000 Blackwell Server Edition with
+97249 MiB reported memory. Ollama was configured with
+`OLLAMA_NUM_PARALLEL=64`; the loaded 1.5B model therefore reserved a 524288
+token aggregate context. Do not extrapolate this setting to a larger model:
+the next notebook must benchmark success rate and valid drafts per minute with
+physical VRAM bounds before changing the signed RuntimeProfile.
+
+### Exact continuation gates
+
+1. Fetch `MacBook-Pro-de-Paulo` and confirm the checkpoint commit is the remote
+   head; never resume from `main` implicitly.
+2. Confirm both remote services remain inactive and the worker control file
+   still has claims disabled, drain enabled and requested capacity zero.
+3. Start Ollama, verify loopback-only binding, version, GPU and exact model
+   digest. Start the worker through `systemctl` only; never use
+   `hch-editorial-workerctl start` during recovery.
+4. Require bootstrap/validation and two healthy zero-capacity heartbeats before
+   any off-queue benchmark.
+5. Rerun the complete Linux, dashboard, Windows and Hostinger preflight matrix
+   for the final checkpoint commit.
+6. Use the persisted `.codex-gpu-benchmark.mjs` only off-queue and initially as
+   `concurrency=1`, `samples=1`. It is diagnostic evidence, not a canary.
+7. Require at least two sequential valid off-queue drafts before another
+   single-assignment canary. A canary must finish as `pending-review`; HTTP 200,
+   a terminal `stop` or GPU utilization alone is insufficient.
+8. Keep claims closed after any failure and never widen capacity without that
+   real canary proof.

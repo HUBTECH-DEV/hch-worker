@@ -410,7 +410,7 @@ test("NDJSON progress counts only content bytes and has no total-window deadline
   assert.deepEqual(observed, pieces.map((piece) => Buffer.byteLength(piece)));
 });
 
-test("Ollama completion requires done true and done_reason stop without exposing raw reason", async () => {
+test("Ollama completion rejects an unknown terminal reason without exposing it", async () => {
   const rawReason = "unexpected-secret-output-fragment";
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -432,8 +432,61 @@ test("Ollama completion requires done true and done_reason stop without exposing
       },
       fetcher: async () => new Response(stream, { status: 200 }),
     }),
-    (error) => error?.code === "generator-output-incomplete" &&
+    (error) => error?.code === "generator-output-terminal-reason-unknown" &&
       !String(error.message).includes(rawReason),
+  );
+});
+
+test("Ollama completion reports safe terminal failure categories", async () => {
+  const plan = {
+    firstProgressGraceSeconds: 1,
+    stallAfterSeconds: 1,
+    finalizationGraceSeconds: 1,
+  };
+  const cases = [
+    {
+      expected: "generator-output-terminal-missing",
+      response: new Response(`${JSON.stringify({
+        message: { content: '{"title":"partial"}' },
+        done: false,
+      })}\n`, { status: 200 }),
+    },
+    {
+      expected: "generator-output-terminal-reason-missing",
+      response: ollamaCompletion('{"title":"partial"}', undefined),
+    },
+    {
+      expected: "generator-output-empty",
+      response: ollamaCompletion("", "stop"),
+    },
+  ];
+  for (const item of cases) {
+    await assert.rejects(
+      requestOllamaNdjson("http://127.0.0.1:11434/api/chat", "{}", {
+        generationPlan: plan,
+        fetcher: async () => item.response,
+      }),
+      (error) => error?.code === item.expected,
+    );
+  }
+});
+
+test("Ollama completion rejects data after the only terminal event", async () => {
+  const response = new Response([
+    JSON.stringify({ message: { content: '{"title":"complete"}' }, done: true, done_reason: "stop" }),
+    JSON.stringify({ message: { content: "late" }, done: false }),
+    "",
+  ].join("\n"), { status: 200 });
+  await assert.rejects(
+    requestOllamaNdjson("http://127.0.0.1:11434/api/chat", "{}", {
+      generationPlan: {
+        firstProgressGraceSeconds: 1,
+        stallAfterSeconds: 1,
+        finalizationGraceSeconds: 1,
+      },
+      fetcher: async () => response,
+    }),
+    (error) => error?.code === "local-generator-response-invalid",
   );
 });
 
@@ -545,7 +598,7 @@ test("budget exhaustion classification does not depend on partial content", asyn
   );
 });
 
-test("full generator does not retry incomplete protocol output", async (t) => {
+test("full generator does not retry an unknown terminal reason", async (t) => {
   const fixture = await editorialGeneratorFixture(t);
   let calls = 0;
   await assert.rejects(
@@ -561,7 +614,7 @@ test("full generator does not retry incomplete protocol output", async (t) => {
         },
       },
     ),
-    (error) => error?.code === "generator-output-incomplete",
+    (error) => error?.code === "generator-output-terminal-reason-unknown",
   );
   assert.equal(calls, 1);
 });
