@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
@@ -16,6 +16,8 @@ import {
 } from "../lib/adaptive-work.mjs";
 import {
   ollamaGenerationRequest,
+  generateEditorialDraft,
+  generationBudgetRetryFeedback,
   modelEvidenceExcerpt,
   normalizeParagraphs,
   assertPublicSourceDestination,
@@ -409,7 +411,7 @@ test("NDJSON progress counts only content bytes and has no total-window deadline
 });
 
 test("Ollama completion requires done true and done_reason stop without exposing raw reason", async () => {
-  const rawReason = "length-secret-output-fragment";
+  const rawReason = "unexpected-secret-output-fragment";
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     start(controller) {
@@ -433,6 +435,202 @@ test("Ollama completion requires done true and done_reason stop without exposing
     (error) => error?.code === "generator-output-incomplete" &&
       !String(error.message).includes(rawReason),
   );
+});
+
+test("one budget-exhausted Ollama completion retries once with bounded feedback", () => {
+  const error = new WorkerKitError(
+    "generator-output-budget-exhausted",
+    "raw completion details must not be copied",
+  );
+  assert.deepEqual(generationBudgetRetryFeedback(error, 1), {
+    valid: false,
+    errors: [{
+      code: "GEN-OUTPUT-BUDGET-EXHAUSTED",
+      message: "A resposta atingiu o limite de saída. Retorne somente o JSON final, sem raciocínio, próximo aos mínimos permitidos e preservando todos os requisitos editoriais.",
+    }],
+  });
+  assert.equal(generationBudgetRetryFeedback(error, 2), null);
+  assert.equal(generationBudgetRetryFeedback(
+    new WorkerKitError("generator-output-incomplete", "hidden"),
+    1,
+  ), null);
+  assert.equal(generationBudgetRetryFeedback(
+    new WorkerKitError("generator-stalled", "hidden"),
+    1,
+  ), null);
+});
+
+test("full generator retries only one attested budget exhaustion", async (t) => {
+  const fixture = await editorialGeneratorFixture(t);
+  const requests = [];
+  const attempts = [];
+  const candidate = JSON.stringify({
+    title: "Título editorial válido para a segunda tentativa",
+    excerpt: "Resumo editorial válido para confirmar o retry controlado.",
+    paragraphs: [
+      "Primeiro parágrafo editorial com contexto técnico verificável.",
+      "Segundo parágrafo editorial com explicação técnica verificável.",
+      "Terceiro parágrafo editorial com análise técnica verificável.",
+      "Quarto parágrafo editorial com limites técnicos verificáveis.",
+      "Quinto parágrafo editorial com conclusão técnica verificável.",
+    ],
+  });
+  const result = await generateEditorialDraft(
+    fixture.assignment,
+    fixture.stateRoot,
+    "http://127.0.0.1:11434",
+    {
+      ...fixture.options,
+      progress: {
+        startAttempt(attempt) { attempts.push(attempt); },
+        recordContent() {},
+        beginFinalization() {},
+      },
+      generatorFetcher: async (_url, init) => {
+        requests.push(JSON.parse(init.body));
+        return requests.length === 1
+          ? ollamaCompletion('{"title":"partial', "length")
+          : ollamaCompletion(candidate, "stop");
+      },
+    },
+  );
+
+  assert.equal(result.validation.valid, true);
+  assert.deepEqual(attempts, [1, 2]);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests.map((request) => request.options.num_predict), [2400, 2400]);
+  const firstPayload = JSON.parse(requests[0].messages[1].content);
+  const secondPayload = JSON.parse(requests[1].messages[1].content);
+  assert.equal(firstPayload.operation, "generate-editorial-content");
+  assert.equal(secondPayload.operation, "regenerate-editorial-content");
+  assert.equal(secondPayload.previousCandidate, null);
+  assert.deepEqual(secondPayload.validationFeedback.map(({ code }) => code), [
+    "GEN-OUTPUT-BUDGET-EXHAUSTED",
+  ]);
+  assert.doesNotMatch(JSON.stringify(secondPayload.validationFeedback), /partial|done_reason|length/);
+});
+
+test("full generator propagates a second budget exhaustion", async (t) => {
+  const fixture = await editorialGeneratorFixture(t);
+  let calls = 0;
+  await assert.rejects(
+    generateEditorialDraft(
+      fixture.assignment,
+      fixture.stateRoot,
+      "http://127.0.0.1:11434",
+      {
+        ...fixture.options,
+        generatorFetcher: async () => {
+          calls += 1;
+          return ollamaCompletion('{"title":"partial', "length");
+        },
+      },
+    ),
+    (error) => error?.code === "generator-output-budget-exhausted",
+  );
+  assert.equal(calls, 2);
+});
+
+test("budget exhaustion classification does not depend on partial content", async () => {
+  await assert.rejects(
+    requestOllamaNdjson("http://127.0.0.1:11434/api/chat", "{}", {
+      generationPlan: {
+        firstProgressGraceSeconds: 1,
+        stallAfterSeconds: 1,
+        finalizationGraceSeconds: 1,
+      },
+      fetcher: async () => ollamaCompletion("", "length"),
+    }),
+    (error) => error?.code === "generator-output-budget-exhausted",
+  );
+});
+
+test("full generator does not retry incomplete protocol output", async (t) => {
+  const fixture = await editorialGeneratorFixture(t);
+  let calls = 0;
+  await assert.rejects(
+    generateEditorialDraft(
+      fixture.assignment,
+      fixture.stateRoot,
+      "http://127.0.0.1:11434",
+      {
+        ...fixture.options,
+        generatorFetcher: async () => {
+          calls += 1;
+          return ollamaCompletion('{"title":"partial', "unexpected-terminal-reason");
+        },
+      },
+    ),
+    (error) => error?.code === "generator-output-incomplete",
+  );
+  assert.equal(calls, 1);
+});
+
+test("full generator does not retry HTTP rejection", async (t) => {
+  const fixture = await editorialGeneratorFixture(t);
+  let calls = 0;
+  await assert.rejects(
+    generateEditorialDraft(
+      fixture.assignment,
+      fixture.stateRoot,
+      "http://127.0.0.1:11434",
+      {
+        ...fixture.options,
+        generatorFetcher: async () => {
+          calls += 1;
+          return new Response(null, { status: 503 });
+        },
+      },
+    ),
+    (error) => error?.code === "local-generator-http-503",
+  );
+  assert.equal(calls, 1);
+});
+
+test("full generator does not retry a stalled generator", async (t) => {
+  const fixture = await editorialGeneratorFixture(t);
+  let calls = 0;
+  await assert.rejects(
+    generateEditorialDraft(
+      fixture.assignment,
+      fixture.stateRoot,
+      "http://127.0.0.1:11434",
+      {
+        ...fixture.options,
+        generatorFetcher: async () => {
+          calls += 1;
+          throw new WorkerKitError("generator-stalled", "hidden");
+        },
+      },
+    ),
+    (error) => error?.code === "generator-stalled",
+  );
+  assert.equal(calls, 1);
+});
+
+test("full generator does not retry external cancellation", async (t) => {
+  const fixture = await editorialGeneratorFixture(t);
+  const cancellation = new AbortController();
+  cancellation.abort(new WorkerKitError("lease-lost-discard-result", "hidden"));
+  let calls = 0;
+  await assert.rejects(
+    generateEditorialDraft(
+      fixture.assignment,
+      fixture.stateRoot,
+      "http://127.0.0.1:11434",
+      {
+        ...fixture.options,
+        signal: cancellation.signal,
+        generatorFetcher: async (_url, init) => {
+          calls += 1;
+          assert.equal(init.signal.aborted, true);
+          throw init.signal.reason;
+        },
+      },
+    ),
+    (error) => error?.code === "lease-lost-discard-result",
+  );
+  assert.equal(calls, 1);
 });
 
 test("Ollama transport and malformed streams use safe actionable codes", async () => {
@@ -1434,4 +1632,85 @@ async function runtimeProfile(overrides = {}) {
   );
   const runtimeProfileHash = Buffer.from(digest).toString("hex");
   return { ...core, runtimeProfileHash };
+}
+
+async function editorialGeneratorFixture(t) {
+  const stateRoot = await mkdtemp(join(tmpdir(), "hch-generator-retry-"));
+  t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  await mkdir(join(stateRoot, "runtime/editorial"), { recursive: true });
+  const profile = await runtimeProfile({ maxOutputTokens: 2400 });
+  const editorialPolicy = {
+    policyId: profile.policyId,
+    version: profile.policyVersion,
+    hash: profile.policyHash,
+    citationPolicy: {
+      singleSourceExceptionRequiresJustification: true,
+      comparisonsAndReviewsMinimumSources: 2,
+    },
+    quotationPolicy: {
+      maximumQuotationRatio: 0.05,
+      maximumWordsPerDirectQuotation: 25,
+    },
+    profiles: {
+      EDITORIAL_LONG_FORM: {
+        minimumBodyCharacters: 1,
+        maximumBodyCharacters: 100_000,
+        minimumBodyWords: 1,
+        maximumBodyWords: 20_000,
+        minimumParagraphs: 5,
+        maximumParagraphs: 5,
+        minimumWordsPerParagraph: 1,
+      },
+    },
+  };
+  await Promise.all([
+    writeFile(
+      join(stateRoot, "runtime/editorial/policy.json"),
+      JSON.stringify(editorialPolicy),
+    ),
+    writeFile(join(stateRoot, "runtime/editorial/prompt.md"), "System prompt de teste."),
+  ]);
+  const policyHash = await adaptiveWorkPolicyHash(policy);
+  const generationPlan = createGenerationPlan(policy, 2, {
+    policyHash,
+    editorialProfile: "EDITORIAL_LONG_FORM",
+  });
+  return {
+    stateRoot,
+    assignment: {
+      assignmentId: "generator-retry-assignment",
+      generationPlan,
+      generationPlanHash: await generationPlanHash(generationPlan),
+      runtimeProfile: profile,
+      entry: {
+        kind: "article",
+        source_url: "https://example.com/source",
+        source_locale: "pt-BR",
+        content_hash: "5".repeat(64),
+        title: "Fonte técnica usada no teste controlado",
+        summary: "Resumo ingerido da fonte técnica para o teste controlado. ".repeat(8),
+        author: "Equipe de teste",
+        publisher: "HCH",
+        published_at: "2026-08-28T00:00:00.000Z",
+      },
+    },
+    options: {
+      adaptiveWorkPolicy: policy,
+      lookup: async () => [{ address: "93.184.216.34", family: 4 }],
+      fetcher: async () => { throw new Error("offline-test-source"); },
+      platform: "linux",
+      localEngineNumThreads: 2,
+    },
+  };
+}
+
+function ollamaCompletion(content, doneReason) {
+  return new Response(`${JSON.stringify({
+    message: { content },
+    done: true,
+    done_reason: doneReason,
+  })}\n`, {
+    status: 200,
+    headers: { "content-type": "application/x-ndjson" },
+  });
 }

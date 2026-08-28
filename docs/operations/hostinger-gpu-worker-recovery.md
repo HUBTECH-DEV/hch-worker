@@ -6,30 +6,30 @@ substitui bootstrap, atestação, drain, canário ou rollback do runtime.
 ## Configuração operacional preservada
 
 - acesso local por `ssh hostinger-gpu`, sem IP ou credencial no repositório;
-- SSH público `32092` encaminhado para a porta interna `22`;
+- porta pública de SSH descoberta pelo alias local, sem valor fixo no runbook;
 - painel HCH interno em `127.0.0.1:4320`;
-- painel público `20001` encaminhado para a porta interna `4320`;
 - túnel local `hostinger-worker-dashboard` em
   `127.0.0.1:4320 -> 127.0.0.1:4320`;
 - Ollama privado em `127.0.0.1:11434`;
 - `hch-editorial-worker.service` possui o supervisor e o painel;
 - `ollama.service` fornece o motor local.
 
-O painel padrão do repositório é `4319`, mas a implantação Hostinger usa o
+O painel padrão do repositório é `4319`, mas esta implantação Hostinger usa o
 drop-in `30-dashboard-port.conf` com `HCH_WORKER_DASHBOARD_PORT=4320`. Um
-encaminhamento público para `4319` não alcança essa implantação.
+painel operacional não deve ser exposto publicamente porque a mesma aplicação
+contém a superfície local de controle.
 
-## Falha simultânea de SSH e painel
+## Falha simultânea de SSH e túnel
 
-Quando tanto o SSH encaminhado quanto o painel público recusam conexão, não
+Quando tanto o SSH quanto o painel pelo túnel recusam conexão, não
 trate o incidente como falha isolada do Node.js. Confirme no hPanel:
 
 1. se a instância GPU ainda existe e está em execução;
 2. se há créditos suficientes para mantê-la;
 3. se o IP público continua igual;
-4. se o serviço SSH encaminha a porta pública esperada para a interna `22`;
-5. se o serviço do painel encaminha a porta pública esperada para a interna
-   `4320`.
+4. se o serviço SSH encaminha a porta pública atual para a interna `22`;
+5. se o alias `hostinger-worker-dashboard` encaminha localmente
+   `127.0.0.1:4320` para `127.0.0.1:4320` na instância.
 
 Instâncias GPU não fazem parte do domínio VPS da API/MCP pública da Hostinger.
 Não use `hostinger-vps-mcp` para concluir que a GPU foi destruída ou está
@@ -46,23 +46,24 @@ leitura e reexecute bootstrap/atestação. Em seguida, execute no Mac:
 
 O preflight não inicia, pausa ou reinicia serviços. Ele verifica GPU, units,
 listeners exclusivamente em loopback, modelo e digest exatos do runtime
-aplicado, estado drenado, prontidão ainda válida e evidências recentes do status
-e do heartbeat. Ele também deriva o `HostName` do alias SSH e exige que o painel
-público em `20001` responda com a mesma identidade/manifesto do painel interno.
+aplicado, zero reinícios da unit, estado drenado, prontidão ainda válida e
+evidências recentes do status e do heartbeat. Ele exige que o painel acessado
+pelo túnel em `127.0.0.1:4320` responda com a mesma identidade/manifesto do
+painel interno.
 Qualquer falha mantém a retomada bloqueada; isso inclui a falta esperada de
 prontidão antes do novo bootstrap.
 
-Se a porta pública for alterada intencionalmente, informe-a sem mudar o
-repositório:
+Se a porta local do túnel for alterada intencionalmente, informe a URL literal
+de loopback sem mudar o repositório:
 
 ```bash
-HCH_GPU_PUBLIC_DASHBOARD_PORT=20001 \
+HCH_GPU_TUNNEL_DASHBOARD_URL=http://127.0.0.1:54321 \
   /bin/bash scripts/check-hostinger-gpu-worker.sh
 ```
 
-O túnel local é uma rota adicional e não substitui o gate público acima. Depois
-do preflight, `curl --fail http://127.0.0.1:4320/api/status` pode ser usado para
-provar separadamente o túnel `hostinger-worker-dashboard`.
+O túnel local é parte do gate. A URL aceita somente o endereço literal
+`127.0.0.1`, HTTP e uma porta explícita; variáveis de proxy são ignoradas nessa
+requisição. Não crie um serviço exposto da Hostinger para o painel do worker.
 
 ## Ordem de retomada
 
@@ -85,7 +86,7 @@ provar separadamente o túnel `hostinger-worker-dashboard`.
 - modelo ou digest diferente do RuntimeProfile assinado;
 - worker aceitando claims ou com assignments ativos;
 - trust, bootstrap, attestation ou heartbeat inválido;
-- painel público apontando para a porta interna errada;
+- túnel ausente, desviado por proxy ou com identidade diferente do painel interno;
 - serviço Ollama acessível fora do loopback;
 - benchmark concorrendo com o endpoint operacional do worker;
 - ausência de runtime anterior verificável para rollback.

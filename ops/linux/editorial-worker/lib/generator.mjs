@@ -111,7 +111,14 @@ export async function generateEditorialDraft(
         },
       );
     } catch (error) {
-      throw normalizeGeneratorError(error);
+      const normalized = normalizeGeneratorError(error);
+      const retryFeedback = generationBudgetRetryFeedback(normalized, attempt);
+      if (retryFeedback) {
+        previousCandidate = null;
+        lastValidation = retryFeedback;
+        continue;
+      }
+      throw normalized;
     }
     const parsed = parseCandidateAttempt(payload);
     if (!parsed.ok) {
@@ -147,6 +154,24 @@ export async function generateEditorialDraft(
   );
   error.validation = lastValidation;
   throw error;
+}
+
+export function generationBudgetRetryFeedback(error, attempt) {
+  if (
+    error?.code !== "generator-output-budget-exhausted" ||
+    !Number.isSafeInteger(attempt) ||
+    attempt < 1 ||
+    attempt >= MAX_GENERATION_ATTEMPTS
+  ) {
+    return null;
+  }
+  return {
+    valid: false,
+    errors: [{
+      code: "GEN-OUTPUT-BUDGET-EXHAUSTED",
+      message: "A resposta atingiu o limite de saída. Retorne somente o JSON final, sem raciocínio, próximo aos mínimos permitidos e preservando todos os requisitos editoriais.",
+    }],
+  };
 }
 
 export function ollamaGenerationRequest(input) {
@@ -188,7 +213,9 @@ export function ollamaGenerationRequest(input) {
         content: JSON.stringify({
           operation: input.attempt === 1
             ? "generate-editorial-content"
-            : "repair-editorial-content",
+            : input.previousCandidate
+              ? "repair-editorial-content"
+              : "regenerate-editorial-content",
           requiredResponseKeys: ["title", "excerpt", "paragraphs"],
           fieldRequirements: {
             title: "string final autoral em português brasileiro, com pelo menos 8 caracteres",
@@ -315,10 +342,16 @@ export async function requestOllamaNdjson(urlValue, requestBody, options) {
       generationPlan.finalizationGraceSeconds,
       "generator-finalization-stalled",
     );
+    if (finalChunk?.done === true && finalChunk.done_reason === "length") {
+      throw new WorkerKitError(
+        "generator-output-budget-exhausted",
+        "Ollama reached the attested output budget before completing the response.",
+      );
+    }
     if (
       !content.trim() ||
       finalChunk?.done !== true ||
-      finalChunk?.done_reason !== "stop"
+      finalChunk.done_reason !== "stop"
     ) {
       throw new WorkerKitError("generator-output-incomplete", "Ollama did not complete the response.");
     }

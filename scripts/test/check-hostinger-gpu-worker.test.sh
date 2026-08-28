@@ -22,10 +22,6 @@ cat >"$shim_root/ssh" <<'SHIM'
 set -euo pipefail
 port=""
 for argument in "$@"; do
-  if [ "$argument" = -G ]; then
-    printf '%s\n' 'hostname 117.18.102.47'
-    exit 0
-  fi
   port="$argument"
 done
 : >"$HCH_TEST_SSH_MARKER"
@@ -35,13 +31,13 @@ if ! /bin/bash -n "$remote_script"; then
   nl -ba "$remote_script" >&2
   exit 2
 fi
-exec /bin/bash "$remote_script" "$port"
+HCH_TEST_REMOTE=1 exec /bin/bash "$remote_script" "$port"
 SHIM
 
 cat >"$shim_root/node" <<'SHIM'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "$HCH_TEST_CASE" = public_stale ]; then
+if [ "$HCH_TEST_CASE" = tunnel_stale ]; then
   exit 1
 fi
 exit 0
@@ -96,7 +92,13 @@ case "${1:-}" in
   show)
     case "$*" in
       *--property=SubState*) printf '%s\n' running ;;
-      *--property=NRestarts*) printf '%s\n' 0 ;;
+      *--property=NRestarts*)
+        if [ "$HCH_TEST_CASE" = restart_nonzero ]; then
+          printf '%s\n' 1
+        else
+          printf '%s\n' 0
+        fi
+        ;;
       *) exit 1 ;;
     esac
     ;;
@@ -133,18 +135,28 @@ cat >"$shim_root/curl" <<'SHIM'
 #!/usr/bin/env bash
 set -euo pipefail
 url=""
+previous=""
+noproxy_all=0
 for argument in "$@"; do
+  if [ "$previous" = --noproxy ] && [ "$argument" = '*' ]; then
+    noproxy_all=1
+  fi
+  previous="$argument"
   url="$argument"
 done
 case "$url" in
   */api/tags) cat "$HCH_TEST_TAGS_JSON" ;;
-  *:20001/api/status)
-    if [ "$HCH_TEST_CASE" = public_down ]; then
+  http://127.0.0.1:*/api/status)
+    if [ "${HCH_TEST_REMOTE:-0}" = 1 ]; then
+      cat "$HCH_TEST_DASHBOARD_JSON"
+      exit 0
+    fi
+    [ "$noproxy_all" -eq 1 ] || exit 64
+    if [ "$HCH_TEST_CASE" = tunnel_down ]; then
       exit 22
     fi
-    cat "$HCH_TEST_PUBLIC_DASHBOARD_JSON"
+    cat "$HCH_TEST_TUNNEL_DASHBOARD_JSON"
     ;;
-  */api/status) cat "$HCH_TEST_DASHBOARD_JSON" ;;
   *) exit 22 ;;
 esac
 SHIM
@@ -303,7 +315,17 @@ prepare_case() {
   case_name="$1"
   write_base_fixtures
   case "$case_name" in
-    green|gpu_empty|wildcard_listener) ;;
+    green|gpu_empty|wildcard_listener|restart_nonzero|tunnel_custom_port) ;;
+    global_workload_active)
+      /usr/bin/jq '.orchestration.workload.generating = 4' \
+        "$fixture_root/dashboard.json" >"$fixture_root/dashboard.next"
+      mv "$fixture_root/dashboard.next" "$fixture_root/dashboard.json"
+      ;;
+    global_workload_invalid)
+      /usr/bin/jq '.orchestration.workload.generating = -1' \
+        "$fixture_root/dashboard.json" >"$fixture_root/dashboard.next"
+      mv "$fixture_root/dashboard.next" "$fixture_root/dashboard.json"
+      ;;
     stale)
       /usr/bin/jq --arg stale "$stale" '.generatedAt = $stale' \
         "$fixture_root/dashboard.json" >"$fixture_root/dashboard.next"
@@ -340,20 +362,20 @@ prepare_case() {
     invalid_json)
       printf '%s\n' '{invalid-json' >"$fixture_root/dashboard.json"
       ;;
-    public_identity_mismatch)
+    tunnel_identity_mismatch)
       ;;
-    public_down|public_stale)
+    tunnel_down|tunnel_stale)
       ;;
     *)
       printf 'unknown test case: %s\n' "$case_name" >&2
       exit 2
       ;;
   esac
-  cp "$fixture_root/dashboard.json" "$fixture_root/public-dashboard.json"
-  if [ "$case_name" = public_identity_mismatch ]; then
+  cp "$fixture_root/dashboard.json" "$fixture_root/tunnel-dashboard.json"
+  if [ "$case_name" = tunnel_identity_mismatch ]; then
     /usr/bin/jq '.worker.id = "another-worker"' \
-      "$fixture_root/public-dashboard.json" >"$fixture_root/public-dashboard.next"
-    mv "$fixture_root/public-dashboard.next" "$fixture_root/public-dashboard.json"
+      "$fixture_root/tunnel-dashboard.json" >"$fixture_root/tunnel-dashboard.next"
+    mv "$fixture_root/tunnel-dashboard.next" "$fixture_root/tunnel-dashboard.json"
   fi
 }
 
@@ -362,12 +384,16 @@ run_case() {
   expected_result="$2"
   output_file="$output_root/$case_name.log"
   ssh_marker="$output_root/$case_name.ssh"
+  tunnel_url=http://127.0.0.1:4320
+  if [ "$case_name" = tunnel_custom_port ]; then
+    tunnel_url=http://127.0.0.1:54321
+  fi
 
   prepare_case "$case_name"
   if PATH="$shim_root:$PATH" \
     HCH_TEST_CASE="$case_name" \
     HCH_TEST_DASHBOARD_JSON="$fixture_root/dashboard.json" \
-    HCH_TEST_PUBLIC_DASHBOARD_JSON="$fixture_root/public-dashboard.json" \
+    HCH_TEST_TUNNEL_DASHBOARD_JSON="$fixture_root/tunnel-dashboard.json" \
     HCH_TEST_APPLIED_JSON="$fixture_root/applied.json" \
     HCH_TEST_ENGINE_JSON="$fixture_root/engine.json" \
     HCH_TEST_TAGS_JSON="$fixture_root/tags.json" \
@@ -375,6 +401,7 @@ run_case() {
     HCH_TEST_SSH_MARKER="$ssh_marker" \
     HCH_GPU_SSH_ALIAS=hostinger-gpu-test \
     HCH_GPU_DASHBOARD_PORT=4320 \
+    HCH_GPU_TUNNEL_DASHBOARD_URL="$tunnel_url" \
     /bin/bash "$subject" >"$output_file" 2>&1; then
     actual_result=pass
   else
@@ -393,9 +420,15 @@ run_case() {
   fi
   if [ "$expected_result" = pass ]; then
     grep -q '^preflight=pass$' "$output_file" || return 1
+    grep -q '^tunnel_dashboard=verified$' "$output_file" || return 1
   else
     grep -q '^preflight=blocked$' "$output_file" || return 1
   fi
+  case "$case_name" in
+    tunnel_down) grep -q '^tunnel_dashboard=unreachable$' "$output_file" || return 1 ;;
+    tunnel_identity_mismatch) grep -q '^tunnel_dashboard=identity-mismatch$' "$output_file" || return 1 ;;
+    tunnel_stale) grep -q '^tunnel_dashboard=stale$' "$output_file" || return 1 ;;
+  esac
   if grep -qF "$secret_canary" "$output_file"; then
     printf 'FAIL %s: secret canary leaked to output\n' "$case_name" >&2
     return 1
@@ -403,7 +436,33 @@ run_case() {
   printf 'ok - %s -> %s\n' "$case_name" "$expected_result"
 }
 
+run_invalid_url_case() {
+  case_name="$1"
+  tunnel_url="$2"
+  output_file="$output_root/$case_name.log"
+  ssh_marker="$output_root/$case_name.ssh"
+  if PATH="$shim_root:$PATH" \
+    HCH_TEST_CASE="$case_name" \
+    HCH_TEST_SSH_MARKER="$ssh_marker" \
+    HCH_GPU_SSH_ALIAS=hostinger-gpu-test \
+    HCH_GPU_DASHBOARD_PORT=4320 \
+    HCH_GPU_TUNNEL_DASHBOARD_URL="$tunnel_url" \
+    /bin/bash "$subject" >"$output_file" 2>&1; then
+    printf 'FAIL %s: invalid tunnel URL passed\n' "$case_name" >&2
+    return 1
+  fi
+  [ ! -e "$ssh_marker" ] || {
+    printf 'FAIL %s: invalid URL reached SSH\n' "$case_name" >&2
+    return 1
+  }
+  grep -q 'tunnel dashboard' "$output_file" || return 1
+  printf 'ok - %s -> rejected-before-ssh\n' "$case_name"
+}
+
 run_case green pass
+run_case tunnel_custom_port pass
+run_case global_workload_active pass
+run_case global_workload_invalid blocked
 run_case stale blocked
 run_case disconnected blocked
 run_case active_work blocked
@@ -411,11 +470,18 @@ run_case grant_nonzero blocked
 run_case claim_allowed blocked
 run_case gpu_empty blocked
 run_case wildcard_listener blocked
+run_case restart_nonzero blocked
 run_case model_absent blocked
 run_case model_digest_wrong blocked
-run_case public_down blocked
-run_case public_identity_mismatch blocked
-run_case public_stale blocked
+run_case tunnel_down blocked
+run_case tunnel_identity_mismatch blocked
+run_case tunnel_stale blocked
 run_case invalid_json blocked
+run_invalid_url_case tunnel_external http://192.0.2.10:4320
+run_invalid_url_case tunnel_https https://127.0.0.1:4320
+run_invalid_url_case tunnel_localhost http://localhost:4320
+run_invalid_url_case tunnel_no_port http://127.0.0.1
+run_invalid_url_case tunnel_nonnumeric http://127.0.0.1:abc
+run_invalid_url_case tunnel_port_overflow http://127.0.0.1:65536
 
-printf '1..14\n'
+printf '1..24\n'

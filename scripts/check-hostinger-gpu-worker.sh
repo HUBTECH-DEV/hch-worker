@@ -4,7 +4,7 @@ set -euo pipefail
 
 ssh_alias="${HCH_GPU_SSH_ALIAS:-hostinger-gpu}"
 dashboard_port="${HCH_GPU_DASHBOARD_PORT:-4320}"
-public_dashboard_port="${HCH_GPU_PUBLIC_DASHBOARD_PORT:-20001}"
+tunnel_dashboard_url="${HCH_GPU_TUNNEL_DASHBOARD_URL:-http://127.0.0.1:${dashboard_port}}"
 
 case "$ssh_alias" in
   -*|*[!A-Za-z0-9._-]*|'')
@@ -25,16 +25,14 @@ if [ "$dashboard_port" -lt 1 ] || [ "$dashboard_port" -gt 65535 ]; then
   exit 2
 fi
 
-case "$public_dashboard_port" in
-  *[!0-9]*|'')
-    printf 'invalid public dashboard port: %s\n' "$public_dashboard_port" >&2
-    exit 2
-    ;;
-esac
-
-if [ "$public_dashboard_port" -lt 1 ] || [ "$public_dashboard_port" -gt 65535 ]; then
-  printf 'public dashboard port is outside 1..65535: %s\n' \
-    "$public_dashboard_port" >&2
+if [[ ! "$tunnel_dashboard_url" =~ ^http://127\.0\.0\.1:([0-9]+)$ ]]; then
+  printf 'tunnel dashboard URL must use literal 127.0.0.1 HTTP with an explicit port\n' >&2
+  exit 2
+fi
+tunnel_dashboard_port="${BASH_REMATCH[1]}"
+if [ "$tunnel_dashboard_port" -lt 1 ] || [ "$tunnel_dashboard_port" -gt 65535 ]; then
+  printf 'tunnel dashboard port is outside 1..65535: %s\n' \
+    "$tunnel_dashboard_port" >&2
   exit 2
 fi
 
@@ -100,7 +98,8 @@ for service in hch-editorial-worker.service ollama.service; do
   restart_count="$(systemctl show "$service" --property=NRestarts --value 2>/dev/null || true)"
   printf 'service=%s active=%s sub=%s restarts=%s\n' \
     "$service" "${active_state:-unknown}" "${sub_state:-unknown}" "${restart_count:-unknown}"
-  if [ "$active_state" != active ] || [ "$sub_state" != running ]; then
+  if [ "$active_state" != active ] || [ "$sub_state" != running ] || \
+     [ "$restart_count" != 0 ]; then
     gate_failed=1
   fi
 done
@@ -239,7 +238,8 @@ if command -v curl >/dev/null 2>&1 && \
       (.orchestration.capacity.grantedCapacity == 0) and
       (.orchestration.capacity.activeAssignments == 0) and
       (.orchestration.capacity.availableSlots == 0) and
-      (.orchestration.workload.generating == 0) and
+      (.orchestration.workload.generating |
+        type == "number" and . >= 0 and floor == .) and
       (.orchestration.claim.allowed == false) and
       (.orchestration.claim.recommendedCount == 0) and
       (.operatorControl.status == "valid") and
@@ -392,7 +392,7 @@ REMOTE
 remote_output="$(run_remote_preflight)" || {
   remote_status=$?
   printf '%s\n' "$remote_output"
-  printf 'public_dashboard=not-checked\n'
+  printf 'tunnel_dashboard=not-checked\n'
   printf 'preflight=blocked\n'
   exit "$remote_status"
 }
@@ -401,28 +401,20 @@ printf '%s\n' "$remote_output"
 remote_dashboard_sha256="$(printf '%s\n' "$remote_output" | \
   sed -n 's/^dashboard_identity_sha256=\([a-f0-9]\{64\}\)$/\1/p')"
 if [ "$(printf '%s\n' "$remote_dashboard_sha256" | grep -c .)" -ne 1 ]; then
-  printf 'public_dashboard=identity-unavailable\n'
+  printf 'tunnel_dashboard=identity-unavailable\n'
   printf 'preflight=blocked\n'
   exit 1
 fi
 
-ssh_hostname="$(ssh -G "$ssh_alias" 2>/dev/null | \
-  awk '$1 == "hostname" { print $2; exit }')"
-if [[ ! "$ssh_hostname" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]]; then
-  printf 'public_dashboard=hostname-invalid\n'
+tunnel_dashboard_json=""
+if ! tunnel_dashboard_json="$(curl --noproxy '*' --fail --silent --show-error --max-time 10 \
+  "${tunnel_dashboard_url}/api/status" 2>/dev/null)"; then
+  printf 'tunnel_dashboard=unreachable\n'
   printf 'preflight=blocked\n'
   exit 1
 fi
 
-public_dashboard_json=""
-if ! public_dashboard_json="$(curl --fail --silent --show-error --max-time 10 \
-  "http://${ssh_hostname}:${public_dashboard_port}/api/status" 2>/dev/null)"; then
-  printf 'public_dashboard=unreachable\n'
-  printf 'preflight=blocked\n'
-  exit 1
-fi
-
-if ! printf '%s\n' "$public_dashboard_json" | jq -e '
+if ! printf '%s\n' "$tunnel_dashboard_json" | jq -e '
   .schemaVersion == 1 and
   (.generatedAt | type == "string" and length > 0) and
   (.worker.state == "draining") and
@@ -439,36 +431,36 @@ if ! printf '%s\n' "$public_dashboard_json" | jq -e '
   (.operatorControl.acceptingClaims == false) and
   (.operatorControl.drainRequested == true)
 ' >/dev/null; then
-  printf 'public_dashboard=invalid\n'
+  printf 'tunnel_dashboard=invalid\n'
   printf 'preflight=blocked\n'
   exit 1
 fi
 
-public_generated_at="$(printf '%s\n' "$public_dashboard_json" | jq -er '.generatedAt')"
-if [[ ! "$public_generated_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$ ]] || \
+tunnel_generated_at="$(printf '%s\n' "$tunnel_dashboard_json" | jq -er '.generatedAt')"
+if [[ ! "$tunnel_generated_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$ ]] || \
    ! node -e '
      const observed = Date.parse(process.argv[1]);
      const age = Date.now() - observed;
      process.exit(Number.isFinite(observed) && age >= -30000 && age <= 180000 ? 0 : 1);
-   ' "$public_generated_at"; then
-  printf 'public_dashboard=stale\n'
+   ' "$tunnel_generated_at"; then
+  printf 'tunnel_dashboard=stale\n'
   printf 'preflight=blocked\n'
   exit 1
 fi
 
-public_dashboard_identity="$(printf '%s\n' "$public_dashboard_json" | jq -ceS '{
+tunnel_dashboard_identity="$(printf '%s\n' "$tunnel_dashboard_json" | jq -ceS '{
   workerId: .worker.id,
   manifestSequence: .security.ed25519Chain.manifestSequence,
   manifestHash: .security.ed25519Chain.manifestHash,
   policyHash: .security.ed25519Chain.policyHash
 }')"
-public_dashboard_sha256="$(printf '%s' "$public_dashboard_identity" | \
+tunnel_dashboard_sha256="$(printf '%s' "$tunnel_dashboard_identity" | \
   shasum -a 256 | awk '{ print $1 }')"
-if [ "$public_dashboard_sha256" != "$remote_dashboard_sha256" ]; then
-  printf 'public_dashboard=identity-mismatch\n'
+if [ "$tunnel_dashboard_sha256" != "$remote_dashboard_sha256" ]; then
+  printf 'tunnel_dashboard=identity-mismatch\n'
   printf 'preflight=blocked\n'
   exit 1
 fi
 
-printf 'public_dashboard=verified\n'
+printf 'tunnel_dashboard=verified\n'
 printf 'preflight=pass\n'
