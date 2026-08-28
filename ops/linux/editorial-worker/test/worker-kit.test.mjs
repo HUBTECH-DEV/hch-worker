@@ -827,7 +827,7 @@ test("node heartbeat reports durable GPU telemetry without inflating active time
   assert.equal(metrics.resources.gpu.status, "available");
   assert.equal(metrics.resources.gpu.sampleCount, 2);
   assert.equal(metrics.resources.gpu.averageUtilizationPercent, 46);
-  assert.equal(metrics.resources.gpu.totalActiveSeconds, 60);
+  assert.equal(metrics.resources.gpu.totalActiveSeconds, 0);
 
   await assert.rejects(nodeHeartbeat(fixture.config, {
     fetchImpl: async () => { throw new Error("control plane offline"); },
@@ -838,7 +838,7 @@ test("node heartbeat reports durable GPU telemetry without inflating active time
   assert.equal(metrics.resources.gpu.status, "available");
   assert.equal(metrics.resources.gpu.sampleCount, 3);
   assert.equal(metrics.resources.gpu.averageUtilizationPercent, 39);
-  assert.equal(metrics.resources.gpu.totalActiveSeconds, 120);
+  assert.equal(metrics.resources.gpu.totalActiveSeconds, 60);
   assert.equal(parseDashboardMetrics(metrics).gpu.status, "available");
 
   assert.equal(gpuActiveSecondsDelta(null, new Date(startedAt).toISOString()), 0);

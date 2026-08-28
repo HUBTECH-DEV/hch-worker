@@ -117,6 +117,8 @@ test("NVIDIA telemetry is bounded and normalized without shell execution", async
   recordGpuSample(metrics, sample, 60);
   assert.equal(metrics.resources.gpu.status, "available");
   assert.equal(metrics.resources.gpu.averageUtilizationPercent, 42);
+  assert.equal(metrics.resources.gpu.totalActiveSeconds, 0);
+  recordGpuSample(metrics, sample, 60);
   assert.equal(metrics.resources.gpu.totalActiveSeconds, 60);
 
   const unsupported = await sampleNvidiaGpu({ platform: "darwin" });

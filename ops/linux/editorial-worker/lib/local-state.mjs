@@ -162,10 +162,12 @@ export function recordGpuSample(metrics, sample, activeSecondsDelta = 0) {
   const utilization = validated.utilizationPercent;
   const delta = nonnegativeNumber(activeSecondsDelta, 0);
   const previousSamples = gpu.sampleCount;
+  const previouslyActive = gpu.available === true && gpu.status === "available" &&
+    percentageOrNull(gpu.utilizationPercent) > 0;
   gpu.available = true;
   gpu.status = "available";
   gpu.utilizationPercent = utilization;
-  gpu.totalActiveSeconds += utilization > 0 ? delta : 0;
+  gpu.totalActiveSeconds += previouslyActive && utilization > 0 ? delta : 0;
   gpu.sampleCount = previousSamples + 1;
   gpu.averageUtilizationPercent = previousSamples
     ? (gpu.averageUtilizationPercent * previousSamples + utilization) / gpu.sampleCount
