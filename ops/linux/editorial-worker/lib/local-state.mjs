@@ -33,13 +33,14 @@ export function assertWorkerRuntimeVersion(manifest, actualVersion = KIT_VERSION
   return actualVersion;
 }
 
-export function updateStatus(stateRoot, config, patch) {
-  const write = statusWriteQueue.then(() => writeStatus(stateRoot, config, patch));
+export function updateStatus(stateRoot, config, patchOrMutator) {
+  const write = statusWriteQueue.then(() =>
+    writeStatus(stateRoot, config, patchOrMutator));
   statusWriteQueue = write.catch(() => {});
   return write;
 }
 
-async function writeStatus(stateRoot, config, patch) {
+async function writeStatus(stateRoot, config, patchOrMutator) {
   const defaults = defaultStatus(config);
   const [storedStatus, capacitySnapshot, control] = await Promise.all([
     readOptionalJson(stateRoot, "status.json"),
@@ -47,6 +48,12 @@ async function writeStatus(stateRoot, config, patch) {
     readWorkerControl(stateRoot, config),
   ]);
   const current = storedStatus ?? {};
+  const patch = typeof patchOrMutator === "function"
+    ? patchOrMutator(current)
+    : patchOrMutator;
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+    throw new TypeError("Status update must produce an object patch.");
+  }
   const merged = { ...defaults, ...current, ...patch };
   const connection = {
     ...defaults.connection,

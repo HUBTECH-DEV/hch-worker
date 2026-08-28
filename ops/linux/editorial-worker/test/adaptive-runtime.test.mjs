@@ -28,6 +28,9 @@ import {
 import { computeEditorialMetrics } from "../../../../lib/editorial-policy.mjs";
 import {
   assertClaimGate,
+  markFinished,
+  markProcessing,
+  runClaimedPortableAssignment,
   runPortableSupervisor,
   renewReadyAttestation,
   startAssignmentHeartbeat,
@@ -705,6 +708,375 @@ test("portable supervisor reports completed assignment results", async (t) => {
   }]);
 });
 
+test("portable telemetry preserves three concurrent assignments across out-of-order completion", async (t) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "hch-portable-telemetry-n3-"));
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
+  const config = telemetryConfig(stateDirectory, 3);
+  const assignmentIds = ["assignment-c", "assignment-a", "assignment-b"];
+  await Promise.all(assignmentIds.map((assignmentId, index) =>
+    markProcessing(
+      stateDirectory,
+      config,
+      { requestId: `request-${index}` },
+      { assignmentId },
+    )));
+
+  let metrics = await readState(stateDirectory, "metrics.json");
+  let status = await readState(stateDirectory, "status.json");
+  assert.deepEqual(metrics.currentBatch.assignmentIds, [
+    "assignment-a",
+    "assignment-b",
+    "assignment-c",
+  ]);
+  assert.deepEqual(status.currentBatch, metrics.currentBatch);
+  assert.equal(metrics.currentBatch.jobs, 3);
+  assert.equal(metrics.jobs.running, 3);
+  assert.equal(metrics.jobs.claimed, 3);
+  assert.equal(metrics.batches.total, 3);
+
+  await markFinished(
+    stateDirectory,
+    config,
+    "assignment-b",
+    false,
+    "generator-output-incomplete",
+  );
+  metrics = await readState(stateDirectory, "metrics.json");
+  status = await readState(stateDirectory, "status.json");
+  assert.deepEqual(metrics.currentBatch.assignmentIds, ["assignment-a", "assignment-c"]);
+  assert.deepEqual(status.currentBatch, metrics.currentBatch);
+  assert.equal(metrics.jobs.running, 2);
+  assert.equal(metrics.jobs.failed, 1);
+  assert.equal(metrics.batches.failed, 1);
+  assert.equal(status.state, "processing");
+  assert.equal(status.running, true);
+  assert.equal(status.standby, false);
+
+  await markFinished(stateDirectory, config, "assignment-c", true, "batch-completed");
+  metrics = await readState(stateDirectory, "metrics.json");
+  assert.deepEqual(metrics.currentBatch.assignmentIds, ["assignment-a"]);
+  assert.equal(metrics.jobs.running, 1);
+
+  await markFinished(stateDirectory, config, "assignment-a", true, "batch-completed");
+  metrics = await readState(stateDirectory, "metrics.json");
+  status = await readState(stateDirectory, "status.json");
+  assert.equal(metrics.currentBatch, null);
+  assert.equal(status.currentBatch, null);
+  assert.equal(metrics.jobs.running, 0);
+  assert.equal(metrics.jobs.completed, 2);
+  assert.equal(metrics.jobs.failed, 1);
+  assert.equal(metrics.batches.completed, 2);
+  assert.equal(metrics.batches.failed, 1);
+  assert.equal(status.state, "standby");
+  assert.equal(status.running, false);
+  assert.equal(status.standby, true);
+});
+
+test("portable telemetry start and finish operations are idempotent by assignment id", async (t) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "hch-portable-telemetry-idempotent-"));
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
+  const config = telemetryConfig(stateDirectory, 2);
+  const start = () => markProcessing(
+    stateDirectory,
+    config,
+    { requestId: "request-idempotent" },
+    { assignmentId: "assignment-idempotent" },
+  );
+  await Promise.all([start(), start(), start()]);
+
+  let metrics = await readState(stateDirectory, "metrics.json");
+  assert.deepEqual(metrics.currentBatch.assignmentIds, ["assignment-idempotent"]);
+  assert.equal(metrics.jobs.running, 1);
+  assert.equal(metrics.jobs.claimed, 1);
+  assert.equal(metrics.batches.total, 1);
+
+  const finish = () => markFinished(
+    stateDirectory,
+    config,
+    "assignment-idempotent",
+    true,
+    "batch-completed",
+  );
+  await Promise.all([finish(), finish(), finish()]);
+  metrics = await readState(stateDirectory, "metrics.json");
+  const status = await readState(stateDirectory, "status.json");
+  assert.equal(metrics.currentBatch, null);
+  assert.equal(status.currentBatch, null);
+  assert.equal(metrics.jobs.running, 0);
+  assert.equal(metrics.jobs.completed, 1);
+  assert.equal(metrics.batches.completed, 1);
+});
+
+test("portable telemetry compensates status when assignment start persistence fails", async (t) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "hch-portable-telemetry-rollback-"));
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
+  const config = telemetryConfig(stateDirectory, 1);
+  await assert.rejects(
+    markProcessing(
+      stateDirectory,
+      config,
+      { requestId: "request-persistence-failure" },
+      { assignmentId: "assignment-persistence-failure" },
+      {
+        now: () => Date.parse("2026-08-28T12:00:00.000Z"),
+        updateMetrics: async () => {
+          throw new Error("injected metrics persistence failure");
+        },
+      },
+    ),
+    (error) => error?.code === "local-telemetry-start-failed",
+  );
+  const status = await readState(stateDirectory, "status.json");
+  assert.equal(status.currentBatch, null);
+  assert.equal(status.running, false);
+  assert.notEqual(status.state, "processing");
+  await assert.rejects(
+    readFile(join(stateDirectory, "metrics.json")),
+    (error) => error?.code === "ENOENT",
+  );
+});
+
+test("portable claimed lifecycle stops monitors and safely fails a valid lease after local start failure", async () => {
+  const stopped = [];
+  const failures = [];
+  const finishes = [];
+  const failure = new WorkerKitError(
+    "local-telemetry-start-failed",
+    "injected telemetry failure",
+  );
+  await assert.rejects(
+    runClaimedPortableAssignment(
+      { localEngineBaseUrl: "http://127.0.0.1:11434", localEngineNumThreads: 2 },
+      "/unused-state-root",
+      { nodeId: "telemetry-node" },
+      { requestId: "request-monitor-cleanup" },
+      {
+        assignmentId: "assignment-monitor-cleanup",
+        leaseExpiresAt: "2026-08-28T12:05:00.000Z",
+      },
+      { adaptiveWorkPolicy: {} },
+      {
+        now: () => Date.parse("2026-08-28T12:00:00.000Z"),
+        startAssignmentHeartbeat: () => ({
+          lost: false,
+          stalled: false,
+          async stopAndWait() { stopped.push("heartbeat"); },
+        }),
+        startOperatorStopMonitor: () => ({
+          requested: false,
+          async stopAndWait() {
+            stopped.push("operator");
+            throw new Error("injected operator cleanup failure");
+          },
+        }),
+        markProcessing: async () => { throw failure; },
+        failAssignment: async (_config, _identity, _assignment, code) => {
+          failures.push(code);
+        },
+        markFinished: async (_root, _config, assignmentId, succeeded, code) => {
+          finishes.push({ assignmentId, succeeded, code });
+        },
+      },
+    ),
+    (error) => error === failure,
+  );
+  assert.deepEqual(failures, ["local-telemetry-start-failed"]);
+  assert.deepEqual(finishes, [{
+    assignmentId: "assignment-monitor-cleanup",
+    succeeded: false,
+    code: "local-telemetry-start-failed",
+  }]);
+  assert.deepEqual(stopped.sort(), ["heartbeat", "operator"]);
+});
+
+test("portable claimed lifecycle never fails a remotely completed assignment during local reconciliation", async (t) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "hch-portable-terminal-reconcile-"));
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
+  const config = {
+    ...telemetryConfig(stateDirectory, 1),
+    localEngineBaseUrl: "http://127.0.0.1:11434",
+    localEngineNumThreads: 2,
+  };
+  let finishAttempts = 0;
+  let remoteFailCalls = 0;
+  const result = await runClaimedPortableAssignment(
+    config,
+    stateDirectory,
+    { nodeId: config.nodeId },
+    { requestId: "request-terminal-reconcile" },
+    {
+      assignmentId: "assignment-terminal-reconcile",
+      leaseExpiresAt: "2026-08-28T12:05:00.000Z",
+    },
+    { adaptiveWorkPolicy: {} },
+    {
+      now: () => Date.parse("2026-08-28T12:00:00.000Z"),
+      startAssignmentHeartbeat: () => ({
+        lost: false,
+        stalled: false,
+        async stopAndWait() {},
+      }),
+      startOperatorStopMonitor: () => ({
+        requested: false,
+        async stopAndWait() {},
+      }),
+      generateEditorialDraft: async () => ({ draft: { content: "accepted" } }),
+      stopHeartbeatBeforeComplete: async () => {},
+      completeAssignment: async () => ({ status: "pending-review" }),
+      failAssignment: async () => { remoteFailCalls += 1; },
+      markFinished: async (...args) => {
+        finishAttempts += 1;
+        if (finishAttempts === 1) {
+          throw new WorkerKitError(
+            "local-telemetry-write-failed",
+            "injected post-completion telemetry failure",
+          );
+        }
+        return markFinished(...args);
+      },
+    },
+  );
+
+  assert.deepEqual(result, {
+    claimed: 1,
+    completed: 1,
+    failed: 0,
+    assignmentId: "assignment-terminal-reconcile",
+    status: "pending-review",
+  });
+  assert.equal(finishAttempts, 2);
+  assert.equal(remoteFailCalls, 0);
+  const metrics = await readState(stateDirectory, "metrics.json");
+  const status = await readState(stateDirectory, "status.json");
+  assert.equal(metrics.currentBatch, null);
+  assert.equal(status.currentBatch, null);
+  assert.equal(metrics.jobs.running, 0);
+  assert.equal(metrics.jobs.completed, 1);
+  assert.equal(metrics.jobs.failed, 0);
+  assert.equal(metrics.batches.completed, 1);
+  assert.equal(metrics.batches.failed, 0);
+  assert.equal(status.state, "standby");
+  assert.equal(status.code, "batch-completed");
+});
+
+test("portable telemetry adopts and finishes a legacy current batch without assignment ids", async (t) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "hch-portable-telemetry-legacy-"));
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
+  const config = telemetryConfig(stateDirectory, 1);
+  const legacyBatch = {
+    batchId: "legacy-batch",
+    jobs: 1,
+    completedJobs: 0,
+    startedAt: "2026-08-28T11:00:00.000Z",
+  };
+  const metrics = defaultMetrics(config);
+  metrics.batches.total = 1;
+  metrics.jobs.claimed = 1;
+  metrics.jobs.running = 1;
+  metrics.currentBatch = legacyBatch;
+  metrics.standby = { active: false, since: null, totalMilliseconds: 0 };
+  await writeFile(join(stateDirectory, "metrics.json"), JSON.stringify(metrics));
+  await writeFile(join(stateDirectory, "status.json"), JSON.stringify({
+    state: "processing",
+    running: true,
+    standby: false,
+    currentBatch: legacyBatch,
+    code: "assignment-processing",
+  }));
+
+  await markProcessing(
+    stateDirectory,
+    config,
+    { requestId: "new-request-id" },
+    { assignmentId: "legacy-assignment" },
+    { now: () => Date.parse("2026-08-28T12:00:00.000Z") },
+  );
+  let currentMetrics = await readState(stateDirectory, "metrics.json");
+  let status = await readState(stateDirectory, "status.json");
+  assert.deepEqual(currentMetrics.currentBatch.assignmentIds, ["legacy-assignment"]);
+  assert.deepEqual(status.currentBatch, currentMetrics.currentBatch);
+  assert.equal(currentMetrics.currentBatch.batchId, "legacy-batch");
+  assert.equal(currentMetrics.jobs.claimed, 1);
+  assert.equal(currentMetrics.batches.total, 1);
+
+  await markFinished(
+    stateDirectory,
+    config,
+    "legacy-assignment",
+    true,
+    "batch-completed",
+  );
+  currentMetrics = await readState(stateDirectory, "metrics.json");
+  status = await readState(stateDirectory, "status.json");
+  assert.equal(currentMetrics.currentBatch, null);
+  assert.equal(status.currentBatch, null);
+  assert.equal(currentMetrics.jobs.running, 0);
+  assert.equal(currentMetrics.jobs.completed, 1);
+  assert.equal(status.state, "standby");
+});
+
+test("portable telemetry clears an invalid status batch instead of leaving processing forever", async (t) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "hch-portable-telemetry-invalid-"));
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
+  const config = telemetryConfig(stateDirectory, 1);
+  await writeFile(join(stateDirectory, "metrics.json"), JSON.stringify(defaultMetrics(config)));
+  await writeFile(join(stateDirectory, "status.json"), JSON.stringify({
+    state: "processing",
+    running: true,
+    standby: false,
+    currentBatch: "invalid-current-batch",
+    code: "assignment-processing",
+  }));
+  await markFinished(
+    stateDirectory,
+    config,
+    "assignment-invalid-status",
+    false,
+    "local-telemetry-start-failed",
+  );
+  const status = await readState(stateDirectory, "status.json");
+  assert.equal(status.currentBatch, null);
+  assert.equal(status.running, false);
+  assert.equal(status.state, "connection-error");
+});
+
+test("portable telemetry canonicalizes and retires sixty-four concurrent assignments", async (t) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "hch-portable-telemetry-n64-"));
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
+  const config = telemetryConfig(stateDirectory, 64);
+  const assignmentIds = Array.from(
+    { length: 64 },
+    (_, index) => `assignment-${String(64 - index).padStart(2, "0")}`,
+  );
+  await Promise.all(assignmentIds.map((assignmentId, index) =>
+    markProcessing(
+      stateDirectory,
+      config,
+      { requestId: `request-${index}` },
+      { assignmentId },
+    )));
+
+  let metrics = await readState(stateDirectory, "metrics.json");
+  assert.deepEqual(
+    metrics.currentBatch.assignmentIds,
+    [...assignmentIds].sort(),
+  );
+  assert.equal(metrics.currentBatch.jobs, 64);
+  assert.equal(metrics.jobs.running, 64);
+  assert.equal(metrics.jobs.claimed, 64);
+  assert.equal(metrics.batches.total, 64);
+
+  await Promise.all(assignmentIds.map((assignmentId) =>
+    markFinished(stateDirectory, config, assignmentId, true, "batch-completed")));
+  metrics = await readState(stateDirectory, "metrics.json");
+  const status = await readState(stateDirectory, "status.json");
+  assert.equal(metrics.currentBatch, null);
+  assert.equal(status.currentBatch, null);
+  assert.equal(metrics.jobs.running, 0);
+  assert.equal(metrics.jobs.completed, 64);
+  assert.equal(metrics.batches.completed, 64);
+});
+
 test("claim gate tolerates bounded control-plane clock skew", () => {
   const manifestHash = "a".repeat(64);
   const manifestSequence = 5;
@@ -1001,10 +1373,10 @@ test("portable readiness renewal resets a completed lifecycle", async (t) => {
 test("portable assignment start leaves standby telemetry", async () => {
   const source = await readFile(new URL("../lib/supervisor.mjs", import.meta.url), "utf8");
   const markProcessing = source.slice(
-    source.indexOf("async function markProcessing"),
-    source.indexOf("async function markFinished"),
+    source.indexOf("export function markProcessing"),
+    source.indexOf("export function markFinished"),
   );
-  assert.match(markProcessing, /leaveStandby\(metrics\)/);
+  assert.match(markProcessing, /leaveStandby\(current\)/);
 });
 
 function heartbeatSnapshot(capacity, allowed, recommendedCount = allowed ? 1 : 0) {
@@ -1017,6 +1389,19 @@ function heartbeatSnapshot(capacity, allowed, recommendedCount = allowed ? 1 : 0
     },
     claim: { allowed, recommendedCount },
   };
+}
+
+function telemetryConfig(stateDirectory, requestedCapacity) {
+  return {
+    stateDirectory,
+    nodeId: "telemetry-node",
+    keyId: "telemetry-key",
+    requestedCapacity,
+  };
+}
+
+async function readState(stateDirectory, name) {
+  return JSON.parse(await readFile(join(stateDirectory, name), "utf8"));
 }
 
 function delay(milliseconds) {

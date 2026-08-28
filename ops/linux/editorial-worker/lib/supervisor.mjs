@@ -25,6 +25,7 @@ import { WorkerKitError, errorCode } from "./errors.mjs";
 import { bootstrapWorkerLocked } from "./bootstrap.mjs";
 
 export const ASSIGNMENT_HEARTBEAT_INTERVAL_SECONDS = 30;
+let assignmentTelemetryQueue = Promise.resolve();
 
 /**
  * Long-lived portable Linux/macOS service. Presence is serialized and kept
@@ -146,22 +147,52 @@ async function runOnePortableAssignmentLocked(config, options = {}) {
     ...claim.assignments[0],
     adaptiveWorkPolicy: applied.adaptiveWorkPolicy,
   };
-  const progress = createAssignmentProgress();
-  const cancellation = new AbortController();
-  const heartbeat = startAssignmentHeartbeat(
+  return runClaimedPortableAssignment(
     config,
+    stateRoot,
     identity,
+    claim,
     assignment,
-    progress,
-    cancellation,
+    applied,
     options,
   );
-  const operatorStop = startOperatorStopMonitor(
-    config, stateRoot, assignment, cancellation, options,
-  );
-  await markProcessing(stateRoot, config, claim, assignment);
+}
+
+export async function runClaimedPortableAssignment(
+  config,
+  stateRoot,
+  identity,
+  claim,
+  assignment,
+  applied,
+  options = {},
+) {
+  const progress = createAssignmentProgress();
+  const cancellation = new AbortController();
+  let heartbeat = null;
+  let operatorStop = null;
+  let completed = null;
+  let completionAccepted = false;
   try {
-    const generated = await generateEditorialDraft(
+    heartbeat = (options.startAssignmentHeartbeat ?? startAssignmentHeartbeat)(
+      config,
+      identity,
+      assignment,
+      progress,
+      cancellation,
+      options,
+    );
+    operatorStop = (options.startOperatorStopMonitor ?? startOperatorStopMonitor)(
+      config, stateRoot, assignment, cancellation, options,
+    );
+    await (options.markProcessing ?? markProcessing)(
+      stateRoot,
+      config,
+      claim,
+      assignment,
+      options,
+    );
+    const generated = await (options.generateEditorialDraft ?? generateEditorialDraft)(
       assignment,
       stateRoot,
       config.localEngineBaseUrl,
@@ -173,36 +204,73 @@ async function runOnePortableAssignmentLocked(config, options = {}) {
         signal: cancellation.signal,
       },
     );
-    await stopHeartbeatBeforeComplete(heartbeat);
-    const completed = await completeAssignment(
+    await (options.stopHeartbeatBeforeComplete ?? stopHeartbeatBeforeComplete)(heartbeat);
+    completed = await (options.completeAssignment ?? completeAssignment)(
       config,
       identity,
       assignment,
       generated.draft,
       options,
     );
-    await markFinished(stateRoot, config, true, "batch-completed");
-    return {
-      claimed: 1,
-      completed: 1,
-      failed: 0,
-      assignmentId: assignment.assignmentId,
-      status: completed.status,
-    };
+    completionAccepted = true;
+    await (options.markFinished ?? markFinished)(
+      stateRoot,
+      config,
+      assignment.assignmentId,
+      true,
+      "batch-completed",
+      options,
+    );
+    return completedAssignmentResult(assignment, completed);
   } catch (error) {
-    const code = heartbeat.stalled
+    if (completionAccepted) {
+      try {
+        await (options.markFinished ?? markFinished)(
+          stateRoot,
+          config,
+          assignment.assignmentId,
+          true,
+          "batch-completed",
+          options,
+        );
+      } catch (reconciliationError) {
+        throw new WorkerKitError(
+          "local-telemetry-finish-failed",
+          "The remotely completed assignment could not be reconciled locally.",
+          { cause: reconciliationError },
+        );
+      }
+      return completedAssignmentResult(assignment, completed);
+    }
+    const code = heartbeat?.stalled
       ? "generator-stalled"
-      : operatorStop.requested
+      : operatorStop?.requested
         ? "operator-stop-requested"
         : safeErrorCode(error);
-    if (!heartbeat.lost || heartbeat.stalled) {
-      await failAssignment(config, identity, assignment, code, options).catch(() => {});
+    if (assignmentLeaseIsValid(assignment, options.now?.() ?? Date.now()) &&
+        (heartbeat?.lost !== true || heartbeat?.stalled === true)) {
+      await (options.failAssignment ?? failAssignment)(
+        config,
+        identity,
+        assignment,
+        code,
+        options,
+      ).catch(() => {});
     }
-    await markFinished(stateRoot, config, false, code).catch(() => {});
+    await (options.markFinished ?? markFinished)(
+      stateRoot,
+      config,
+      assignment.assignmentId,
+      false,
+      code,
+      options,
+    ).catch(() => {});
     throw error;
   } finally {
-    await operatorStop.stopAndWait();
-    await heartbeat.stopAndWait();
+    await Promise.allSettled([
+      operatorStop?.stopAndWait(),
+      heartbeat?.stopAndWait(),
+    ]);
   }
 }
 
@@ -361,57 +429,228 @@ export function assertClaimGate(config, control, ready, applied, trustState, sta
   }
 }
 
-async function markProcessing(stateRoot, config, claim, assignment) {
-  await updateStatus(stateRoot, config, {
-    state: "processing",
-    running: true,
-    standby: false,
-    code: "assignment-processing",
-    currentBatch: {
-      batchId: claim.requestId,
-      assignmentIds: [assignment.assignmentId],
-      jobs: 1,
-      completedJobs: 0,
-      startedAt: new Date().toISOString(),
-    },
-  });
-  await updateMetrics(stateRoot, config, (metrics) => {
-    leaveStandby(metrics);
-    metrics.batches.total += 1;
-    metrics.jobs.claimed += 1;
-    metrics.jobs.running = 1;
-    metrics.currentBatch = {
-      batchId: claim.requestId,
-      assignmentIds: [assignment.assignmentId],
-      jobs: 1,
-      completedJobs: 0,
-      startedAt: new Date().toISOString(),
-    };
+export function markProcessing(stateRoot, config, claim, assignment, options = {}) {
+  return serializeAssignmentTelemetry(async () => {
+    const writeStatus = options.updateStatus ?? updateStatus;
+    const writeMetrics = options.updateMetrics ?? updateMetrics;
+    const startedAt = new Date(options.now?.() ?? Date.now()).toISOString();
+    let proposed = null;
+    let previousLifecycle = null;
+    let statusWritten = false;
+    try {
+      const storedMetrics = await readOptionalJson(stateRoot, "metrics.json");
+      await writeStatus(stateRoot, config, (status) => {
+        previousLifecycle = statusLifecyclePatch(status);
+        proposed = addAssignmentToCurrentBatch(
+          storedMetrics?.currentBatch ?? status.currentBatch,
+          {
+            batchId: claim.requestId,
+            assignmentId: assignment.assignmentId,
+            startedAt,
+          },
+        ).currentBatch;
+        return {
+          state: "processing",
+          running: true,
+          standby: false,
+          code: "assignment-processing",
+          currentBatch: proposed,
+        };
+      });
+      statusWritten = true;
+      await writeMetrics(stateRoot, config, (current) => {
+        const update = addAssignmentToCurrentBatch(current.currentBatch, {
+          batchId: claim.requestId,
+          assignmentId: assignment.assignmentId,
+          startedAt,
+        });
+        current.currentBatch = proposed;
+        current.jobs.running = proposed.assignmentIds.length;
+        if (update.changed) {
+          current.batches.total += 1;
+          current.jobs.claimed += 1;
+        }
+        leaveStandby(current);
+      });
+    } catch (error) {
+      if (statusWritten && previousLifecycle) {
+        await writeStatus(stateRoot, config, previousLifecycle).catch(() => {});
+      }
+      throw new WorkerKitError(
+        "local-telemetry-start-failed",
+        "The assignment could not be recorded in local telemetry.",
+        { cause: error },
+      );
+    }
   });
 }
 
-async function markFinished(stateRoot, config, succeeded, code) {
-  await updateMetrics(stateRoot, config, (metrics) => {
-    metrics.jobs.running = 0;
-    if (succeeded) {
-      metrics.jobs.completed += 1;
-      metrics.batches.completed += 1;
-    } else {
-      metrics.jobs.failed += 1;
-      metrics.batches.failed += 1;
-    }
-    metrics.currentBatch = null;
-    enterStandby(metrics);
+export function markFinished(
+  stateRoot,
+  config,
+  assignmentId,
+  succeeded,
+  code,
+  options = {},
+) {
+  return serializeAssignmentTelemetry(async () => {
+    const writeMetrics = options.updateMetrics ?? updateMetrics;
+    const writeStatus = options.updateStatus ?? updateStatus;
+    const readControl = options.readWorkerControl ?? readWorkerControl;
+    let removedFromMetrics = false;
+    const metrics = await writeMetrics(stateRoot, config, (current) => {
+      const update = removeAssignmentFromCurrentBatch(
+        current.currentBatch,
+        assignmentId,
+      );
+      removedFromMetrics = update.changed;
+      current.currentBatch = update.currentBatch;
+      current.jobs.running = update.currentBatch?.assignmentIds.length ?? 0;
+      if (update.changed && succeeded) {
+        current.jobs.completed += 1;
+        current.batches.completed += 1;
+      } else if (update.changed) {
+        current.jobs.failed += 1;
+        current.batches.failed += 1;
+      }
+      if (current.jobs.running > 0) leaveStandby(current);
+      else enterStandby(current);
+    });
+    const control = await readControl(stateRoot, config);
+    const draining = effectiveRequestedCapacity(control) === 0;
+    return writeStatus(stateRoot, config, (status) => {
+      const statusUpdate = removeAssignmentFromCurrentBatch(
+        status.currentBatch,
+        assignmentId,
+      );
+      const currentBatch = metrics.currentBatch;
+      const running = currentBatch !== null;
+      if (!removedFromMetrics && !statusUpdate.changed) return {};
+      return {
+        state: running
+          ? "processing"
+          : draining
+            ? "draining"
+            : succeeded
+              ? "standby"
+              : "connection-error",
+        running,
+        standby: running ? false : draining || succeeded,
+        code: running
+          ? "assignment-processing"
+          : draining
+            ? "drain-requested"
+            : code,
+        currentBatch,
+      };
+    });
   });
-  const control = await readWorkerControl(stateRoot, config);
-  const draining = effectiveRequestedCapacity(control) === 0;
-  await updateStatus(stateRoot, config, {
-    state: draining ? "draining" : succeeded ? "standby" : "connection-error",
-    running: false,
-    standby: draining || succeeded,
-    code: draining ? "drain-requested" : code,
-    currentBatch: null,
-  });
+}
+
+export function addAssignmentToCurrentBatch(currentBatch, input) {
+  const assignmentId = requiredTelemetryIdentifier(input?.assignmentId, "assignmentId");
+  const existingIds = canonicalAssignmentIds(currentBatch?.assignmentIds);
+  const legacyAdopted = isLegacyOrInvalidCurrentBatch(currentBatch, existingIds);
+  const changed = !legacyAdopted && !existingIds.includes(assignmentId);
+  const assignmentIds = canonicalAssignmentIds([...existingIds, assignmentId]);
+  return {
+    changed,
+    legacyAdopted,
+    currentBatch: canonicalCurrentBatch(currentBatch, {
+      ...input,
+      assignmentIds,
+    }),
+  };
+}
+
+export function removeAssignmentFromCurrentBatch(currentBatch, assignmentIdValue) {
+  const assignmentId = requiredTelemetryIdentifier(assignmentIdValue, "assignmentId");
+  const existingIds = canonicalAssignmentIds(currentBatch?.assignmentIds);
+  const legacyAdopted = isLegacyOrInvalidCurrentBatch(currentBatch, existingIds);
+  const changed = legacyAdopted || existingIds.includes(assignmentId);
+  const assignmentIds = existingIds.filter((value) => value !== assignmentId);
+  return {
+    changed,
+    legacyAdopted,
+    currentBatch: assignmentIds.length
+      ? canonicalCurrentBatch(currentBatch, { assignmentIds })
+      : null,
+  };
+}
+
+function canonicalCurrentBatch(currentBatch, fallback) {
+  const assignmentIds = canonicalAssignmentIds(fallback.assignmentIds);
+  if (!assignmentIds.length) return null;
+  return {
+    batchId: optionalTelemetryIdentifier(currentBatch?.batchId) ??
+      requiredTelemetryIdentifier(fallback.batchId ?? assignmentIds[0], "batchId"),
+    assignmentIds,
+    jobs: assignmentIds.length,
+    completedJobs: 0,
+    startedAt: validTimestamp(currentBatch?.startedAt) ??
+      validTimestamp(fallback.startedAt) ??
+      new Date().toISOString(),
+  };
+}
+
+function canonicalAssignmentIds(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map(optionalTelemetryIdentifier).filter(Boolean))].sort();
+}
+
+function isLegacyOrInvalidCurrentBatch(value, assignmentIds) {
+  return value !== null && value !== undefined && assignmentIds.length === 0;
+}
+
+function optionalTelemetryIdentifier(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 160
+    ? value
+    : null;
+}
+
+function requiredTelemetryIdentifier(value, name) {
+  const identifier = optionalTelemetryIdentifier(value);
+  if (!identifier) throw new TypeError(`${name} must be a non-empty identifier.`);
+  return identifier;
+}
+
+function validTimestamp(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value))
+    ? value
+    : null;
+}
+
+function serializeAssignmentTelemetry(operation) {
+  const update = assignmentTelemetryQueue.then(operation);
+  assignmentTelemetryQueue = update.catch(() => {});
+  return update;
+}
+
+function statusLifecyclePatch(status) {
+  return {
+    state: typeof status?.state === "string" ? status.state : "bootstrap-required",
+    running: status?.running === true,
+    standby: status?.standby === true,
+    code: typeof status?.code === "string" ? status.code : "bootstrap-required",
+    currentBatch: status?.currentBatch && typeof status.currentBatch === "object"
+      ? status.currentBatch
+      : null,
+  };
+}
+
+function assignmentLeaseIsValid(assignment, now) {
+  const leaseExpiresAt = Date.parse(assignment?.leaseExpiresAt ?? "");
+  return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > now;
+}
+
+function completedAssignmentResult(assignment, completed) {
+  return {
+    claimed: 1,
+    completed: 1,
+    failed: 0,
+    assignmentId: assignment.assignmentId,
+    status: completed.status,
+  };
 }
 
 function safeErrorCode(error) {
