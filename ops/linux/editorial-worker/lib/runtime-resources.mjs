@@ -3,7 +3,8 @@ import { availableParallelism, cpus } from "node:os";
 
 const CGROUP_V2_CPU_MAX = "/sys/fs/cgroup/cpu.max";
 const CGROUP_V2_CPU_STAT = "/sys/fs/cgroup/cpu.stat";
-let previousCpuSample = null;
+const MAXIMUM_CPU_SAMPLE_INTERVAL_MICROSECONDS = 120_000_000;
+let previousCpuSample = initialCpuSample();
 
 export function parseCpuMax(value) {
   const [quotaText, periodText, ...extra] = String(value ?? "").trim().split(/\s+/);
@@ -15,6 +16,7 @@ export function parseCpuMax(value) {
   if (!Number.isSafeInteger(quota) || quota < 1) return null;
   return Object.freeze({
     limited: true,
+    capacity: quota / period,
     threads: Math.max(1, Math.ceil(quota / period)),
   });
 }
@@ -36,6 +38,22 @@ export function effectiveLogicalProcessors(options = {}) {
   const quota = parseCpuMax(cpuMaxText);
   if (!quota?.limited) return detected;
   return Math.min(detected, quota.threads);
+}
+
+export function effectiveCpuCapacity(options = {}) {
+  const detected = positiveNumber(
+    options.availableParallelism ?? safeAvailableParallelism(),
+    cpus().length,
+  );
+  if ((options.platform ?? process.platform) !== "linux") return detected;
+  let cpuMaxText = options.cpuMaxText;
+  if (cpuMaxText === undefined) {
+    try { cpuMaxText = readFileSync(CGROUP_V2_CPU_MAX, "utf8"); }
+    catch { return detected; }
+  }
+  const quota = parseCpuMax(cpuMaxText);
+  if (!quota?.limited) return detected;
+  return Math.min(detected, quota.capacity);
 }
 
 export function assertLocalEngineThreadBudget(config, options = {}) {
@@ -62,13 +80,22 @@ export function parseCpuStatUsage(value) {
   return entries.has("usage_usec") ? entries.get("usage_usec") : null;
 }
 
-export function cgroupCpuUtilization(previous, current, logicalProcessors) {
+export function cgroupCpuUtilization(
+  previous,
+  current,
+  logicalProcessors,
+  maximumIntervalMicroseconds = MAXIMUM_CPU_SAMPLE_INTERVAL_MICROSECONDS,
+) {
   if (!validCpuSample(previous) || !validCpuSample(current) ||
       current.sampledAtMicroseconds <= previous.sampledAtMicroseconds ||
-      current.usageMicroseconds < previous.usageMicroseconds) return null;
+      current.usageMicroseconds < previous.usageMicroseconds ||
+      !Number.isFinite(logicalProcessors) || logicalProcessors <= 0 ||
+      !Number.isSafeInteger(maximumIntervalMicroseconds) ||
+      maximumIntervalMicroseconds < 1) return null;
   const elapsed = current.sampledAtMicroseconds - previous.sampledAtMicroseconds;
+  if (elapsed > maximumIntervalMicroseconds) return null;
   const used = current.usageMicroseconds - previous.usageMicroseconds;
-  return Math.min(100, Math.max(0, used / elapsed / Math.max(1, logicalProcessors) * 100));
+  return Math.min(100, Math.max(0, used / elapsed / logicalProcessors * 100));
 }
 
 export function sampleCgroupCpuPercent(options = {}) {
@@ -88,8 +115,23 @@ export function sampleCgroupCpuPercent(options = {}) {
   return cgroupCpuUtilization(
     previous,
     current,
-    options.logicalProcessors ?? effectiveLogicalProcessors(options),
+    options.logicalProcessors ?? effectiveCpuCapacity(options),
+    options.maximumIntervalMicroseconds,
   );
+}
+
+function initialCpuSample() {
+  if (process.platform !== "linux") return null;
+  try {
+    const usageMicroseconds = parseCpuStatUsage(readFileSync(CGROUP_V2_CPU_STAT, "utf8"));
+    if (usageMicroseconds === null) return null;
+    return {
+      usageMicroseconds,
+      sampledAtMicroseconds: Number(process.hrtime.bigint() / 1_000n),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function safeAvailableParallelism() {
@@ -99,6 +141,10 @@ function safeAvailableParallelism() {
 
 function positiveInteger(value, fallback) {
   return Number.isSafeInteger(value) && value > 0 ? value : Math.max(1, fallback);
+}
+
+function positiveNumber(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : Math.max(1, fallback);
 }
 
 function validCpuSample(value) {

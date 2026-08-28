@@ -79,7 +79,8 @@ export async function nodeHeartbeat(config, options = {}) {
     const requestId = options.requestId ?? crypto.randomUUID();
     identifier(requestId, "requestId", 160);
     const gpuSample = options.gpuSample ?? await sampleNvidiaGpu(options.gpuProbe);
-    const cpuPercent = options.resources?.cpuPercent ?? sampleCgroupCpuPercent();
+    const sampledCpuPercent = options.resources?.cpuPercent ?? sampleCgroupCpuPercent();
+    const cpuPercent = sampledCpuPercent ?? (process.platform === "linux" ? 100 : null);
     const sampledResources = {
       ...(options.resources ?? {}),
       ...(cpuPercent === null || cpuPercent === undefined ? {} : { cpuPercent }),

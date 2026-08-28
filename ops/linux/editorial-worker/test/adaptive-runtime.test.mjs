@@ -39,6 +39,7 @@ import { defaultMetrics, recordGpuSample } from "../lib/local-state.mjs";
 import {
   assertLocalEngineThreadBudget,
   cgroupCpuUtilization,
+  effectiveCpuCapacity,
   effectiveLogicalProcessors,
   parseCpuMax,
   parseCpuStatUsage,
@@ -67,8 +68,16 @@ const policy = Object.freeze({
 });
 
 test("cgroup CPU quota bounds local Ollama threads and telemetry", () => {
-  assert.deepEqual(parseCpuMax("200000 100000\n"), { limited: true, threads: 2 });
-  assert.deepEqual(parseCpuMax("150000 100000"), { limited: true, threads: 2 });
+  assert.deepEqual(parseCpuMax("200000 100000\n"), {
+    limited: true,
+    capacity: 2,
+    threads: 2,
+  });
+  assert.deepEqual(parseCpuMax("150000 100000"), {
+    limited: true,
+    capacity: 1.5,
+    threads: 2,
+  });
   assert.deepEqual(parseCpuMax("max 100000"), { limited: false, threads: null });
   assert.equal(parseCpuMax("invalid"), null);
   assert.equal(effectiveLogicalProcessors({
@@ -81,6 +90,11 @@ test("cgroup CPU quota bounds local Ollama threads and telemetry", () => {
     availableParallelism: 4,
     cpuMaxText: "max 100000",
   }), 4);
+  assert.equal(effectiveCpuCapacity({
+    platform: "linux",
+    availableParallelism: 64,
+    cpuMaxText: "150000 100000",
+  }), 1.5);
   assert.throws(() => assertLocalEngineThreadBudget(
     { localEngineNumThreads: 3 },
     { platform: "linux", availableParallelism: 64, cpuMaxText: "200000 100000" },
@@ -97,8 +111,18 @@ test("cgroup CPU quota bounds local Ollama threads and telemetry", () => {
     2,
   ), 25);
   assert.equal(cgroupCpuUtilization(
+    { usageMicroseconds: 1_000_000, sampledAtMicroseconds: 2_000_000 },
+    { usageMicroseconds: 2_500_000, sampledAtMicroseconds: 3_000_000 },
+    1.5,
+  ), 100);
+  assert.equal(cgroupCpuUtilization(
     { usageMicroseconds: 2_000_000, sampledAtMicroseconds: 2_000_000 },
     { usageMicroseconds: 1_000_000, sampledAtMicroseconds: 3_000_000 },
+    2,
+  ), null);
+  assert.equal(cgroupCpuUtilization(
+    { usageMicroseconds: 1_000_000, sampledAtMicroseconds: 2_000_000 },
+    { usageMicroseconds: 1_500_000, sampledAtMicroseconds: 123_000_001 },
     2,
   ), null);
   assert.equal(sampleCgroupCpuPercent({
