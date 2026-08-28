@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { availableParallelism, cpus } from "node:os";
 
 const CGROUP_V2_CPU_MAX = "/sys/fs/cgroup/cpu.max";
+const CGROUP_V2_CPU_STAT = "/sys/fs/cgroup/cpu.stat";
+let previousCpuSample = null;
 
 export function parseCpuMax(value) {
   const [quotaText, periodText, ...extra] = String(value ?? "").trim().split(/\s+/);
@@ -47,6 +49,49 @@ export function assertLocalEngineThreadBudget(config, options = {}) {
   return config;
 }
 
+export function parseCpuStatUsage(value) {
+  const entries = new Map();
+  for (const line of String(value ?? "").trim().split(/\r?\n/)) {
+    if (!line) continue;
+    const [key, raw, ...extra] = line.trim().split(/\s+/);
+    if (!key || !raw || extra.length || entries.has(key)) return null;
+    const parsed = Number(raw);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) return null;
+    entries.set(key, parsed);
+  }
+  return entries.has("usage_usec") ? entries.get("usage_usec") : null;
+}
+
+export function cgroupCpuUtilization(previous, current, logicalProcessors) {
+  if (!validCpuSample(previous) || !validCpuSample(current) ||
+      current.sampledAtMicroseconds <= previous.sampledAtMicroseconds ||
+      current.usageMicroseconds < previous.usageMicroseconds) return null;
+  const elapsed = current.sampledAtMicroseconds - previous.sampledAtMicroseconds;
+  const used = current.usageMicroseconds - previous.usageMicroseconds;
+  return Math.min(100, Math.max(0, used / elapsed / Math.max(1, logicalProcessors) * 100));
+}
+
+export function sampleCgroupCpuPercent(options = {}) {
+  if ((options.platform ?? process.platform) !== "linux") return null;
+  let cpuStatText = options.cpuStatText;
+  if (cpuStatText === undefined) {
+    try { cpuStatText = readFileSync(CGROUP_V2_CPU_STAT, "utf8"); }
+    catch { return null; }
+  }
+  const usageMicroseconds = parseCpuStatUsage(cpuStatText);
+  if (usageMicroseconds === null) return null;
+  const sampledAtMicroseconds = options.sampledAtMicroseconds ??
+    Number(process.hrtime.bigint() / 1_000n);
+  const current = { usageMicroseconds, sampledAtMicroseconds };
+  const previous = options.previousSample ?? previousCpuSample;
+  if (options.updateState !== false) previousCpuSample = current;
+  return cgroupCpuUtilization(
+    previous,
+    current,
+    options.logicalProcessors ?? effectiveLogicalProcessors(options),
+  );
+}
+
 function safeAvailableParallelism() {
   try { return availableParallelism(); }
   catch { return cpus().length; }
@@ -54,4 +99,10 @@ function safeAvailableParallelism() {
 
 function positiveInteger(value, fallback) {
   return Number.isSafeInteger(value) && value > 0 ? value : Math.max(1, fallback);
+}
+
+function validCpuSample(value) {
+  return value && Number.isSafeInteger(value.usageMicroseconds) &&
+    value.usageMicroseconds >= 0 && Number.isSafeInteger(value.sampledAtMicroseconds) &&
+    value.sampledAtMicroseconds >= 0;
 }

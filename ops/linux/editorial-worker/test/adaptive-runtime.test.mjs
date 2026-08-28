@@ -38,8 +38,11 @@ import { sampleNvidiaGpu, validateGpuSample } from "../lib/gpu.mjs";
 import { defaultMetrics, recordGpuSample } from "../lib/local-state.mjs";
 import {
   assertLocalEngineThreadBudget,
+  cgroupCpuUtilization,
   effectiveLogicalProcessors,
   parseCpuMax,
+  parseCpuStatUsage,
+  sampleCgroupCpuPercent,
 } from "../lib/runtime-resources.mjs";
 import { withWorkerLock } from "../lib/storage.mjs";
 import { canonicalizeJson } from "../crypto.mjs";
@@ -86,6 +89,40 @@ test("cgroup CPU quota bounds local Ollama threads and telemetry", () => {
     { localEngineNumThreads: 2 },
     { platform: "linux", availableParallelism: 64, cpuMaxText: "200000 100000" },
   ).localEngineNumThreads, 2);
+  assert.equal(parseCpuStatUsage("usage_usec 1000000\nuser_usec 800000\n"), 1_000_000);
+  assert.equal(parseCpuStatUsage("usage_usec invalid"), null);
+  assert.equal(cgroupCpuUtilization(
+    { usageMicroseconds: 1_000_000, sampledAtMicroseconds: 2_000_000 },
+    { usageMicroseconds: 1_500_000, sampledAtMicroseconds: 3_000_000 },
+    2,
+  ), 25);
+  assert.equal(cgroupCpuUtilization(
+    { usageMicroseconds: 2_000_000, sampledAtMicroseconds: 2_000_000 },
+    { usageMicroseconds: 1_000_000, sampledAtMicroseconds: 3_000_000 },
+    2,
+  ), null);
+  assert.equal(sampleCgroupCpuPercent({
+    platform: "linux",
+    cpuStatText: "usage_usec 1500000",
+    sampledAtMicroseconds: 3_000_000,
+    previousSample: { usageMicroseconds: 1_000_000, sampledAtMicroseconds: 2_000_000 },
+    logicalProcessors: 2,
+    updateState: false,
+  }), 25);
+  assert.equal(sampleCgroupCpuPercent({
+    platform: "linux",
+    cpuStatText: "usage_usec 1500000",
+    sampledAtMicroseconds: 3_000_000,
+    previousSample: null,
+    logicalProcessors: 2,
+    updateState: false,
+  }), null);
+  assert.equal(sampleCgroupCpuPercent({
+    platform: "linux",
+    cpuStatText: "usage_usec invalid",
+    updateState: false,
+  }), null);
+  assert.equal(sampleCgroupCpuPercent({ platform: "darwin" }), null);
 });
 
 test("NVIDIA telemetry is bounded and normalized without shell execution", async () => {

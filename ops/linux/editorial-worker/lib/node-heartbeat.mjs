@@ -19,6 +19,7 @@ import {
   ensurePrivateDirectory,
   readOptionalJson,
 } from "./storage.mjs";
+import { sampleCgroupCpuPercent } from "./runtime-resources.mjs";
 
 export const NODE_HEARTBEAT_INTERVAL_SECONDS = 60;
 export const NODE_HEARTBEAT_PATH = "/api/editorial/orchestrator/nodes/heartbeat";
@@ -78,8 +79,10 @@ export async function nodeHeartbeat(config, options = {}) {
     const requestId = options.requestId ?? crypto.randomUUID();
     identifier(requestId, "requestId", 160);
     const gpuSample = options.gpuSample ?? await sampleNvidiaGpu(options.gpuProbe);
+    const cpuPercent = options.resources?.cpuPercent ?? sampleCgroupCpuPercent();
     const sampledResources = {
       ...(options.resources ?? {}),
+      ...(cpuPercent === null || cpuPercent === undefined ? {} : { cpuPercent }),
       ...(gpuSample.status === "available"
         ? { gpuPercent: gpuSample.utilizationPercent }
         : {}),

@@ -757,6 +757,17 @@ test("Darwin omits misleading generic pressure unless availability is sampled", 
     totalMemoryBytes: 100,
     availableMemoryBytes: 40,
   }), { cpuPercent: 50, memoryPercent: 60 });
+  assert.deepEqual(sampleCapacityPressure({
+    platform: "linux",
+    totalMemoryBytes: 100,
+    availableMemoryBytes: 40,
+  }), { memoryPercent: 60 });
+  assert.deepEqual(sampleCapacityPressure({
+    platform: "linux",
+    cpuPercent: 12.345,
+    totalMemoryBytes: 100,
+    availableMemoryBytes: 40,
+  }), { cpuPercent: 12.35, memoryPercent: 60 });
 });
 
 test("node heartbeat reports durable GPU telemetry without inflating active time", async (t) => {
