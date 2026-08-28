@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
+import { assertLocalEngineThreadBudget } from "./runtime-resources.mjs";
 
 const CONFIG_KEYS = new Set([
   "schemaVersion",
@@ -11,6 +12,7 @@ const CONFIG_KEYS = new Set([
   "rootPublicKeyFingerprint",
   "rootKeyId",
   "localEngineBaseUrl",
+  "localEngineNumThreads",
   "requestedCapacity",
   "artifactMaximumBytes",
   "requestTimeoutMilliseconds",
@@ -27,7 +29,7 @@ export async function loadWorkerConfig(path) {
   } catch (error) {
     throw new Error("Worker config could not be read as JSON.", { cause: error });
   }
-  return validateWorkerConfig(parsed);
+  return assertLocalEngineThreadBudget(validateWorkerConfig(parsed));
 }
 
 export function validateWorkerConfig(value) {
@@ -54,6 +56,9 @@ export function validateWorkerConfig(value) {
   }
   const stateDirectory = absolutePath(input.stateDirectory, "stateDirectory");
   const rootPublicKeyPath = absolutePath(input.rootPublicKeyPath, "rootPublicKeyPath");
+  const localEngineNumThreads = input.localEngineNumThreads === undefined
+    ? null
+    : integerInRange(input.localEngineNumThreads, 1, 64, "localEngineNumThreads");
   const requestedCapacity = integerInRange(input.requestedCapacity ?? 1, 0, 64, "requestedCapacity");
   const artifactMaximumBytes = integerInRange(
     input.artifactMaximumBytes ?? 10 * 1024 * 1024,
@@ -87,6 +92,7 @@ export function validateWorkerConfig(value) {
     ),
     rootKeyId: identifier(input.rootKeyId, "rootKeyId", 160),
     localEngineBaseUrl: localEngine.origin,
+    ...(localEngineNumThreads === null ? {} : { localEngineNumThreads }),
     requestedCapacity,
     artifactMaximumBytes,
     requestTimeoutMilliseconds,

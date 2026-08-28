@@ -1,4 +1,4 @@
-import { cpus, freemem, loadavg, platform, totalmem } from "node:os";
+import { freemem, loadavg, platform, totalmem } from "node:os";
 
 import { canonicalizeJson, sha256Hex } from "../crypto.mjs";
 import { WorkerKitError } from "./errors.mjs";
@@ -6,6 +6,7 @@ import {
   atomicWriteJson,
   readOptionalJson,
 } from "./storage.mjs";
+import { effectiveLogicalProcessors } from "./runtime-resources.mjs";
 
 const CAPACITY_CLASSES = new Set(["constrained", "standard", "accelerated"]);
 const PRESSURE_FIELDS = new Set(["cpuPercent", "memoryPercent", "gpuPercent"]);
@@ -172,7 +173,7 @@ export function validateCapacityPressure(value = {}) {
 }
 
 export function sampleCapacityPressure(resources = {}) {
-  const logicalProcessors = resources.logicalProcessors ?? cpus().length;
+  const logicalProcessors = resources.logicalProcessors ?? effectiveLogicalProcessors();
   const oneMinuteLoad = resources.oneMinuteLoad ?? loadavg()[0];
   const memoryTotal = resources.totalMemoryBytes ?? totalmem();
   const memoryAvailable = resources.availableMemoryBytes ?? freemem();

@@ -7,7 +7,13 @@ import {
 } from "./capacity.mjs";
 import { signedPost } from "./http.mjs";
 import { ensureWorkerIdentity } from "./identity.mjs";
-import { assertSecretFree, updateStatus } from "./local-state.mjs";
+import { sampleNvidiaGpu } from "./gpu.mjs";
+import {
+  assertSecretFree,
+  recordGpuSample,
+  updateMetrics,
+  updateStatus,
+} from "./local-state.mjs";
 import {
   atomicWriteJson,
   ensurePrivateDirectory,
@@ -71,9 +77,19 @@ export async function nodeHeartbeat(config, options = {}) {
     const requestedCapacity = effectiveRequestedCapacity(control);
     const requestId = options.requestId ?? crypto.randomUUID();
     identifier(requestId, "requestId", 160);
+    const gpuSample = options.gpuSample ?? await sampleNvidiaGpu(options.gpuProbe);
+    const sampledResources = {
+      ...(options.resources ?? {}),
+      ...(gpuSample.status === "available"
+        ? { gpuPercent: gpuSample.utilizationPercent }
+        : {}),
+    };
     const pressure = options.pressure === undefined
-      ? sampleCapacityPressure(options.resources)
+      ? sampleCapacityPressure(sampledResources)
       : validateCapacityPressure(options.pressure);
+    await updateMetrics(stateRoot, config, (metrics) => {
+      recordGpuSample(metrics, gpuSample, gpuActiveSecondsDelta(previous, attemptedAt));
+    });
     const requestBody = {
       nodeId: config.nodeId,
       workerKeyId: config.keyId,
@@ -149,6 +165,17 @@ export async function nodeHeartbeat(config, options = {}) {
     }
     throw error;
   }
+}
+
+export function gpuActiveSecondsDelta(previous, attemptedAt) {
+  const previousAttempt = Date.parse(previous?.heartbeat?.lastAttemptAt ?? "");
+  const currentAttempt = Date.parse(attemptedAt ?? "");
+  if (!Number.isFinite(previousAttempt) || !Number.isFinite(currentAttempt) ||
+      currentAttempt <= previousAttempt) return 0;
+  return Math.min(
+    NODE_HEARTBEAT_INTERVAL_SECONDS * 2,
+    (currentAttempt - previousAttempt) / 1_000,
+  );
 }
 
 function heartbeatRequestOptions(options, deadlineMilliseconds) {

@@ -34,6 +34,13 @@ import {
   stopHeartbeatBeforeComplete,
 } from "../lib/supervisor.mjs";
 import { WorkerKitError } from "../lib/errors.mjs";
+import { sampleNvidiaGpu, validateGpuSample } from "../lib/gpu.mjs";
+import { defaultMetrics, recordGpuSample } from "../lib/local-state.mjs";
+import {
+  assertLocalEngineThreadBudget,
+  effectiveLogicalProcessors,
+  parseCpuMax,
+} from "../lib/runtime-resources.mjs";
 import { withWorkerLock } from "../lib/storage.mjs";
 import { canonicalizeJson } from "../crypto.mjs";
 import { createGenerationPlan, generationPlanHash } from "../../../../lib/editorial-work-sizing.mjs";
@@ -54,6 +61,88 @@ const policy = Object.freeze({
     { id: "compact", rank: 1, maxOutputTokens: 1536, editorialProfile: "EDITORIAL_COMPACT", minimumUnit: false },
     { id: "full", rank: 2, maxOutputTokens: 2400, editorialProfile: "EDITORIAL_LONG_FORM", minimumUnit: false },
   ],
+});
+
+test("cgroup CPU quota bounds local Ollama threads and telemetry", () => {
+  assert.deepEqual(parseCpuMax("200000 100000\n"), { limited: true, threads: 2 });
+  assert.deepEqual(parseCpuMax("150000 100000"), { limited: true, threads: 2 });
+  assert.deepEqual(parseCpuMax("max 100000"), { limited: false, threads: null });
+  assert.equal(parseCpuMax("invalid"), null);
+  assert.equal(effectiveLogicalProcessors({
+    platform: "linux",
+    availableParallelism: 64,
+    cpuMaxText: "200000 100000",
+  }), 2);
+  assert.equal(effectiveLogicalProcessors({
+    platform: "linux",
+    availableParallelism: 4,
+    cpuMaxText: "max 100000",
+  }), 4);
+  assert.throws(() => assertLocalEngineThreadBudget(
+    { localEngineNumThreads: 3 },
+    { platform: "linux", availableParallelism: 64, cpuMaxText: "200000 100000" },
+  ), /effective CPU budget/);
+  assert.equal(assertLocalEngineThreadBudget(
+    { localEngineNumThreads: 2 },
+    { platform: "linux", availableParallelism: 64, cpuMaxText: "200000 100000" },
+  ).localEngineNumThreads, 2);
+});
+
+test("NVIDIA telemetry is bounded and normalized without shell execution", async () => {
+  let invocation = null;
+  const sample = await sampleNvidiaGpu({
+    platform: "linux",
+    execFile: async (...args) => {
+      invocation = args;
+      return { stdout: "7\n42\n" };
+    },
+  });
+  assert.equal(invocation[0], "/usr/bin/nvidia-smi");
+  assert.deepEqual(invocation[1], [
+    "--query-gpu=utilization.gpu",
+    "--format=csv,noheader,nounits",
+  ]);
+  assert.deepEqual(invocation[2].env, {
+    LANG: "C",
+    LC_ALL: "C",
+    PATH: "/usr/bin:/bin",
+  });
+  assert.deepEqual(sample, {
+    available: true,
+    status: "available",
+    utilizationPercent: 42,
+    errorCode: null,
+  });
+  const metrics = defaultMetrics({ nodeId: "gpu-node", keyId: "gpu-key" });
+  recordGpuSample(metrics, sample, 60);
+  assert.equal(metrics.resources.gpu.status, "available");
+  assert.equal(metrics.resources.gpu.averageUtilizationPercent, 42);
+  assert.equal(metrics.resources.gpu.totalActiveSeconds, 60);
+
+  const unsupported = await sampleNvidiaGpu({ platform: "darwin" });
+  assert.equal(unsupported.status, "unsupported");
+  const failed = await sampleNvidiaGpu({
+    platform: "linux",
+    execFile: async () => { throw Object.assign(new Error("hidden"), { code: "EIO" }); },
+  });
+  assert.deepEqual(failed, {
+    available: false,
+    status: "unavailable",
+    utilizationPercent: null,
+    errorCode: "gpu-probe-failed",
+  });
+  assert.throws(() => validateGpuSample({
+    available: false,
+    status: "available",
+    utilizationPercent: 42,
+    errorCode: null,
+  }), /inconsistent/);
+  assert.throws(() => validateGpuSample({
+    available: false,
+    status: "unavailable",
+    utilizationPercent: null,
+    errorCode: "invalid error code",
+  }), /inconsistent/);
 });
 
 test("portable client verifies signed policy and immutable JCS generation plan", async () => {
@@ -144,11 +233,25 @@ test("Ollama request uses portable JSON mode and exact signed num_predict", () =
     editorialProfile: "EDITORIAL_MINIMUM",
     input: { locale: "pt-BR" },
     platform: "linux",
+    localEngineNumThreads: 2,
     attempt: 1,
     lastValidation: null,
     previousCandidate: null,
   });
   assert.equal(Object.hasOwn(linuxRequest.options, "num_batch"), false);
+  assert.equal(linuxRequest.options.num_thread, 2);
+  assert.throws(() => ollamaGenerationRequest({
+    profile: { model: "qwen", temperature: 0.2, contextWindow: 8192 },
+    generationPlan: { maxOutputTokens: 768 },
+    prompt: "system",
+    editorialProfile: "EDITORIAL_MINIMUM",
+    input: { locale: "pt-BR" },
+    platform: "linux",
+    localEngineNumThreads: 0,
+    attempt: 1,
+    lastValidation: null,
+    previousCandidate: null,
+  }), /localEngineNumThreads/);
 });
 
 test("model evidence is bounded for first-token portability", () => {

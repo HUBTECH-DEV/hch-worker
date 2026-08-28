@@ -168,6 +168,7 @@ async function runOnePortableAssignmentLocked(config, options = {}) {
       {
         ...options,
         adaptiveWorkPolicy: applied.adaptiveWorkPolicy,
+        localEngineNumThreads: config.localEngineNumThreads,
         progress,
         signal: cancellation.signal,
       },

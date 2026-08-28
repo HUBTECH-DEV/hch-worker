@@ -91,6 +91,7 @@ export async function generateEditorialDraft(
       editorialProfile,
       input,
       platform: options.platform ?? process.platform,
+      localEngineNumThreads: options.localEngineNumThreads,
       attempt,
       lastValidation,
       previousCandidate,
@@ -150,6 +151,11 @@ export async function generateEditorialDraft(
 
 export function ollamaGenerationRequest(input) {
   const profileRequirements = requirements(input.editorialProfile);
+  if (input.localEngineNumThreads !== null && input.localEngineNumThreads !== undefined &&
+      (!Number.isSafeInteger(input.localEngineNumThreads) ||
+       input.localEngineNumThreads < 1 || input.localEngineNumThreads > 64)) {
+    throw new TypeError("localEngineNumThreads must be an integer between 1 and 64.");
+  }
   return {
     model: input.profile.model,
     stream: true,
@@ -165,6 +171,9 @@ export function ollamaGenerationRequest(input) {
       // memory pressure before the first progress chunk. Keep the signed
       // context/output budgets intact while lowering only the local batch.
       ...(input.platform === "darwin" ? { num_batch: 256 } : {}),
+      ...(input.localEngineNumThreads === null || input.localEngineNumThreads === undefined
+        ? {}
+        : { num_thread: input.localEngineNumThreads }),
       // The immutable generation plan owns the exact output budget. Never
       // infer, increase, or renegotiate it locally.
       num_predict: input.generationPlan.maxOutputTokens,

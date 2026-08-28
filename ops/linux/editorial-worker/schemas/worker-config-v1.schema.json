@@ -26,6 +26,12 @@
     "rootPublicKeyFingerprint": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
     "rootKeyId": { "type": "string" },
     "localEngineBaseUrl": { "type": "string", "format": "uri" },
+    "localEngineNumThreads": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64,
+      "description": "Limite local de threads por request Ollama. Nao altera o RuntimeProfile assinado."
+    },
     "requestedCapacity": {
       "type": "integer",
       "minimum": 0,

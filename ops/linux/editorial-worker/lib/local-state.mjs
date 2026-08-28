@@ -1,4 +1,4 @@
-import { cpus, freemem, totalmem } from "node:os";
+import { freemem, totalmem } from "node:os";
 
 import { sha256Hex } from "../crypto.mjs";
 import {
@@ -12,11 +12,15 @@ import {
   effectiveRequestedCapacity,
   readWorkerControl,
 } from "./capacity.mjs";
+import { effectiveLogicalProcessors } from "./runtime-resources.mjs";
+import { validateGpuSample } from "./gpu.mjs";
 
 export const KIT_VERSION = "3.1.0";
 const PROCESS_STARTED_AT = Date.now();
 const PLATFORM = workerPlatform();
+const LOGICAL_PROCESSORS = effectiveLogicalProcessors();
 let statusWriteQueue = Promise.resolve();
+let metricsWriteQueue = Promise.resolve();
 
 export function assertWorkerRuntimeVersion(manifest, actualVersion = KIT_VERSION) {
   const requiredVersion = manifest?.runtime?.workerVersion;
@@ -113,13 +117,20 @@ async function writeStatus(stateRoot, config, patch) {
   return next;
 }
 
-export async function updateMetrics(stateRoot, config, mutator) {
+export function updateMetrics(stateRoot, config, mutator) {
+  const write = metricsWriteQueue.then(() => writeMetrics(stateRoot, config, mutator));
+  metricsWriteQueue = write.catch(() => {});
+  return write;
+}
+
+async function writeMetrics(stateRoot, config, mutator) {
   const current = await readOptionalJson(stateRoot, "metrics.json");
-  const next = normalizeMetrics(current, config);
-  mutator(next);
+  const mutable = normalizeMetrics(current, config);
+  mutator(mutable);
+  const next = normalizeMetrics(mutable, config);
   next.observedAt = new Date().toISOString();
   next.uptimeSeconds = Math.floor((Date.now() - PROCESS_STARTED_AT) / 1000);
-  next.resources.cpu.logicalProcessors = cpus().length;
+  next.resources.cpu.logicalProcessors = LOGICAL_PROCESSORS;
   next.resources.memory.totalBytes = totalmem();
   next.resources.memory.availableBytes = freemem();
   next.resources.memory.processWorkingSetBytes = process.memoryUsage().rss;
@@ -135,6 +146,31 @@ export async function updateMetrics(stateRoot, config, mutator) {
   assertSecretFree(next);
   await atomicWriteJson(stateRoot, "metrics.json", next);
   return next;
+}
+
+export function recordGpuSample(metrics, sample, activeSecondsDelta = 0) {
+  const gpu = metrics.resources.gpu;
+  const validated = validateGpuSample(sample);
+  const status = validated.status;
+  if (status !== "available") {
+    gpu.available = false;
+    gpu.status = status;
+    gpu.utilizationPercent = null;
+    gpu.errorCode = validated.errorCode;
+    return;
+  }
+  const utilization = validated.utilizationPercent;
+  const delta = nonnegativeNumber(activeSecondsDelta, 0);
+  const previousSamples = gpu.sampleCount;
+  gpu.available = true;
+  gpu.status = "available";
+  gpu.utilizationPercent = utilization;
+  gpu.totalActiveSeconds += utilization > 0 ? delta : 0;
+  gpu.sampleCount = previousSamples + 1;
+  gpu.averageUtilizationPercent = previousSamples
+    ? (gpu.averageUtilizationPercent * previousSamples + utilization) / gpu.sampleCount
+    : utilization;
+  gpu.errorCode = null;
 }
 
 export async function operationRequestId(
@@ -204,7 +240,7 @@ export function recordDuration(metrics, durationMilliseconds, sample = {}) {
     const usage = process.cpuUsage(sample.cpuStarted);
     const cpuSeconds = (usage.user + usage.system) / 1_000_000;
     const utilization = duration > 0
-      ? Math.min(100, cpuSeconds / (duration / 1_000) / Math.max(1, cpus().length) * 100)
+      ? Math.min(100, cpuSeconds / (duration / 1_000) / LOGICAL_PROCESSORS * 100)
       : 0;
     const cpu = metrics.resources.cpu;
     cpu.utilizationPercent = utilization;
@@ -303,7 +339,7 @@ export function defaultMetrics(config) {
     uptimeSeconds: Math.floor((Date.now() - PROCESS_STARTED_AT) / 1000),
     resources: {
       cpu: {
-        logicalProcessors: cpus().length,
+        logicalProcessors: LOGICAL_PROCESSORS,
         utilizationPercent: null,
         totalActiveSeconds: 0,
         sampleCount: 0,
@@ -359,6 +395,7 @@ function normalizeMetrics(value, config) {
   const current = value && typeof value === "object" ? value : {};
   const resources = current.resources ?? {};
   const cpu = resources.cpu ?? {};
+  const gpu = resources.gpu ?? {};
   const memory = resources.memory ?? {};
   const perItem = memory.perItem ?? {};
   const network = current.network ?? {};
@@ -368,6 +405,18 @@ function normalizeMetrics(value, config) {
   const performance = current.performance ?? {};
   const standby = current.standby ?? {};
   const memorySamples = nonnegativeInteger(perItem.sampleCount, 0);
+  const gpuStatus = new Set(["available", "unsupported", "unavailable"]).has(gpu.status)
+    ? gpu.status
+    : "unsupported";
+  const gpuUtilization = gpuStatus === "available" && gpu.available === true
+    ? percentageOrNull(gpu.utilizationPercent)
+    : null;
+  const gpuAvailable = gpuStatus === "available" && gpuUtilization !== null;
+  const gpuSamplesCandidate = nonnegativeInteger(gpu.sampleCount, 0);
+  const gpuAverageCandidate = percentageOrNull(gpu.averageUtilizationPercent);
+  const gpuSamples = gpuSamplesCandidate > 0 && gpuAverageCandidate !== null
+    ? gpuSamplesCandidate
+    : 0;
   return {
     schema: defaults.schema,
     schemaVersion: defaults.schemaVersion,
@@ -377,20 +426,23 @@ function normalizeMetrics(value, config) {
     uptimeSeconds: nonnegativeInteger(current.uptimeSeconds, 0),
     resources: {
       cpu: {
-        logicalProcessors: positiveInteger(cpu.logicalProcessors, cpus().length),
+        logicalProcessors: positiveInteger(cpu.logicalProcessors, LOGICAL_PROCESSORS),
         utilizationPercent: percentageOrNull(cpu.utilizationPercent),
         totalActiveSeconds: nonnegativeNumber(cpu.totalActiveSeconds, 0),
         sampleCount: nonnegativeInteger(cpu.sampleCount, 0),
         averageUtilizationPercent: percentageOrNull(cpu.averageUtilizationPercent),
       },
       gpu: {
-        available: false,
-        status: "unsupported",
-        utilizationPercent: null,
-        totalActiveSeconds: 0,
-        sampleCount: 0,
-        averageUtilizationPercent: null,
-        errorCode: null,
+        available: gpuAvailable,
+        status: gpuStatus === "available" && !gpuAvailable ? "unavailable" : gpuStatus,
+        utilizationPercent: gpuAvailable ? gpuUtilization : null,
+        totalActiveSeconds: nonnegativeNumber(gpu.totalActiveSeconds, 0),
+        sampleCount: gpuSamples,
+        averageUtilizationPercent: gpuSamples ? gpuAverageCandidate : null,
+        errorCode: gpuStatus === "unavailable" &&
+          typeof gpu.errorCode === "string" && /^[a-z0-9._-]{1,96}$/.test(gpu.errorCode)
+          ? gpu.errorCode
+          : null,
       },
       memory: {
         totalBytes: nonnegativeInteger(memory.totalBytes, totalmem()),

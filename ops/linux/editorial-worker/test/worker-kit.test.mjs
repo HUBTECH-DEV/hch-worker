@@ -54,6 +54,7 @@ test("VPS supervisor uses the installed pinned Node runtime", async () => {
   );
   assert.match(source, /ExecStart=\/usr\/local\/libexec\/hch-node .*worker\.mjs supervise/);
   assert.doesNotMatch(source, /ExecStart=\/usr\/bin\/node/);
+  assert.match(source, /^PrivateDevices=true$/m);
 });
 
 test("macOS installer retires conflicting legacy agents and preserves Ollama", async () => {
@@ -90,7 +91,7 @@ import {
   resolveEnrollmentToken,
 } from "../lib/bootstrap.mjs";
 import { executeWorkerCycle } from "../lib/execute.mjs";
-import { nodeHeartbeat } from "../lib/node-heartbeat.mjs";
+import { gpuActiveSecondsDelta, nodeHeartbeat } from "../lib/node-heartbeat.mjs";
 import {
   createRuntimeProfileFromManifest,
   verifyRuntimeProfile,
@@ -100,7 +101,9 @@ import {
   assertWorkerRuntimeVersion,
   completeOperation,
   operationRequestId,
+  updateMetrics,
 } from "../lib/local-state.mjs";
+import { parseDashboardMetrics } from "../../../worker-dashboard/lib/hch-worker-adapter.mjs";
 
 test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never executes work", async (t) => {
   const fixture = await createFixture(t);
@@ -756,6 +759,94 @@ test("Darwin omits misleading generic pressure unless availability is sampled", 
   }), { cpuPercent: 50, memoryPercent: 60 });
 });
 
+test("node heartbeat reports durable GPU telemetry without inflating active time", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  await setLocalParallelism(fixture.config, 0);
+  const startedAt = Date.now();
+  const available = (utilizationPercent) => ({
+    available: true,
+    status: "available",
+    utilizationPercent,
+    errorCode: null,
+  });
+
+  await nodeHeartbeat(fixture.config, {
+    fetchImpl: fixture.control.fetch,
+    gpuSample: available(42),
+    now: new Date(startedAt),
+  });
+  const heartbeatRequest = fixture.control.requests.findLast(
+    (request) => request.path === "/api/editorial/orchestrator/nodes/heartbeat",
+  );
+  assert.equal(heartbeatRequest.body.pressure.gpuPercent, 42);
+  let metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(metrics.resources.gpu.status, "available");
+  assert.equal(metrics.resources.gpu.sampleCount, 1);
+  assert.equal(metrics.resources.gpu.totalActiveSeconds, 0);
+  assert.equal(parseDashboardMetrics(metrics).gpu.status, "available");
+
+  await Promise.all([
+    updateMetrics(fixture.stateDirectory, fixture.config, (value) => {
+      value.jobs.claimed += 1;
+    }),
+    updateMetrics(fixture.stateDirectory, fixture.config, (value) => {
+      value.batches.total += 1;
+    }),
+  ]);
+  metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(metrics.jobs.claimed, 1);
+  assert.equal(metrics.batches.total, 1);
+  assert.equal(metrics.resources.gpu.status, "available");
+
+  await nodeHeartbeat(fixture.config, {
+    fetchImpl: fixture.control.fetch,
+    gpuSample: {
+      available: false,
+      status: "unavailable",
+      utilizationPercent: null,
+      errorCode: "gpu-probe-failed",
+    },
+    now: new Date(startedAt + 60_000),
+  });
+  metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(metrics.resources.gpu.status, "unavailable");
+  assert.equal(metrics.resources.gpu.sampleCount, 1);
+  assert.equal(metrics.resources.gpu.averageUtilizationPercent, 42);
+
+  await nodeHeartbeat(fixture.config, {
+    fetchImpl: fixture.control.fetch,
+    gpuSample: available(50),
+    now: new Date(startedAt + 120_000),
+  });
+  metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(metrics.resources.gpu.status, "available");
+  assert.equal(metrics.resources.gpu.sampleCount, 2);
+  assert.equal(metrics.resources.gpu.averageUtilizationPercent, 46);
+  assert.equal(metrics.resources.gpu.totalActiveSeconds, 60);
+
+  await assert.rejects(nodeHeartbeat(fixture.config, {
+    fetchImpl: async () => { throw new Error("control plane offline"); },
+    gpuSample: available(25),
+    now: new Date(startedAt + 180_000),
+  }));
+  metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(metrics.resources.gpu.status, "available");
+  assert.equal(metrics.resources.gpu.sampleCount, 3);
+  assert.equal(metrics.resources.gpu.averageUtilizationPercent, 39);
+  assert.equal(metrics.resources.gpu.totalActiveSeconds, 120);
+  assert.equal(parseDashboardMetrics(metrics).gpu.status, "available");
+
+  assert.equal(gpuActiveSecondsDelta(null, new Date(startedAt).toISOString()), 0);
+  assert.equal(gpuActiveSecondsDelta({
+    heartbeat: { lastAttemptAt: new Date(startedAt).toISOString() },
+  }, new Date(startedAt + 300_000).toISOString()), 120);
+});
+
 test("execute requires the current ready/applied gate and retries with one request id and new nonces", async (t) => {
   const fixture = await createFixture(t, { failFirstExecute: true });
   await bootstrapWorker(fixture.config, {
@@ -1068,7 +1159,6 @@ test("local control CLI operations validate without claiming and stop during an 
   assert.equal(validation.valid, true);
   assert.equal(validation.reservationAttempted, false);
   assert.deepEqual(fixture.control.paths.slice(beforeValidate), ["/api/tags"]);
-
   const configuredParallelism = await setLocalParallelism(fixture.config, 8);
   assert.equal(configuredParallelism.requestedParallelism, 8);
   assert.equal(configuredParallelism.effectiveParallelism, 0);
@@ -1203,6 +1293,7 @@ test("configuration enforces HTTPS control plane and loopback local engine", asy
   };
   const validated = validateWorkerConfig(base);
   assert.equal(validated.nodeId, "vps-primary");
+  assert.equal(validated.localEngineNumThreads, undefined);
   assert.equal(validated.requestTimeoutMilliseconds, 15_000);
   assert.equal(validated.executeRequestTimeoutMilliseconds, 45 * 60_000);
   assert.equal(
@@ -1234,6 +1325,16 @@ test("configuration enforces HTTPS control plane and loopback local engine", asy
   assert.throws(
     () => validateWorkerConfig({ ...base, enrollmentTokenEnvironment: "HCH/TOKEN" }),
     /environment variable name/,
+  );
+  for (const localEngineNumThreads of [0, -1, 1.5, "2", 65]) {
+    assert.throws(
+      () => validateWorkerConfig({ ...base, localEngineNumThreads }),
+      /localEngineNumThreads/,
+    );
+  }
+  assert.equal(
+    validateWorkerConfig({ ...base, localEngineNumThreads: 2 }).localEngineNumThreads,
+    2,
   );
 });
 
@@ -1314,6 +1415,7 @@ test("published config example and JSON schemas are valid JSON", async () => {
     await readFile(new URL("../config.example.json", import.meta.url), "utf8"),
   );
   assert.equal(validateWorkerConfig(example).nodeId, "vps-primary");
+  assert.equal(validateWorkerConfig(example).localEngineNumThreads, 1);
   const schemaDirectory = new URL("../schemas/", import.meta.url);
   const schemaNames = await readdir(schemaDirectory);
   assert.deepEqual(schemaNames.sort(), [
