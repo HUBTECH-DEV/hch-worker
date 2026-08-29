@@ -1,9 +1,14 @@
 # HCH Worker Dashboard
 
-Painel web **local** para observar um worker editorial HCH e solicitar somente
-duas transições operacionais fixas: iniciar ou pausar em modo drain. O pacote
-usa apenas APIs nativas do Node.js 22, não recebe credenciais e não é iniciado
-automaticamente. Os snapshots e toda a telemetria continuam somente leitura.
+Painel web **local** do Worker Beta para observar um worker editorial HCH e
+solicitar transições operacionais fixas. O pacote usa apenas APIs nativas do
+Node.js 22, não recebe credenciais e não é iniciado automaticamente. Os
+snapshots e toda a telemetria continuam somente leitura.
+
+A interface reúne cinco visões na mesma aplicação: **Contribuição**,
+**Atividade**, **Desempenho**, **Impacto** e **Modo discreto**. Isso mantém um
+único runtime e permite que uma pessoa escolha o nível de detalhe sem instalar
+cinco produtos diferentes.
 
 Ele apresenta:
 
@@ -23,6 +28,9 @@ Ele apresenta:
   último progresso e liveness (`respondendo lentamente` ou `travado`);
 - botões com confirmação para `start` e `stop`, quando o launcher confiável
   fornece os caminhos locais fixos do kit.
+- onboarding HIH fail-closed: início e paralelismo positivo ficam bloqueados
+  até a confirmação simultânea do pareamento via navegador, cadastro elegível
+  e consentimento vigente;
 - descoberta periódica da última release estável e botão `Atualizar` somente
   quando a versão instalada estiver atrás e o executor administrativo fixo
   estiver habilitado.
@@ -36,11 +44,12 @@ Ele apresenta:
 | `lib/hch-worker-adapter.mjs` | adaptação validada dos snapshots nativos dos kits HCH |
 | `lib/adaptive-work.mjs` | redução da política/progresso v2.2.0 para telemetria pública sem conteúdo |
 | `lib/operator-control.mjs` | validação estrita e redução pública de `worker-control.json` |
+| `lib/contributor.mjs` | redução fail-closed do pareamento e elegibilidade HIH sem documentos nem tokens |
 | `lib/control.mjs` | executor estreito de `Hch-Worker.ps1 start/stop`, sem shell |
 | `lib/storage.mjs` | allowlists separadas de leitura/escrita, lock e troca atômica |
 | `server.mjs` | servidor HTTP limitado a loopback, telemetria e controles locais protegidos |
 | `public/` | interface acessível, responsiva e sem bibliotecas externas |
-| `schemas/` | JSON Schemas de estado, métricas, orquestração e trabalho adaptativo |
+| `schemas/` | JSON Schemas de estado, métricas, orquestração, contribuidor e trabalho adaptativo |
 
 O servidor e o coletor não compartilham memória. O painel aceita tanto os
 snapshots próprios `state.json` + `metrics.json` quanto, diretamente, os
@@ -74,11 +83,75 @@ HCH_WORKER_RELEASE_REPOSITORY=HUBTECH-DEV/hch-worker
 HCH_WORKER_RELEASE_CHECK_INTERVAL_MS=900000
 HCH_WORKER_UPDATE_SCRIPT=/caminho-confiavel/hch-worker-update.mjs
 HCH_WORKER_UPDATE_SCRIPT_ROOT=/caminho-confiavel
+HCH_WORKER_HIH_PAIRING_URL=https://identity.hubtech.dev/desktop/worker
 ```
 
 O host aceita somente `127.0.0.1`, `::1` ou `localhost`. Isso protege o painel
 local e não impõe qualquer bloqueio de IP à API central do orquestrador. Workers
 continuam podendo operar em redes e endereços variáveis.
+
+`HCH_WORKER_HIH_PAIRING_URL` é opcional nesta versão Beta. Sem ela, o painel
+explica que o pareamento ainda não está configurado e permanece bloqueado.
+Quando definida, deve usar HTTPS, sem credenciais, query ou fragmento; HTTP é
+aceito somente em loopback para desenvolvimento. A URL abre a sessão web já
+autenticada no HIH/HCH, apresenta um código/nonce de uso único e confirma a
+prova da chave pública Ed25519 do Worker. Senha, cookie e token HIH nunca entram
+no processo local.
+
+## Contrato do contribuidor HIH
+
+O broker nativo de pareamento grava atomicamente `contributor-auth.json` no
+mesmo diretório privado dos snapshots. O dashboard somente lê esse arquivo e
+publica sua redução segura em `GET /api/contributor` com `Cache-Control:
+no-store`. O contrato versionado é `hch.worker-contributor-auth/v1`.
+
+Campos permitidos:
+
+- estado e validade do pareamento, sem senha, cookie ou access/refresh token;
+- resultado de elegibilidade e códigos estáveis de pendência;
+- versão/estado do consentimento;
+- um `bindingId` pairwise com prefixo `hchbind_`, usado apenas pelo broker local
+  e omitido da API do painel.
+
+Campos desconhecidos são rejeitados. CPF, passaporte, endereço, contatos,
+cookies, chaves privadas e qualquer token não pertencem ao arquivo. Nome,
+subject do usuário, Tenant e membership também não são devolvidos ao Worker;
+a atribuição humana é resolvida e armazenada somente pelo orquestrador. Um
+estado ausente, inválido, expirado, inelegível, desatualizado ou sem
+consentimento retorna `readyForContribution: false`.
+
+Exemplo seguro produzido pelo broker (nunca inclua documentos ou tokens):
+
+```json
+{
+  "schema": "hch.worker-contributor-auth/v1",
+  "schemaVersion": 1,
+  "observedAt": "2026-08-29T12:00:00.000Z",
+  "pairing": {
+    "status": "paired",
+    "pairedAt": "2026-08-29T12:00:00.000Z",
+    "expiresAt": "2026-08-29T13:00:00.000Z"
+  },
+  "eligibility": {
+    "status": "eligible",
+    "checkedAt": "2026-08-29T12:00:00.000Z",
+    "reasonCodes": []
+  },
+  "consent": {
+    "status": "accepted",
+    "version": "hch-contribution-v1",
+    "acceptedAt": "2026-08-29T12:00:00.000Z"
+  },
+  "bindingId": "hchbind_Po43m4KxmP2Kc00NQn5G7A"
+}
+```
+
+O código/nonce de uso único não é persistido nesse read model; apenas o
+resultado da prova Ed25519 concluída é gravado. O `POST /api/control` relê o
+contrato imediatamente antes de `start` ou de
+aplicar paralelismo maior que zero. A falha devolve
+`contributor-not-authorized` sem invocar o executor. Pausa, parada,
+paralelismo zero e atualização continuam disponíveis para contenção segura.
 
 O GitHub é usado somente para descobrir a release. A instalação é entregue a
 um executor administrativo local fixo; o navegador nunca fornece versão, URL ou

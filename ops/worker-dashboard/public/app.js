@@ -6,6 +6,7 @@ let refreshTimer;
 let controlCsrfToken = null;
 let controlContract = null;
 let latestStatus = null;
+let latestContributor = null;
 let localControlBusy = false;
 let pendingControlAction = null;
 let lastControlTrigger = null;
@@ -19,6 +20,12 @@ const translations = {
   connecting: "Conectando",
   degraded: "Degradado",
   authenticated: "Autenticado",
+  paired: "Pareado",
+  unpaired: "Não pareado",
+  eligible: "Completo",
+  ineligible: "Incompleto",
+  accepted: "Aceito",
+  required: "Necessário",
   valid: "Válido",
   invalid: "Inválido",
   expiring: "Expirando",
@@ -80,7 +87,7 @@ function translated(value) {
 }
 
 function statusTone(value) {
-  if (new Set(["healthy", "connected", "authenticated", "valid", "ready", "idle", "processing", "available", "progressing"]).has(value)) return "good";
+  if (new Set(["healthy", "connected", "authenticated", "eligible", "accepted", "valid", "ready", "idle", "processing", "available", "progressing"]).has(value)) return "good";
   if (new Set(["critical", "invalid", "expired", "revoked", "rejected", "error", "update-failed", "disconnected", "stalled"]).has(value)) return "critical";
   return "warning";
 }
@@ -221,6 +228,9 @@ function render(status) {
   byId("jobs-total").textContent = formatNumber(status.workload.jobsTotal, 0);
   byId("jobs-detail").textContent = `Concluídos ${formatNumber(status.workload.jobsCompleted, 0)} · sucesso ${formatNumber(status.workload.jobsSucceeded, 0)} · falha ${formatNumber(status.workload.jobsFailed, 0)}`;
   byId("jobs-running").textContent = formatNumber(status.workload.jobsRunning, 0);
+  byId("impact-generation-time").textContent = formatDurationMilliseconds(status.throughput.totalProcessingMilliseconds);
+  byId("impact-review-total").textContent = formatNumber(status.workload.jobsSucceeded, 0);
+  byId("impact-failures-total").textContent = formatNumber(status.workload.jobsFailed, 0);
   const capacity = status.capacity;
   byId("capacity-grant").textContent = `Solicitada ${formatNumber(capacity.requestedCapacity, 0)} · concedida ${formatNumber(capacity.grantedCapacity, 0)}`;
   byId("capacity-detail").textContent = `Ativos ${formatNumber(capacity.activeAssignments, 0)} · ${capacity.capacityReason}${capacity.validUntil ? ` · até ${formatTime(capacity.validUntil)}` : ""}`;
@@ -445,6 +455,7 @@ function renderWorkerControl(status) {
   const contractReady = reportedControl.available === true &&
     controlContract?.available === true && typeof controlCsrfToken === "string";
   const busy = localControlBusy || reportedControl.busy === true || controlContract?.busy === true;
+  const contributorReady = latestContributor?.readyForContribution === true;
 
   panel.setAttribute("aria-busy", String(busy));
   if (reportedControl.available !== true) {
@@ -456,6 +467,11 @@ function renderWorkerControl(status) {
   } else if (busy) {
     setControlState(state, "Aplicando", "warning");
     summary.textContent = "A ação local está em andamento. Aguarde a confirmação do worker.";
+  } else if (!contributorReady) {
+    setControlState(state, "Acesso HIH necessário", "critical");
+    summary.textContent = controlView.activeAssignments > 0
+      ? "A autorização do contribuidor não está apta. Pause ou pare o Worker; novos inícios e claims estão bloqueados."
+      : "Pareie no navegador com sua sessão HIH, complete o cadastro e aceite o consentimento para iniciar novos claims.";
   } else if (controlView.mode === "invalid") {
     setControlState(state, "Controle inválido", "critical");
     summary.textContent = "O arquivo de controle local foi rejeitado. Corrija o estado antes de executar uma ação.";
@@ -472,11 +488,11 @@ function renderWorkerControl(status) {
     summary.textContent = "Novos claims estão bloqueados e não há assignment ativo informado.";
   }
 
-  startButton.disabled = !contractReady || busy || !controlView.canStart;
+  startButton.disabled = !contractReady || busy || !contributorReady || !controlView.canStart;
   pauseButton.disabled = !contractReady || busy || !controlView.canPause;
   stopButton.disabled = !contractReady || busy || !controlView.canStop;
-  parallelismInput.disabled = !contractReady || busy;
-  parallelismButton.disabled = !contractReady || busy;
+  parallelismInput.disabled = !contractReady || busy || !contributorReady;
+  parallelismButton.disabled = !contractReady || busy || !contributorReady;
   if (document.activeElement !== parallelismInput && Number.isInteger(controlView.requestedParallelism)) {
     parallelismInput.value = String(controlView.requestedParallelism);
   }
@@ -565,6 +581,11 @@ function closeControlConfirmation() {
 async function performControlAction(action, parallelism) {
   if (!new Set(["start", "pause", "stop", "set-parallelism", "update"]).has(action) ||
       localControlBusy || typeof controlCsrfToken !== "string") return;
+  if ((action === "start" || (action === "set-parallelism" && parallelism > 0)) &&
+      latestContributor?.readyForContribution !== true) {
+    setControlFeedback("Pareamento HIH, cadastro completo e consentimento são obrigatórios para iniciar claims.", "critical");
+    return;
+  }
   localControlBusy = true;
   renderWorkerControl(latestStatus);
   renderWorkerUpdate(latestStatus);
@@ -629,6 +650,9 @@ async function performControlAction(action, parallelism) {
 }
 
 function controlErrorMessage(code, statusCode) {
+  if (code === "contributor-not-authorized") {
+    return "O HIH não confirmou pareamento, cadastro completo e consentimento. Nenhum claim foi liberado.";
+  }
   if (code === "worker-update-not-available") {
     return "A release foi revalidada e já não há uma atualização aplicável.";
   }
@@ -668,6 +692,68 @@ async function refresh() {
   }
 }
 
+async function refreshContributor() {
+  try {
+    const response = await fetch("/api/contributor", {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) throw new Error("contributor unavailable");
+    const contributor = await response.json();
+    if (!contributor || contributor.schema !== "hch.worker-contributor-auth/v1" ||
+        contributor.schemaVersion !== 1 || typeof contributor.readyForContribution !== "boolean") {
+      throw new Error("contributor contract invalid");
+    }
+    latestContributor = contributor;
+  } catch {
+    latestContributor = {
+      readyForContribution: false,
+      pairing: { status: "unavailable", expiresAt: null },
+      eligibility: { status: "unknown", reasonCodes: [] },
+      consent: { status: "required", version: null },
+      browserPairing: { available: false, url: null, method: "browser-session-one-time-code-ed25519" },
+      blockingReasons: ["hih-browser-pairing-required"],
+    };
+  }
+  renderContributor(latestContributor);
+  if (latestStatus) renderWorkerControl(latestStatus);
+}
+
+function renderContributor(value) {
+  const panel = byId("contributor-auth");
+  const ready = value.readyForContribution === true;
+  panel.setAttribute("aria-busy", "false");
+  setControlState(
+    byId("contributor-ready"),
+    ready ? "Pronto para contribuir" : "Ação necessária",
+    ready ? "good" : "warning",
+  );
+  setStatus(byId("contributor-pairing").querySelector(".status"), value.pairing?.status ?? "unavailable");
+  setStatus(byId("contributor-eligibility").querySelector(".status"), value.eligibility?.status ?? "unknown");
+  setStatus(byId("contributor-consent").querySelector(".status"), value.consent?.status ?? "required");
+  byId("contributor-identity").textContent = ready
+    ? `Conta HIH pareada · validade local até ${formatTime(value.pairing.expiresAt)} · identidade humana mantida somente no orquestrador`
+    : "O Worker não recebe nome, documento, e-mail, Tenant, membership ou identificador humano.";
+  const reasons = new Set(value.blockingReasons ?? []);
+  byId("contributor-summary").textContent = ready
+    ? "Identidade confirmada. Este computador pode ser iniciado para contribuir com capacidade de geração."
+    : reasons.has("hih-browser-pairing-required")
+      ? "Abra o fluxo no navegador, confirme sua sessão HIH e pareie este Worker com um código de uso único e sua chave Ed25519."
+      : reasons.has("complete-profile-required")
+        ? "Complete endereço, contatos e CPF ou passaporte no HIH. Os dados não são copiados para o Worker."
+        : "Leia e aceite o consentimento de contribuição no fluxo HIH.";
+  const pairing = byId("contributor-pair");
+  const unavailable = byId("contributor-pair-unavailable");
+  const canPair = value.browserPairing?.available === true &&
+    value.browserPairing.method === "browser-session-one-time-code-ed25519" &&
+    typeof value.browserPairing.url === "string";
+  pairing.hidden = !canPair || ready;
+  unavailable.hidden = canPair || ready;
+  if (canPair) pairing.href = value.browserPairing.url;
+  else pairing.removeAttribute("href");
+}
+
 async function refreshPublicIdentity() {
   try {
     const response=await fetch("/api/identity",{cache:"no-store",headers:{Accept:"application/json"}});
@@ -683,14 +769,40 @@ async function refreshPublicIdentity() {
 function scheduleRefresh() {
   clearInterval(refreshTimer);
   if (!document.hidden) {
-    refreshTimer = setInterval(refresh, refreshIntervalMilliseconds);
+    refreshTimer = setInterval(
+      () => void Promise.all([refresh(), refreshContributor()]),
+      refreshIntervalMilliseconds,
+    );
   }
 }
 
 document.addEventListener("visibilitychange", () => {
   scheduleRefresh();
-  if (!document.hidden) void Promise.all([refreshControlContract(), refresh()]);
+  if (!document.hidden) void Promise.all([refreshControlContract(), refresh(), refreshContributor()]);
 });
+
+const viewDescriptions = {
+  contribution: "Pareie este Worker com sua sessão HIH no navegador e decida quando compartilhar capacidade.",
+  activity: "Acompanhe assignments, heartbeats e progresso sem revelar o conteúdo editorial.",
+  performance: "Observe recursos, tier adaptativo e limites técnicos deste computador.",
+  impact: "Veja tempo de geração e conteúdos enviados à revisão humana.",
+  preferences: "Use o modo discreto, confira privacidade, confiança e atualizações.",
+};
+
+function selectWorkerView(view) {
+  if (!Object.hasOwn(viewDescriptions, view)) return;
+  for (const button of document.querySelectorAll("[data-view-target]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.viewTarget === view));
+  }
+  for (const section of document.querySelectorAll("[data-worker-view]")) {
+    section.hidden = section.dataset.workerView !== view;
+  }
+  byId("worker-view-description").textContent = viewDescriptions[view];
+}
+
+for (const button of document.querySelectorAll("[data-view-target]")) {
+  button.addEventListener("click", () => selectWorkerView(button.dataset.viewTarget));
+}
 
 byId("control-start").addEventListener("click", (event) => {
   requestControlConfirmation("start", event.currentTarget);
@@ -730,5 +842,6 @@ byId("control-confirmation").addEventListener("close", () => {
   lastControlTrigger = null;
 });
 
-void Promise.all([refreshControlContract(), refresh(), refreshPublicIdentity()]);
+selectWorkerView("contribution");
+void Promise.all([refreshControlContract(), refresh(), refreshContributor(), refreshPublicIdentity()]);
 scheduleRefresh();

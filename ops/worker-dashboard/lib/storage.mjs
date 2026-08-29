@@ -17,12 +17,14 @@ export const WORKER_STATUS_FILE = "status.json";
 export const METRICS_FILE = "metrics.json";
 export const WORKER_CONTROL_FILE = "worker-control.json";
 export const ORCHESTRATION_FILE = "orchestration.json";
+export const CONTRIBUTOR_AUTH_FILE = "contributor-auth.json";
 const READABLE_FILES = new Set([
   STATE_FILE,
   WORKER_STATUS_FILE,
   METRICS_FILE,
   WORKER_CONTROL_FILE,
   ORCHESTRATION_FILE,
+  CONTRIBUTOR_AUTH_FILE,
 ]);
 const WRITABLE_FILES = new Set([STATE_FILE, METRICS_FILE, ORCHESTRATION_FILE]);
 const DEFAULT_MAX_BYTES = 1024 * 1024;
