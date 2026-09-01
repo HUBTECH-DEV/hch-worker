@@ -488,7 +488,19 @@ test("updateReceipt separates the canonical receipt hash from the local journal 
     $transaction=[pscustomobject]@{Id='tx-test';BackupDirectory='${escaped(backupRoot)}';Journal=[Collections.ArrayList]::new()}
     $receipt=& $m {param($c,$i,$mf,$tx) New-HchUpdateReceipt -Config $c -Identity $i -Manifest $mf -Transaction $tx -Result applied} $config $identity $manifest $transaction
     $persisted=Get-Content -Raw -LiteralPath (Join-Path '${escaped(backupRoot)}' 'update-receipt.json')|ConvertFrom-Json
-    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((@{receipt=$receipt;localLog=$persisted.localLog}|ConvertTo-Json -Depth 20 -Compress)))
+    [IO.File]::WriteAllText((Join-Path '${escaped(stateRoot)}' 'applied-manifest.json'),
+      (@{manifestHash='${manifestHash}'}|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+    $legacyBackup='${escaped(join(directory, "legacy-backup"))}'
+    New-Item -ItemType Directory -Path $legacyBackup -Force|Out-Null
+    $legacyTransaction=[pscustomobject]@{Id='tx-legacy';BackupDirectory=$legacyBackup;Journal=[Collections.ArrayList]::new()}
+    $legacyReceipt=& $m {param($c,$i,$mf,$tx) New-HchUpdateReceipt -Config $c -Identity $i -Manifest $mf -Transaction $tx -Result no-change} $config $identity $manifest $legacyTransaction
+    [IO.File]::WriteAllText((Join-Path '${escaped(stateRoot)}' 'applied-manifest.json'),
+      (@{manifestHash=('c'*64)}|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+    $mismatchCode=try {
+      & $m {param($c,$i,$mf,$tx) New-HchUpdateReceipt -Config $c -Identity $i -Manifest $mf -Transaction $tx -Result no-change} $config $identity $manifest $legacyTransaction|Out-Null
+      'accepted'
+    } catch { $_.Exception.Message }
+    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((@{receipt=$receipt;localLog=$persisted.localLog;legacyReceipt=$legacyReceipt;mismatchCode=$mismatchCode}|ConvertTo-Json -Depth 20 -Compress)))
   `;
   const encoded = execFileSync(
     "powershell.exe",
@@ -505,6 +517,12 @@ test("updateReceipt separates the canonical receipt hash from the local journal 
   assert.deepEqual(receipt.artifactHashes, { policy: artifactHash });
   assert.equal(receipt.targetManifestHash, manifestHash);
   assert.equal(receipt.rollbackPerformed, false);
+  assert.equal(persisted.legacyReceipt.result, "no-change");
+  assert.equal(persisted.legacyReceipt.previousManifestHash, manifestHash);
+  assert.equal(
+    persisted.mismatchCode,
+    "update-receipt-result-manifest-consistency-invalid",
+  );
 });
 
 test("assignment input and runtime profile hashes are verified before use", (context) => {

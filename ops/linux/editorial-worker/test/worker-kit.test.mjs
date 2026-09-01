@@ -51,6 +51,7 @@ import {
   bootstrapWorker,
   resolveEnrollmentToken,
 } from "../lib/bootstrap.mjs";
+import { isLegacyContentContractBackfill } from "../lib/apply.mjs";
 import { executeWorkerCycle } from "../lib/execute.mjs";
 import { nodeHeartbeat } from "../lib/node-heartbeat.mjs";
 import {
@@ -396,6 +397,55 @@ test("a metadata-only manifest refresh preserves content and skips artifact appl
   assert.equal(status.trust.contentContractHash, originalContentContractHash);
   assert.equal(receipt.updateReceipt.result, "no-change");
   assert.equal(fixture.control.attestations.at(-1).contentContractHash, originalContentContractHash);
+});
+
+test("a legacy state backfills the content contract only for the exact signed manifest", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  const expectedContentContractHash = await manifestContentContractHash(fixture.manifest);
+  const appliedPath = join(fixture.stateDirectory, "applied-manifest.json");
+  const legacyApplied = await jsonFile(fixture.stateDirectory, "applied-manifest.json");
+  delete legacyApplied.contentContractHash;
+  await writeFile(appliedPath, `${JSON.stringify(legacyApplied)}\n`, { mode: 0o600 });
+  const artifactRequestsBefore = fixture.control.paths.filter((path) =>
+    path.startsWith("/api/editorial/orchestrator/artifacts/")
+  ).length;
+
+  await bootstrapWorker(fixture.config, { fetchImpl: fixture.control.fetch });
+
+  const artifactRequestsAfter = fixture.control.paths.filter((path) =>
+    path.startsWith("/api/editorial/orchestrator/artifacts/")
+  ).length;
+  const [applied, receipt] = await Promise.all([
+    jsonFile(fixture.stateDirectory, "applied-manifest.json"),
+    jsonFile(fixture.stateDirectory, `receipts/${fixture.manifest.hash}.json`),
+  ]);
+  assert.equal(artifactRequestsAfter, artifactRequestsBefore);
+  assert.equal(applied.manifestHash, fixture.manifest.hash);
+  assert.equal(applied.contentContractHash, expectedContentContractHash);
+  assert.equal(receipt.updateReceipt.result, "no-change");
+  assert.equal(receipt.updateReceipt.previousManifestHash, fixture.manifest.hash);
+  assert.equal(
+    isLegacyContentContractBackfill(
+      { manifestHash: "f".repeat(64) },
+      fixture.manifest.hash,
+    ),
+    false,
+  );
+  assert.equal(
+    isLegacyContentContractBackfill(
+      {
+        manifestHash: fixture.manifest.hash,
+        contentContractHash: "e".repeat(64),
+      },
+      fixture.manifest.hash,
+    ),
+    false,
+  );
 });
 
 test("a content-changing manifest drains active assignments before apply", async (t) => {

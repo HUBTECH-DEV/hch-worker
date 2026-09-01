@@ -21,7 +21,10 @@ import {
   validateAttestedCapacityGrant,
   validateCapacityPolicy,
 } from "./capacity.mjs";
-import { stageApplyAndSelfTest } from "./apply.mjs";
+import {
+  isLegacyContentContractBackfill,
+  stageApplyAndSelfTest,
+} from "./apply.mjs";
 import {
   completeOperation,
   enterStandby,
@@ -145,8 +148,12 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       );
       let pinnedTrustState = trustStateFromManifestVerification(published);
       await atomicWriteJson(stateRoot, "trust-state.json", pinnedTrustState);
-      const contentChanged = !previousApplied ||
-        previousApplied.contentContractHash !== published.contentContractHash;
+      const legacySameManifest = isLegacyContentContractBackfill(
+        previousApplied,
+        published.manifest.hash,
+      );
+      const contentChanged = !previousApplied || (!legacySameManifest &&
+        previousApplied.contentContractHash !== published.contentContractHash);
       const manifestChanged = previousApplied?.manifestHash !== published.manifest.hash;
       preserveReadyOnFailure = !contentChanged && readyIsUsable(previousReady, options.now);
       if (manifestChanged && contentChanged) {

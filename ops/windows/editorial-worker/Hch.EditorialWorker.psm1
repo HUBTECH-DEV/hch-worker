@@ -2745,6 +2745,20 @@ function Test-HchCompatibleAppliedEnvironment {
   }
 }
 
+function Test-HchLegacyContentContractBackfill {
+  param($Applied, [string]$TargetManifestHash)
+  if ($null -eq $Applied) { return $false }
+  $contentContractProperty = $Applied.PSObject.Properties['contentContractHash']
+  if ($null -ne $contentContractProperty -and $null -ne $contentContractProperty.Value) {
+    return $false
+  }
+  $previousManifestHash = [string](Get-HchNestedValue -InputObject $Applied `
+    -Path @('manifestHash') -Default '')
+  return $previousManifestHash -cmatch '^[a-f0-9]{64}$' -and
+    $TargetManifestHash -cmatch '^[a-f0-9]{64}$' -and
+    $previousManifestHash -ceq $TargetManifestHash
+}
+
 function Get-HchActiveAssignmentCount {
   param([hashtable]$Config)
   $counts = [Collections.Generic.List[int]]::new()
@@ -2773,6 +2787,7 @@ function New-HchUpdateReceipt {
   param([hashtable]$Config, $Identity, $Manifest, $Transaction, [string]$Result)
   if ($Result -notin @('applied', 'no-change')) { throw 'update-receipt-result-invalid' }
   $appliedPath = Join-Path ([string]$Config.StateRoot) 'applied-manifest.json'
+  $previousApplied = $null
   $previousManifestHash = $null
   $previousContentContractHash = $null
   if (Test-Path -LiteralPath $appliedPath) {
@@ -2794,10 +2809,14 @@ function New-HchUpdateReceipt {
     rollbackPerformed = $false
     appliedAt = $appliedAt
   }
-  $sameContent = -not [string]::IsNullOrWhiteSpace([string]$previousContentContractHash) -and
+  $legacySameManifest = Test-HchLegacyContentContractBackfill `
+    -Applied $previousApplied -TargetManifestHash ([string]$Manifest.ManifestHash)
+  $sameContent = $legacySameManifest -or (
+    -not [string]::IsNullOrWhiteSpace([string]$previousContentContractHash) -and
     (Get-HchNormalizedHash -Value ([string]$previousContentContractHash)) -eq
     (Get-HchNormalizedHash -Value ([string](Get-HchNestedValue -InputObject $Manifest `
       -Path @('ContentContractHash') -Default $Manifest.ManifestHash)))
+  )
   if (($sameContent -and $Result -ne 'no-change') -or (-not $sameContent -and $Result -ne 'applied')) {
     throw 'update-receipt-result-manifest-consistency-invalid'
   }
@@ -2879,10 +2898,13 @@ function Invoke-HchWorkerBootstrap {
     $currentApplied = if (Test-Path -LiteralPath $currentAppliedPath -PathType Leaf) {
       Read-HchJsonFile -Path $currentAppliedPath
     } else { $null }
-    $contentChanged = $null -eq $currentApplied -or
+    $legacySameManifest = Test-HchLegacyContentContractBackfill `
+      -Applied $currentApplied -TargetManifestHash ([string]$manifest.ManifestHash)
+    $contentChanged = $null -eq $currentApplied -or (-not $legacySameManifest -and (
       -not ($currentApplied.PSObject.Properties.Name -contains 'contentContractHash') -or
       (Get-HchNormalizedHash -Value ([string]$currentApplied.contentContractHash)) -ne
         (Get-HchNormalizedHash -Value ([string]$manifest.ContentContractHash))
+    ))
     $preserveReadyOnFailure = -not $contentChanged -and $null -ne $existingReady -and
       [DateTimeOffset]::Parse([string]$existingReady.readyUntil) -gt [DateTimeOffset]::UtcNow
     if (Test-Path -LiteralPath $readyPath) {

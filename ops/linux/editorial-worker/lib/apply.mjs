@@ -42,7 +42,10 @@ export async function stageApplyAndSelfTest(
       "The verified manifest content contract hash is invalid.",
     );
   }
-  if (previousApplied?.contentContractHash === contentContractHash) {
+  if (
+    previousApplied?.contentContractHash === contentContractHash ||
+    isLegacyContentContractBackfill(previousApplied, manifest.hash)
+  ) {
     return refreshCompatibleManifestMetadata(
       config,
       stateRoot,
@@ -238,6 +241,13 @@ export async function stageApplyAndSelfTest(
   }
 }
 
+export function isLegacyContentContractBackfill(previousApplied, targetManifestHash) {
+  if (!previousApplied || previousApplied.contentContractHash != null) return false;
+  return /^[a-f0-9]{64}$/.test(previousApplied.manifestHash) &&
+    /^[a-f0-9]{64}$/.test(targetManifestHash) &&
+    previousApplied.manifestHash === targetManifestHash;
+}
+
 async function refreshCompatibleManifestMetadata(
   config,
   stateRoot,
@@ -326,7 +336,7 @@ async function refreshCompatibleManifestMetadata(
       manifestSequence: manifest.sequence,
       manifestHash: manifest.hash,
       contentContractHash,
-      previousContentContractHash: previousApplied.contentContractHash,
+      previousContentContractHash: previousApplied.contentContractHash ?? null,
       releaseId: manifest.releaseId,
       receiptHash,
       receipt: receiptCore,
