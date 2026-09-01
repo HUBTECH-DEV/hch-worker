@@ -417,6 +417,7 @@ test("native worker status preserves identity, security, and capacity across pla
           releaseKeyId: "hch-release-v3",
           manifestSequence: 8,
           manifestHash: `sha256:${"d".repeat(64)}`,
+          contentContractHash: "c".repeat(64),
           policyHash: `sha256:${"e".repeat(64)}`,
           lastVerifiedAt: "2026-08-11T21:00:00Z",
           errorCode: null,
@@ -444,6 +445,7 @@ test("native worker status preserves identity, security, and capacity across pla
       assert.equal(status.security.ed25519Chain.status,"valid");
       assert.equal(status.security.ed25519Chain.rootKeyId,"hch-root-v2");
       assert.equal(status.security.ed25519Chain.releaseKeyId,"hch-release-v3");
+      assert.equal(status.security.ed25519Chain.contentContractHash,"c".repeat(64));
       assert.deepEqual(status.capacity,fixture.expectedCapacity);
       assert.notEqual(status.worker.id,"unconfigured");
     });

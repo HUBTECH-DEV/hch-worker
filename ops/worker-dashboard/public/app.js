@@ -181,6 +181,7 @@ function render(status) {
   byId("root-key").textContent = status.security.ed25519Chain.rootKeyId ?? "—";
   byId("release-key").textContent = status.security.ed25519Chain.releaseKeyId ?? "—";
   byId("manifest-sequence").textContent = status.security.ed25519Chain.manifestSequence ?? "—";
+  byId("content-contract-hash").textContent = status.security.ed25519Chain.contentContractHash ?? "—";
   byId("policy-hash").textContent = status.security.ed25519Chain.policyHash ?? "—";
 
   const orchestration = status.orchestration;

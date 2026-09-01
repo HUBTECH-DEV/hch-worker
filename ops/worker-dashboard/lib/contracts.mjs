@@ -138,6 +138,7 @@ export function defaultWorkerState(now = new Date()) {
       releaseKeyId: null,
       manifestSequence: null,
       manifestHash: null,
+      contentContractHash: null,
       policyHash: null,
       lastVerifiedAt: null,
       errorCode: null,
@@ -935,6 +936,7 @@ function parseTrust(value) {
     "releaseKeyId",
     "manifestSequence",
     "manifestHash",
+    ...(Object.hasOwn(object, "contentContractHash") ? ["contentContractHash"] : []),
     "policyHash",
     "lastVerifiedAt",
     "errorCode",
@@ -947,6 +949,11 @@ function parseTrust(value) {
       ? null
       : unsignedInteger(object.manifestSequence, "trust.manifestSequence"),
     manifestHash: nullableIdentifier(object.manifestHash, "trust.manifestHash", 256),
+    contentContractHash: nullableIdentifier(
+      object.contentContractHash,
+      "trust.contentContractHash",
+      256,
+    ),
     policyHash: nullableIdentifier(object.policyHash, "trust.policyHash", 256),
     lastVerifiedAt: nullableTimestamp(object.lastVerifiedAt, "trust.lastVerifiedAt"),
     errorCode: nullableIdentifier(object.errorCode, "trust.errorCode", 96),

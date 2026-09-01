@@ -406,6 +406,16 @@ test("cycle, persistent Windows Service and CLI are opt-in and fail closed by st
   assert.match(moduleSource, /ValidateRange\(1, 64\)\]\[int\]\$RequestedCapacity/);
   assert.match(moduleSource, /Purpose 'claim'/);
   assert.match(cycleSource, /drain-active-assignments/);
+  const terminalCatch = cycleSource.slice(cycleSource.lastIndexOf("} catch {"));
+  assert.match(
+    terminalCatch,
+    /\$failureCode -eq 'worker-bootstrap-already-running'[\s\S]+Write-HchCycleSummary -State 'deferred'/,
+  );
+  const bootstrapContention = terminalCatch.slice(
+    terminalCatch.indexOf("$failureCode -eq 'worker-bootstrap-already-running'"),
+    terminalCatch.indexOf("if ($failureCode -notmatch"),
+  );
+  assert.doesNotMatch(bootstrapContention, /Set-HchWorkerStatus|ConnectionState 'error'/);
 
   const startBlock = cliSource.slice(
     cliSource.indexOf("  'start' {"),

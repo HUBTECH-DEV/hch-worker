@@ -794,6 +794,7 @@ try {
   return Write-HchCycleSummary -State 'completed' -Code 'cycle-finished' `
     -Assignments $assignments.Count -Completed $completedCount -Failed $failedCount
 } catch {
+  $failureCode = [string]$_.Exception.Message
   Stop-HchGeneratorProcesses -Items $items
   if ($items.Count -gt 0) { Save-HchCycleJournal -Items $items -BatchId $batchId }
   $diagnostic = [ordered]@{
@@ -804,7 +805,13 @@ try {
   }
   Write-HchJsonAtomic -Path (Join-Path ([string]$config.StateRoot) 'worker-cycle-diagnostic.json') `
     -Value $diagnostic
-  $failureCode = [string]$_.Exception.Message
+  if ($failureCode -eq 'worker-bootstrap-already-running') {
+    # The service deliberately runs the claim cycle and the presence heartbeat
+    # independently. A concurrent signed bootstrap is healthy coordination,
+    # not an orchestrator connection or authentication failure.
+    return Write-HchCycleSummary -State 'deferred' -Code $failureCode `
+      -Assignments $items.Count -Completed $completedCount -Failed $failedCount
+  }
   if ($failureCode -notmatch '^[a-z0-9][a-z0-9._:-]{2,159}$') {
     $failureCode = 'worker-cycle-failed-closed'
   }

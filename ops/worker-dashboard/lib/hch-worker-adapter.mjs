@@ -98,6 +98,9 @@ export function parseDashboardWorkerState(value) {
         ? null
         : nonNegativeInteger(trust.manifestSequence,"manifestSequence"),
       manifestHash: nullableIdentifier(trust.manifestHash,"manifestHash",256),
+      contentContractHash: nullableIdentifier(
+        trust.contentContractHash,"contentContractHash",256,
+      ),
       policyHash: nullableIdentifier(trust.policyHash,"policyHash",256),
       lastVerifiedAt: nullableTimestamp(trust.lastVerifiedAt,"lastVerifiedAt"),
       errorCode: nullableIdentifier(trust.errorCode,"trust.errorCode",96),

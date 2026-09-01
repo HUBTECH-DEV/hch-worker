@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -665,6 +665,91 @@ test("pending operations preserve request id and body digest for idempotent retr
   assert.equal(result.conflict, "idempotency-operation-conflict:claim-request");
 });
 
+test("a signed node heartbeat repairs only stale connection status", (context) => {
+  if (process.platform !== "win32") return context.skip("Windows PowerShell integration test");
+  const directory = mkdtempSync(join(tmpdir(), "hch-worker-heartbeat-status-"));
+  context.after(() => rmSync(directory, { recursive: true, force: true }));
+  const escaped = (value) => value.replaceAll("'", "''");
+  const contentContractHash = "c".repeat(64);
+  const script = `
+    $m=Import-Module '${escaped(modulePath)}' -Force -PassThru
+    $config=@{
+      NodeId='windows-worker-01';StateRoot='${escaped(directory)}'
+      InstallRoot='${escaped(join(directory, "runtime"))}';LocalParallelismLimit=8
+      NodeHeartbeatIntervalSeconds=60;NodeHeartbeatRequestTimeoutSeconds=10
+    }
+    Write-HchJsonAtomic -Path (Join-Path $config.StateRoot 'ready.json') -Value ([ordered]@{
+      readyUntil=[DateTimeOffset]::UtcNow.AddHours(1).ToString('o')
+      rootKeyId='root-v1';releaseKeyId='release-v1';manifestSequence=5
+      manifestHash='${"a".repeat(64)}';contentContractHash='${contentContractHash}'
+      policyHash='${"b".repeat(64)}';trustVerifiedAt=[DateTimeOffset]::UtcNow.ToString('o')
+    })
+    $connectionFailureAt=[DateTimeOffset]::UtcNow.ToString('o')
+    Write-HchJsonAtomic -Path (Join-Path $config.StateRoot 'status.json') -Value ([ordered]@{
+      state='standby';code='worker-bootstrap-already-running';currentBatch=$null
+      connection=[ordered]@{
+        api='error';lastSuccessAt=$null;lastFailureAt=$connectionFailureAt
+        lastErrorCode='worker-bootstrap-already-running'
+      }
+      transport=[ordered]@{
+        tlsStatus='verified';certificateStatus='valid';certificateExpiresAt=$null
+        certificateFingerprint=$null;errorCode=$null
+      }
+      trust=[ordered]@{
+        status='verified';rootKeyId='root-v1';releaseKeyId='release-v1';manifestSequence=5
+        manifestHash='${"a".repeat(64)}';contentContractHash='${contentContractHash}'
+        policyHash='${"b".repeat(64)}';lastVerifiedAt=$connectionFailureAt;errorCode=$null
+      }
+    })
+    $result=& $m { param($c)
+      function Get-HchWorkerIdentity {
+        [pscustomobject]@{keyId='SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'}
+      }
+      function Get-HchChallenge { 'nonce' }
+      function Invoke-HchSignedJsonRequest { [pscustomobject]@{} }
+      function Assert-HchNodeHeartbeatResponse {
+        [pscustomobject]@{
+          capacity=[pscustomobject]@{
+            requestedCapacity=0;grantedCapacity=0;activeAssignments=0
+            reason='operator-paused';grantedUntil=$null
+          }
+          workload=[pscustomobject]@{};claim=[pscustomobject]@{}
+        }
+      }
+      function Write-HchNodeHeartbeatSnapshot { [pscustomobject]@{} }
+      [void](Invoke-HchWorkerNodeHeartbeat -Config $c -RequestedCapacity 0)
+      $healed=Read-HchJsonFile -Path (Join-Path $c.StateRoot 'status.json')
+      $healedSnapshot=$healed|ConvertTo-Json -Depth 20 -Compress|ConvertFrom-Json
+      $healed.state='update-failed';$healed.code='artifact-self-test-failed'
+      $healed.connection.api='error';$healed.connection.auth='pending'
+      $healed.connection.ed25519=$false;$healed.connection.lastErrorCode='orchestrator-timeout'
+      Write-HchJsonAtomic -Path (Join-Path $c.StateRoot 'status.json') -Value $healed
+      [void](Invoke-HchWorkerNodeHeartbeat -Config $c -RequestedCapacity 0)
+      $preserved=Read-HchJsonFile -Path (Join-Path $c.StateRoot 'status.json')
+      [pscustomobject]@{healed=$healedSnapshot;preserved=$preserved}
+    } $config
+    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(
+      ($result|ConvertTo-Json -Depth 20 -Compress)))
+  `;
+  const encoded = execFileSync(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+    { encoding: "utf8" },
+  ).trim();
+  const result = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  assert.equal(result.healed.state, "standby");
+  assert.equal(result.healed.connection.api, "connected");
+  assert.equal(result.healed.connection.auth, "ed25519");
+  assert.equal(result.healed.connection.lastErrorCode, null);
+  assert.equal(result.healed.code, "");
+  assert.equal(result.healed.contentContractHash, contentContractHash);
+  assert.equal(result.healed.trust.contentContractHash, contentContractHash);
+  assert.equal(result.preserved.state, "update-failed");
+  assert.equal(result.preserved.code, "artifact-self-test-failed");
+  assert.equal(result.preserved.connection.api, "connected");
+  assert.equal(result.preserved.connection.lastErrorCode, null);
+});
+
 test("worker kit is fail-closed and contains no remote shell execution path", () => {
   const source = readFileSync(modulePath, "utf8");
   for (const forbidden of [
@@ -705,6 +790,12 @@ test("worker kit is fail-closed and contains no remote shell execution path", ()
   const nodeHeartbeatEnd = source.indexOf("function Get-HchRemainingBatch", nodeHeartbeatStart);
   const nodeHeartbeatSource = source.slice(nodeHeartbeatStart, nodeHeartbeatEnd);
   assert.match(nodeHeartbeatSource, /\$body\.pressure = \$normalizedPressure/);
+  assert.match(
+    nodeHeartbeatSource,
+    /Set-HchWorkerStatus[\s\S]+-ConnectionState 'connected'/,
+  );
+  assert.match(nodeHeartbeatSource, /\$currentState -eq 'connection-error'/);
+  assert.match(nodeHeartbeatSource, /worker-not-ready-bootstrap-required/);
   assert.match(source, /inputSnapshotHash = \[string\]\$assignmentIntegrity\.inputSnapshotHash/);
   assert.match(source, /\$receiptResult = 'no-change'/);
   assert.match(source, /hch\.pending-operation\/v1/);

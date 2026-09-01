@@ -3957,6 +3957,53 @@ function Invoke-HchWorkerNodeHeartbeat {
       $capacitySnapshotParameters.ClearValidUntil = $true
     }
     [void](Set-HchWorkerCapacitySnapshot @capacitySnapshotParameters)
+    $statusPath = Join-Path ([string]$Config.StateRoot) 'status.json'
+    $currentStatus = $null
+    if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+      try { $currentStatus = Read-HchJsonFile -Path $statusPath } catch { $currentStatus = $null }
+    }
+    $currentState = [string](Get-HchNestedValue -InputObject $currentStatus `
+      -Path @('state') -Default '')
+    $currentCode = [string](Get-HchNestedValue -InputObject $currentStatus `
+      -Path @('code') -Default '')
+    $currentApiState = [string](Get-HchNestedValue -InputObject $currentStatus `
+      -Path @('connection', 'api') -Default '')
+    $currentConnectionError = [string](Get-HchNestedValue -InputObject $currentStatus `
+      -Path @('connection', 'lastErrorCode') -Default '')
+    $hasCurrentBatch = $null -ne (Get-HchNestedValue -InputObject $currentStatus `
+      -Path @('currentBatch') -Default $null)
+    if ($currentState -eq 'connection-error' -or [string]::IsNullOrWhiteSpace($currentState)) {
+      $readyPath = Join-Path ([string]$Config.StateRoot) 'ready.json'
+      $readyIsValid = $false
+      if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
+        try {
+          $ready = Read-HchJsonFile -Path $readyPath
+          $readyIsValid = [DateTimeOffset]::Parse([string]$ready.readyUntil) -gt [DateTimeOffset]::UtcNow
+        } catch { $readyIsValid = $false }
+      }
+      if ($readyIsValid) {
+        $currentState = if ($hasCurrentBatch -or [int]$validated.capacity.activeAssignments -gt 0) {
+          'processing'
+        } elseif ($RequestedCapacity -eq 0) { 'standby' } else { 'ready' }
+        $currentCode = ''
+      } else {
+        $currentState = 'bootstrap-required'
+        $currentCode = 'worker-not-ready-bootstrap-required'
+      }
+    }
+    if ($currentApiState -ne 'connected' -and
+        $currentState -in @('ready', 'idle', 'processing', 'standby') -and
+        $currentCode -eq $currentConnectionError) {
+      $currentCode = ''
+    }
+    if ($currentApiState -ne 'connected') {
+      # A validated, signed heartbeat is authoritative evidence for transport,
+      # connection and Ed25519 authentication. Preserve non-connection worker
+      # states/codes while repairing a stale connection failure. Avoid a status
+      # rewrite on every heartbeat so a concurrent claim-cycle transition wins.
+      Set-HchWorkerStatus -Config $Config -State $currentState -Code $currentCode `
+        -ConnectionState 'connected'
+    }
     return $response
   } catch {
     $rawCode = if ([string]::IsNullOrWhiteSpace([string]$_.Exception.Message)) {
