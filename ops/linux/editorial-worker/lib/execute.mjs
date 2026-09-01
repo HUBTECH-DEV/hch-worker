@@ -343,6 +343,7 @@ function assertReadyGate(config, applied, ready, status) {
     ready.keyId !== config.keyId ||
     ready.manifestHash !== applied.manifestHash ||
     ready.manifestSequence !== applied.manifestSequence ||
+    ready.contentContractHash !== applied.contentContractHash ||
     ready.policyHash !== applied.policyHash ||
     ready.provider !== applied.provider ||
     ready.engineAdapter !== applied.engineAdapter ||
@@ -356,6 +357,7 @@ function assertReadyGate(config, applied, ready, status) {
     !new Set(["idle", "standby", "draining"]).has(status?.state) ||
     status?.manifestHash !== applied.manifestHash ||
     status?.manifestSequence !== applied.manifestSequence ||
+    status?.contentContractHash !== applied.contentContractHash ||
     status?.readyUntil !== ready.readyUntil ||
     status?.connection?.api !== "connected" ||
     status?.connection?.tls !== "verified" ||
@@ -366,6 +368,7 @@ function assertReadyGate(config, applied, ready, status) {
     status?.trust?.status !== "verified" ||
     status?.trust?.manifestHash !== applied.manifestHash ||
     status?.trust?.manifestSequence !== applied.manifestSequence ||
+    status?.trust?.contentContractHash !== applied.contentContractHash ||
     status?.trust?.policyHash !== applied.policyHash ||
     !Number.isFinite(Date.parse(ready.readyUntil)) ||
     Date.parse(ready.readyUntil) <= Date.now()

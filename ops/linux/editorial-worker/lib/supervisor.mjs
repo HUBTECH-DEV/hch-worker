@@ -11,6 +11,7 @@ import {
 import { generateEditorialDraft } from "./generator.mjs";
 import {
   enterStandby,
+  leaveStandby,
   updateMetrics,
   updateStatus,
 } from "./local-state.mjs";
@@ -44,18 +45,34 @@ async function runPortableSupervisorLocked(config, options = {}) {
   let cycles = 0;
   let nextHeartbeatAt = now();
   const workPromises = new Set();
+  const workloadTracker = createConcurrentWorkloadTracker(stateRoot, config);
   while (!(options.shouldStop?.() ?? false) && cycles < maximumCycles) {
     const remaining = Math.max(0, nextHeartbeatAt - now());
     if (remaining) await wait(remaining);
     if (options.shouldStop?.() ?? false) break;
     let snapshot = null;
+    let readinessBlocksClaims = false;
     try {
-      await renewReadyAttestation(config, stateRoot, options);
-      snapshot = await heartbeatOnce(config, options);
-      const target = claimTarget(snapshot);
+      await renewReadyAttestation(config, stateRoot, {
+        ...options,
+        activeAssignments: workPromises.size,
+      });
+    } catch (error) {
+      const ready = await readOptionalJson(stateRoot, "ready.json").catch(() => null);
+      readinessBlocksClaims = ready?.ready !== true ||
+        !Number.isFinite(Date.parse(ready.readyUntil)) ||
+        Date.parse(ready.readyUntil) <= now();
+      options.onHeartbeatError?.(error);
+    }
+    try {
+      snapshot = await heartbeatOnce(config, {
+        ...options,
+        forceDrain: readinessBlocksClaims,
+      });
+      const target = readinessBlocksClaims ? 0 : claimTarget(snapshot);
       while (workPromises.size < target) {
         const workPromise = Promise.resolve()
-          .then(() => runAssignment(config, options))
+          .then(() => runAssignment(config, { ...options, workloadTracker }))
           .catch((error) => options.onWorkError?.(error))
           .finally(() => { workPromises.delete(workPromise); });
         workPromises.add(workPromise);
@@ -94,6 +111,8 @@ export async function runOnePortableAssignment(config, options = {}) {
 
 async function runOnePortableAssignmentLocked(config, options = {}) {
   const stateRoot = await ensurePrivateDirectory(config.stateDirectory);
+  const workloadTracker = options.workloadTracker ??
+    createConcurrentWorkloadTracker(stateRoot, config);
   const [identity, control, ready, applied, orchestration] = await Promise.all([
     ensureWorkerIdentity(config, stateRoot),
     readWorkerControl(stateRoot, config),
@@ -127,7 +146,7 @@ async function runOnePortableAssignmentLocked(config, options = {}) {
   const operatorStop = startOperatorStopMonitor(
     config, stateRoot, assignment, cancellation, options,
   );
-  await markProcessing(stateRoot, config, claim, assignment);
+  await workloadTracker.started(claim, assignment);
   try {
     const generated = await generateEditorialDraft(
       assignment,
@@ -148,7 +167,7 @@ async function runOnePortableAssignmentLocked(config, options = {}) {
       generated.draft,
       options,
     );
-    await markFinished(stateRoot, config, true, "batch-completed");
+    await workloadTracker.finished(assignment, true, "batch-completed");
     return {
       claimed: 1,
       completed: 1,
@@ -165,7 +184,7 @@ async function runOnePortableAssignmentLocked(config, options = {}) {
     if (!heartbeat.lost || heartbeat.stalled) {
       await failAssignment(config, identity, assignment, code, options).catch(() => {});
     }
-    await markFinished(stateRoot, config, false, code).catch(() => {});
+    await workloadTracker.finished(assignment, false, code).catch(() => {});
     throw error;
   } finally {
     await operatorStop.stopAndWait();
@@ -306,6 +325,7 @@ function assertClaimGate(config, control, ready, applied, orchestration) {
     control.acceptingClaims !== true ||
     ready?.ready !== true || Date.parse(ready.readyUntil) <= Date.now() ||
     ready.manifestHash !== applied?.manifestHash ||
+    ready.contentContractHash !== applied?.contentContractHash ||
     orchestration?.nodeId !== config.nodeId ||
     orchestration?.heartbeat?.status !== "succeeded" ||
     !Number.isFinite(heartbeatAge) || heartbeatAge < 0 || heartbeatAge > 120_000 ||
@@ -315,54 +335,101 @@ function assertClaimGate(config, control, ready, applied, orchestration) {
   }
 }
 
-async function markProcessing(stateRoot, config, claim, assignment) {
-  await updateStatus(stateRoot, config, {
-    state: "processing",
-    running: true,
-    standby: false,
-    code: "assignment-processing",
-    currentBatch: {
-      batchId: claim.requestId,
-      assignmentIds: [assignment.assignmentId],
-      jobs: 1,
-      completedJobs: 0,
-      startedAt: new Date().toISOString(),
+export function createConcurrentWorkloadTracker(stateRoot, config) {
+  let transition = Promise.resolve();
+  let batch = null;
+  const active = new Map();
+  const serialize = (operation) => {
+    const result = transition.then(operation, operation);
+    transition = result.catch(() => {});
+    return result;
+  };
+  const snapshot = () => batch ? {
+    batchId: batch.batchId,
+    assignmentIds: [...batch.assignmentIds],
+    jobs: batch.assignmentIds.size,
+    completedJobs: batch.completed + batch.failed,
+    failedJobs: batch.failed,
+    activeJobs: active.size,
+    startedAt: batch.startedAt,
+  } : null;
+  return {
+    started(claim, assignment) {
+      return serialize(async () => {
+        if (active.has(assignment.assignmentId)) {
+          throw new WorkerKitError(
+            "assignment-progress-duplicate",
+            "The concurrent workload tracker already contains this assignment.",
+          );
+        }
+        const createdBatch = batch === null;
+        if (createdBatch) {
+          batch = {
+            batchId: claim.requestId,
+            assignmentIds: new Set(),
+            completed: 0,
+            failed: 0,
+            lastFailureCode: null,
+            startedAt: new Date().toISOString(),
+          };
+        }
+        batch.assignmentIds.add(assignment.assignmentId);
+        active.set(assignment.assignmentId, assignment);
+        const currentBatch = snapshot();
+        await updateMetrics(stateRoot, config, (metrics) => {
+          if (createdBatch) metrics.batches.total += 1;
+          metrics.jobs.claimed += 1;
+          metrics.jobs.running = active.size;
+          metrics.currentBatch = currentBatch;
+          leaveStandby(metrics);
+        });
+        await updateStatus(stateRoot, config, {
+          state: "processing",
+          running: true,
+          standby: false,
+          code: "assignment-processing",
+          currentBatch,
+        });
+      });
     },
-  });
-  await updateMetrics(stateRoot, config, (metrics) => {
-    metrics.batches.total += 1;
-    metrics.jobs.claimed += 1;
-    metrics.jobs.running = 1;
-    metrics.currentBatch = {
-      batchId: claim.requestId,
-      assignmentIds: [assignment.assignmentId],
-      jobs: 1,
-      completedJobs: 0,
-      startedAt: new Date().toISOString(),
-    };
-  });
-}
-
-async function markFinished(stateRoot, config, succeeded, code) {
-  await updateMetrics(stateRoot, config, (metrics) => {
-    metrics.jobs.running = 0;
-    if (succeeded) {
-      metrics.jobs.completed += 1;
-      metrics.batches.completed += 1;
-    } else {
-      metrics.jobs.failed += 1;
-      metrics.batches.failed += 1;
-    }
-    metrics.currentBatch = null;
-    enterStandby(metrics);
-  });
-  await updateStatus(stateRoot, config, {
-    state: succeeded ? "standby" : "connection-error",
-    running: false,
-    standby: succeeded,
-    code,
-    currentBatch: null,
-  });
+    finished(assignment, succeeded, code) {
+      return serialize(async () => {
+        if (!active.delete(assignment.assignmentId) || batch === null) return;
+        if (succeeded) batch.completed += 1;
+        else {
+          batch.failed += 1;
+          batch.lastFailureCode = code;
+        }
+        const batchEnded = active.size === 0;
+        const currentBatch = batchEnded ? null : snapshot();
+        const batchFailed = batch.failed > 0;
+        await updateMetrics(stateRoot, config, (metrics) => {
+          metrics.jobs.running = active.size;
+          if (succeeded) metrics.jobs.completed += 1;
+          else metrics.jobs.failed += 1;
+          if (batchEnded) {
+            if (batchFailed) metrics.batches.failed += 1;
+            else metrics.batches.completed += 1;
+            metrics.currentBatch = null;
+            enterStandby(metrics);
+          } else {
+            metrics.currentBatch = currentBatch;
+          }
+        });
+        await updateStatus(stateRoot, config, {
+          state: batchEnded
+            ? (batchFailed ? "connection-error" : "standby")
+            : "processing",
+          running: !batchEnded,
+          standby: batchEnded && !batchFailed,
+          code: batchEnded && batchFailed ? batch.lastFailureCode : code,
+          currentBatch,
+        });
+        if (batchEnded) batch = null;
+      });
+    },
+    activeCount() { return active.size; },
+  };
 }
 
 function safeErrorCode(error) {

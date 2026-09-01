@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   canonicalizeJson,
   createContentDigest,
+  manifestContentContractHash,
   signManifestEnvelope,
   signReleaseKeyDelegation,
   signWorkerRequest,
@@ -56,6 +57,7 @@ test("assignment and manifest schemas require immutable engine identity", () => 
     manifest.properties.adaptiveWorkPolicy.properties.algorithmVersion.const,
     "hch-adaptive-work-v1",
   );
+  assert.ok(manifest.properties.compatibility.properties.contentContractHash);
   for (const field of ["generationPlan", "generationPlanHash"]) {
     assert.ok(assignment.required.includes(field));
     assert.ok(assignment.properties[field]);
@@ -66,6 +68,7 @@ test("assignment and manifest schemas require immutable engine identity", () => 
     assert.ok(attestation.properties[field]);
   }
   assert.ok(attestation.required.includes("adaptiveWorkPolicyHash"));
+  assert.ok(attestation.required.includes("contentContractHash"));
   assert.equal(attestation.required.includes("engineVersion"), false);
   assert.equal(attestation.properties.engineVersion, undefined);
 });
@@ -155,7 +158,76 @@ test("helper verifies the canonical root to release to manifest chain", async ()
     createHash("sha256").update(canonicalizeJson(delegation)).digest("hex"),
   );
   assert.equal(result.manifestHash, hash);
+  assert.equal(result.contentContractHash, await manifestContentContractHash(payload));
   assert.deepEqual(JSON.parse(readFileSync(outputPath, "utf8")), payload);
+});
+
+test("helper refuses an unapplied manifest when only the delegation is expired", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "hch-worker-expired-chain-"));
+  const root = generateKeyPairSync("ed25519");
+  const release = generateKeyPairSync("ed25519");
+  const rootPrivate = root.privateKey.export({ type: "pkcs8", format: "pem" });
+  const rootPublic = root.publicKey.export({ type: "spki", format: "pem" });
+  const releasePrivate = release.privateKey.export({ type: "pkcs8", format: "pem" });
+  const releasePublic = release.publicKey.export({ type: "spki", format: "pem" });
+  const rootPath = join(directory, "root.pem");
+  const envelopePath = join(directory, "envelope.json");
+  writeFileSync(rootPath, rootPublic);
+  const now = Math.floor(Date.now() / 1000);
+  const rootKeyId = "hch-root-expired-test";
+  const releaseKeyId = "hch-release-expired-test";
+  const delegation = await signReleaseKeyDelegation(releasePublic, rootPrivate, {
+    rootKeyId,
+    releaseKeyId,
+    created: now - 600,
+    notBefore: now - 600,
+    expires: now - 300,
+    sequence: 8,
+  });
+  const unsignedPayload = {
+    schemaVersion: "2.0",
+    sequence: 8,
+    releaseId: "test.expired.8",
+    issuedAt: new Date((now - 500) * 1000).toISOString(),
+    expiresAt: new Date((now + 1800) * 1000).toISOString(),
+    previousManifestHash: "a".repeat(64),
+    minimumAcceptedSequence: 1,
+    runtime: { workerVersion: "2.0.0" },
+    engine: { model: "qwen2.5:1.5b-instruct" },
+    editorial: { policyHash: "b".repeat(64) },
+    actions: [],
+    artifacts: [],
+    endpoints: {},
+  };
+  const hash = createHash("sha256").update(canonicalizeJson(unsignedPayload)).digest("hex");
+  const payload = { ...unsignedPayload, hashAlgorithm: "sha256", hash };
+  const manifest = await signManifestEnvelope(payload, releasePrivate, {
+    keyId: releaseKeyId,
+    created: now - 500,
+    expires: now - 350,
+  });
+  writeFileSync(envelopePath, JSON.stringify({
+    manifest,
+    delegation,
+    rootKeyId,
+    rootPublicKeyFingerprint: await workerPublicKeyFingerprint(rootPublic),
+  }));
+
+  assert.throws(
+    () => runHelper(
+      "verify-chain", "--root", rootPath, "--envelope", envelopePath,
+      "--output", join(directory, "rejected.json"), "--clock-skew", "60",
+      "--allow-expired-hash", "f".repeat(64),
+    ),
+    /manifest-expired-update-refused/,
+  );
+  const accepted = runHelper(
+    "verify-chain", "--root", rootPath, "--envelope", envelopePath,
+    "--output", join(directory, "accepted.json"), "--clock-skew", "60",
+    "--allow-expired-hash", hash,
+  );
+  assert.equal(accepted.expiredFallback, true);
+  assert.equal(accepted.manifestHash, hash);
 });
 
 test("PowerShell persists delegation anchors and rejects rollback or equivocation", async (context) => {
@@ -412,7 +484,7 @@ test("updateReceipt separates the canonical receipt hash from the local journal 
     New-Item -ItemType Directory -Path '${escaped(stateRoot)}','${escaped(backupRoot)}' -Force|Out-Null
     $config=@{NodeId='windows-worker-01';StateRoot='${escaped(stateRoot)}';InstallRoot='${escaped(join(directory, "runtime"))}';NodePath='${escaped(process.execPath)}';MinimumNodeMajor=22}
     $identity=[pscustomobject]@{keyId='SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'}
-    $manifest=[pscustomobject]@{ManifestHash='${manifestHash}';Payload=[pscustomobject]@{artifacts=@([pscustomobject]@{name='policy';sha256='${artifactHash}'})}}
+    $manifest=[pscustomobject]@{ManifestHash='${manifestHash}';ContentContractHash='${manifestHash}';Payload=[pscustomobject]@{artifacts=@([pscustomobject]@{name='policy';sha256='${artifactHash}'})}}
     $transaction=[pscustomobject]@{Id='tx-test';BackupDirectory='${escaped(backupRoot)}';Journal=[Collections.ArrayList]::new()}
     $receipt=& $m {param($c,$i,$mf,$tx) New-HchUpdateReceipt -Config $c -Identity $i -Manifest $mf -Transaction $tx -Result applied} $config $identity $manifest $transaction
     $persisted=Get-Content -Raw -LiteralPath (Join-Path '${escaped(backupRoot)}' 'update-receipt.json')|ConvertFrom-Json
@@ -633,6 +705,7 @@ test("worker kit is fail-closed and contains no remote shell execution path", ()
     assert.match(attestationSource, new RegExp(`${field}\\s*=`));
   }
   assert.match(attestationSource, /adaptiveWorkPolicyHash\s*=/);
+  assert.match(attestationSource, /contentContractHash\s*=/);
   assert.doesNotMatch(attestationSource, /\bengineVersion\s*=/);
 });
 

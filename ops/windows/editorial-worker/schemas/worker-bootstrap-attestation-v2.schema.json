@@ -5,7 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "nodeId", "workerKeyId", "manifestSequence", "manifestHash", "challenge",
+    "nodeId", "workerKeyId", "manifestSequence", "manifestHash", "contentContractHash", "challenge",
     "workerRuntimeVersion", "policyHash", "adaptiveWorkPolicyHash", "promptConfigHash", "pipelineVersion",
     "provider", "engineAdapter", "engineAdapterVersion", "model", "modelDigest",
     "protocol", "checks", "updateReceipt", "appliedChanges"
@@ -15,6 +15,7 @@
     "workerKeyId": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_-]{43}$" },
     "manifestSequence": { "type": "integer", "minimum": 1 },
     "manifestHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "contentContractHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "challenge": { "type": "string", "minLength": 16, "maxLength": 512 },
     "workerRuntimeVersion": { "type": "string", "minLength": 1, "maxLength": 160 },
     "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },

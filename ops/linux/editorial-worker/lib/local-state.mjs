@@ -13,7 +13,7 @@ import {
   readWorkerControl,
 } from "./capacity.mjs";
 
-const KIT_VERSION = "3.1.0";
+export const KIT_VERSION = "3.1.0";
 const PROCESS_STARTED_AT = Date.now();
 const PLATFORM = workerPlatform();
 
@@ -56,6 +56,7 @@ export async function updateStatus(stateRoot, config, patch) {
     readyUntil: merged.readyUntil ?? null,
     manifestSequence: merged.manifestSequence ?? null,
     manifestHash: merged.manifestHash ?? null,
+    contentContractHash: merged.contentContractHash ?? null,
     connection: {
       api: connection.api,
       tls: connection.tls,
@@ -78,6 +79,7 @@ export async function updateStatus(stateRoot, config, patch) {
       releaseKeyId: trust.releaseKeyId ?? null,
       manifestSequence: trust.manifestSequence ?? null,
       manifestHash: trust.manifestHash ?? null,
+      contentContractHash: trust.contentContractHash ?? null,
       policyHash: trust.policyHash ?? null,
       lastVerifiedAt: trust.lastVerifiedAt ?? null,
       errorCode: trust.errorCode ?? null,
@@ -242,6 +244,7 @@ export function defaultStatus(config) {
     readyUntil: null,
     manifestSequence: null,
     manifestHash: null,
+    contentContractHash: null,
     connection: {
       api: "unknown",
       tls: "unknown",
@@ -264,6 +267,7 @@ export function defaultStatus(config) {
       releaseKeyId: null,
       manifestSequence: null,
       manifestHash: null,
+      contentContractHash: null,
       policyHash: null,
       lastVerifiedAt: null,
       errorCode: null,

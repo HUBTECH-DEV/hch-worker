@@ -14,6 +14,7 @@
     "delegationHash",
     "manifestSequence",
     "manifestHash",
+    "contentContractHash",
     "policyHash",
     "verifiedAt"
   ],
@@ -27,6 +28,7 @@
     "delegationHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "manifestSequence": { "type": "integer", "minimum": 1 },
     "manifestHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "contentContractHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "verifiedAt": { "type": "string", "format": "date-time" }
   }

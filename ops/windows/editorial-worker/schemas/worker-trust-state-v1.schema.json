@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema", "schemaVersion", "rootKeyId", "rootFingerprint", "releaseKeyId",
-    "delegationSequence", "delegationHash", "manifestSequence", "manifestHash",
+    "delegationSequence", "delegationHash", "manifestSequence", "manifestHash", "contentContractHash",
     "policyHash", "verifiedAt"
   ],
   "properties": {
@@ -19,6 +19,7 @@
     "delegationHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "manifestSequence": { "type": "integer", "minimum": 1 },
     "manifestHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "contentContractHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "verifiedAt": { "type": "string", "format": "date-time" }
   }

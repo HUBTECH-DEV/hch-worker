@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema", "schemaVersion", "observedAt", "nodeId", "platform", "kitVersion",
-    "state", "running", "standby", "ready", "connection", "transport", "trust", "capacity", "uptimeSeconds",
+    "state", "running", "standby", "ready", "contentContractHash", "connection", "transport", "trust", "capacity", "uptimeSeconds",
     "currentBatch", "progress", "code"
   ],
   "properties": {
@@ -29,6 +29,7 @@
     "readyUntil": { "type": ["string", "null"], "format": "date-time" },
     "manifestSequence": { "type": ["integer", "null"] },
     "manifestHash": { "type": ["string", "null"] },
+    "contentContractHash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
     "connection": {
       "type": "object",
       "additionalProperties": false,
@@ -58,13 +59,14 @@
     "trust": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "rootKeyId", "releaseKeyId", "manifestSequence", "manifestHash", "policyHash", "lastVerifiedAt", "errorCode"],
+      "required": ["status", "rootKeyId", "releaseKeyId", "manifestSequence", "manifestHash", "contentContractHash", "policyHash", "lastVerifiedAt", "errorCode"],
       "properties": {
         "status": { "enum": ["pending", "verified", "expired", "error"] },
         "rootKeyId": { "type": ["string", "null"] },
         "releaseKeyId": { "type": ["string", "null"] },
         "manifestSequence": { "type": ["integer", "null"], "minimum": 1 },
         "manifestHash": { "type": ["string", "null"] },
+        "contentContractHash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
         "policyHash": { "type": ["string", "null"] },
         "lastVerifiedAt": { "type": ["string", "null"], "format": "date-time" },
         "errorCode": { "type": ["string", "null"] }

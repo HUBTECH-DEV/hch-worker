@@ -1,5 +1,6 @@
 import {
   canonicalizeJson,
+  manifestContentContractHash,
   sha256Hex,
   verifyManifestWithDelegation,
   workerPublicKeyFingerprint,
@@ -58,7 +59,8 @@ export async function verifyManifestResponse(
       expectedKeyId: config.rootKeyId,
     },
   );
-  if (!verified.ok && isExpiryFailure(verified.code) && appliedState?.manifestHash) {
+  const expiredFallback = !verified.ok && isExpiryFailure(verified.code);
+  if (expiredFallback && appliedState?.manifestHash) {
     verified = await verifyManifestWithDelegation(
       response.manifest,
       response.delegation,
@@ -87,16 +89,20 @@ export async function verifyManifestResponse(
       "The canonical manifest hash does not match its payload.",
     );
   }
-  if (allowExpired && (
+  if (expiredFallback && (
     !appliedState ||
     manifest.hash !== appliedState.manifestHash ||
     manifest.sequence !== appliedState.manifestSequence
   )) {
     throw new WorkerKitError(
       "manifest-expired-update-refused",
-      "An expired manifest may only renew an already applied identical content contract.",
+      "An expired signature chain may only renew the identical applied manifest.",
     );
   }
+  // Hash the verified signed payload, not its locally normalized validation
+  // view, so the persisted value is exactly the protocol value attested by
+  // the orchestrator and shared signature verifier.
+  const contentContractHash = await manifestContentContractHash(verified.payload);
   const delegationSequence = verified.delegation.sequence;
   if (!Number.isSafeInteger(delegationSequence) || delegationSequence < 1) {
     throw new WorkerKitError(
@@ -120,6 +126,8 @@ export async function verifyManifestResponse(
     releaseFingerprint: verified.delegation.fingerprint,
     delegationSequence,
     delegationHash,
+    contentContractHash,
+    expiredFallback,
   };
 }
 
@@ -318,6 +326,7 @@ export function trustStateFromManifestVerification(verification, verifiedAt = ne
     delegationHash: verification.delegationHash,
     manifestSequence: verification.manifest.sequence,
     manifestHash: verification.manifest.hash,
+    contentContractHash: verification.contentContractHash,
     policyHash: verification.manifest.editorial.policyHash,
     verifiedAt: verifiedAt.toISOString(),
   };

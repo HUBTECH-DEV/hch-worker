@@ -82,6 +82,7 @@ export async function validateLocalWorker(config, options = {}) {
     ready.keyId !== config.keyId ||
     ready.manifestHash !== applied.manifestHash ||
     ready.manifestSequence !== applied.manifestSequence ||
+    ready.contentContractHash !== applied.contentContractHash ||
     ready.policyHash !== applied.policyHash ||
     ready.runtimeProfileHash !== runtimeProfile.runtimeProfileHash ||
     ready.capacityPolicyHash !== policyHash ||
@@ -95,10 +96,13 @@ export async function validateLocalWorker(config, options = {}) {
     capacitySnapshot.manifestSequence !== applied.manifestSequence ||
     trustState.manifestHash !== applied.manifestHash ||
     trustState.manifestSequence !== applied.manifestSequence ||
+    trustState.contentContractHash !== applied.contentContractHash ||
     trustState.policyHash !== applied.policyHash ||
     status.ready !== true ||
     status.manifestHash !== applied.manifestHash ||
     status.manifestSequence !== applied.manifestSequence ||
+    status.contentContractHash !== applied.contentContractHash ||
+    status.trust?.contentContractHash !== applied.contentContractHash ||
     !Number.isFinite(Date.parse(ready.readyUntil)) ||
     Date.parse(ready.readyUntil) <= Date.now()
   ) {

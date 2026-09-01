@@ -36,6 +36,15 @@ ou gera conteúdo até o operador executar explicitamente `start`.
   validada com a chave raiz fixada fora da API.
 - Sequência monotônica, expiração e `previousManifestHash` bloqueiam rollback,
   freeze e equivocação do manifesto.
+- O `contentContractHash` assinado é recalculado e persistido no manifesto
+  aplicado, prontidão, status, trust state e atestação. Hash igual renova
+  somente metadados atômicos, sem baixar artefatos nem interromper assignments;
+  hash diferente fecha novos claims e aguarda o lote ativo terminar antes do
+  apply. O heartbeat de presença continua durante esse drain e anuncia
+  capacidade de novos claims igual a zero.
+- O fallback para JWS, payload ou delegação expirados exige o mesmo
+  `manifestHash` já aplicado. Uma delegação expirada não pode autorizar um
+  manifesto novo, mesmo quando o payload novo ainda está válido.
 - A delegação raiz → release também tem sequência monotônica. O worker mantém
   em `trust-state.json` a maior `delegationSequence` e o hash SHA-256 JCS do
   envelope aceito: sequência menor é downgrade e a mesma sequência com outro
@@ -95,6 +104,9 @@ ou gera conteúdo até o operador executar explicitamente `start`.
 - O atestado v2 declara `provider`, `engineAdapter` e
   `engineAdapterVersion` como campos canônicos de topo; o campo legado
   `engineVersion` não é enviado.
+- Falha de uma renovação com hash de conteúdo igual mantém a prontidão anterior
+  somente até `readyUntil` e é registrada como refresh adiado; não muda o
+  Worker para `update-failed` nem cancela trabalho ativo.
 
 O fluxo editorial continua terminando em `pending-review`; este kit não aprova
 nem publica conteúdo.

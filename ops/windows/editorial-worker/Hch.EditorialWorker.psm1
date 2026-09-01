@@ -1061,6 +1061,7 @@ function Save-HchVerifiedTrustState {
     [Parameter(Mandatory = $true)]$Verified,
     [Parameter(Mandatory = $true)]$Payload,
     [Parameter(Mandatory = $true)][string]$ManifestHash,
+    [Parameter(Mandatory = $true)][string]$ContentContractHash,
     [Parameter(Mandatory = $true)][string]$PolicyHash,
     [Parameter(Mandatory = $true)][string]$VerifiedAt
   )
@@ -1078,6 +1079,7 @@ function Save-HchVerifiedTrustState {
     delegationHash = $delegationHash
     manifestSequence = [long]$Payload.sequence
     manifestHash = $ManifestHash
+    contentContractHash = $ContentContractHash
     policyHash = $PolicyHash
     verifiedAt = $VerifiedAt
   }
@@ -1133,7 +1135,7 @@ function Test-HchSignedManifest {
   } catch {
     $script:LastTrustObservation = [ordered]@{
       status = 'error'; rootKeyId = $null; releaseKeyId = $null
-      manifestSequence = $null; manifestHash = $null; policyHash = $null
+      manifestSequence = $null; manifestHash = $null; contentContractHash = $null; policyHash = $null
       lastVerifiedAt = $null; errorCode = 'manifest-signature-verification-failed'
     }
     throw
@@ -1157,6 +1159,7 @@ function Test-HchSignedManifest {
   if ($manifestHash -ne (Get-HchNormalizedHash -Value ([string]$verified.manifestHash))) {
     throw 'manifest-helper-hash-mismatch'
   }
+  $contentContractHash = Get-HchNormalizedHash -Value ([string]$verified.contentContractHash)
   foreach ($field in @('provider', 'adapter', 'adapterVersion')) {
     $value = [string](Get-HchNestedValue -InputObject $payload -Path @('engine', $field) -Default '')
     if ([string]::IsNullOrWhiteSpace($value) -or
@@ -1221,13 +1224,15 @@ function Test-HchSignedManifest {
   }
   Assert-HchManifestContinuity -Config $Config -Payload $payload -ManifestHash $manifestHash
   [void](Save-HchVerifiedTrustState -Config $Config -Verified $verified -Payload $payload `
-    -ManifestHash $manifestHash -PolicyHash $policyHash -VerifiedAt $verifiedAt)
+    -ManifestHash $manifestHash -ContentContractHash $contentContractHash `
+    -PolicyHash $policyHash -VerifiedAt $verifiedAt)
   $script:LastTrustObservation = [ordered]@{
     status = 'verified'
     rootKeyId = [string]$verified.rootKeyId
     releaseKeyId = [string]$verified.releaseKeyId
     manifestSequence = [long]$payload.sequence
     manifestHash = $manifestHash
+    contentContractHash = $contentContractHash
     policyHash = $policyHash
     lastVerifiedAt = $verifiedAt
     errorCode = $null
@@ -1236,6 +1241,8 @@ function Test-HchSignedManifest {
     Payload = $payload
     Envelope = $Envelope
     ManifestHash = $manifestHash
+    ContentContractHash = $contentContractHash
+    ExpiredFallback = [bool]$verified.expiredFallback
     RootKeyId = [string]$verified.rootKeyId
     ReleaseKeyId = [string]$verified.releaseKeyId
     DelegationSequence = $delegationSequence
@@ -1794,6 +1801,7 @@ function Set-HchWorkerStatus {
       releaseKeyId = Get-HchNestedValue -InputObject $ready -Path @('releaseKeyId') -Default $null
       manifestSequence = [long]$ready.manifestSequence
       manifestHash = [string]$ready.manifestHash
+      contentContractHash = Get-HchNestedValue -InputObject $ready -Path @('contentContractHash') -Default $null
       policyHash = [string]$ready.policyHash
       lastVerifiedAt = Get-HchNestedValue -InputObject $ready -Path @('trustVerifiedAt') -Default $null
       errorCode = if ($isReady) { $null } else { 'ready-attestation-expired' }
@@ -1803,7 +1811,7 @@ function Set-HchWorkerStatus {
   } else {
     [ordered]@{
       status = 'pending'; rootKeyId = $null; releaseKeyId = $null
-      manifestSequence = $null; manifestHash = $null; policyHash = $null
+      manifestSequence = $null; manifestHash = $null; contentContractHash = $null; policyHash = $null
       lastVerifiedAt = $null; errorCode = $null
     }
   }
@@ -1822,6 +1830,9 @@ function Set-HchWorkerStatus {
     readyUntil = if ($isReady) { [string]$ready.readyUntil } else { $null }
     manifestSequence = if ($isReady) { [long]$ready.manifestSequence } else { $null }
     manifestHash = if ($isReady) { [string]$ready.manifestHash } else { $null }
+    contentContractHash = if ($isReady) {
+      Get-HchNestedValue -InputObject $ready -Path @('contentContractHash') -Default $null
+    } else { $null }
     connection = [ordered]@{
       api = $apiState
       tls = if ([string]$transport.tlsStatus -eq 'verified') { 'verified' }
@@ -1846,6 +1857,7 @@ function Set-HchWorkerStatus {
       releaseKeyId = Get-HchNestedValue -InputObject $trust -Path @('releaseKeyId') -Default $null
       manifestSequence = Get-HchNestedValue -InputObject $trust -Path @('manifestSequence') -Default $null
       manifestHash = Get-HchNestedValue -InputObject $trust -Path @('manifestHash') -Default $null
+      contentContractHash = Get-HchNestedValue -InputObject $trust -Path @('contentContractHash') -Default $null
       policyHash = Get-HchNestedValue -InputObject $trust -Path @('policyHash') -Default $null
       lastVerifiedAt = Get-HchNestedValue -InputObject $trust -Path @('lastVerifiedAt') -Default $null
       errorCode = Get-HchNestedValue -InputObject $trust -Path @('errorCode') -Default $null
@@ -2019,7 +2031,7 @@ function Get-HchWorkerCapacityPressure {
 function Update-HchWorkerMetrics {
   param(
     [hashtable]$Config,
-    [ValidateSet('snapshot', 'bootstrap-success', 'bootstrap-failure', 'claim', 'complete', 'failed', 'discarded')]
+    [ValidateSet('snapshot', 'bootstrap-success', 'bootstrap-failure', 'bootstrap-deferred', 'claim', 'complete', 'failed', 'discarded')]
     [string]$Event = 'snapshot',
     [int]$ItemCount = 0,
     [long]$DurationMilliseconds = 0,
@@ -2058,6 +2070,7 @@ function Update-HchWorkerMetrics {
       $updatesAttempts++; $updatesFailed++
       if ($RollbackPerformed) { $updatesRollbacks++ }
     }
+    'bootstrap-deferred' { $updatesAttempts++ }
     'claim' { if ($ItemCount -gt 0) { $batchesTotal++ }; $jobsClaimed += $ItemCount; $jobsRunning += $ItemCount }
     'complete' {
       $jobsCompleted += $ItemCount; $jobsRunning = [Math]::Max(0, $jobsRunning - $ItemCount)
@@ -2156,6 +2169,7 @@ function Update-HchWorkerMetrics {
   $standbyActive = switch ($Event) {
     'bootstrap-success' { $true; break }
     'bootstrap-failure' { $false; break }
+    'bootstrap-deferred' { $statusStandby; break }
     'claim' { $ItemCount -eq 0; break }
     'complete' { [bool]($BatchEnded -or $ClearCurrentBatch); break }
     'failed' { [bool]($BatchEnded -or $ClearCurrentBatch); break }
@@ -2279,10 +2293,13 @@ function Assert-HchClaimGate {
       -not ($applied.PSObject.Properties.Name -contains 'capacityPolicyHash') -or
       -not ($ready.PSObject.Properties.Name -contains 'adaptiveWorkPolicyHash') -or
       -not ($applied.PSObject.Properties.Name -contains 'adaptiveWorkPolicyHash') -or
+      -not ($ready.PSObject.Properties.Name -contains 'contentContractHash') -or
+      -not ($applied.PSObject.Properties.Name -contains 'contentContractHash') -or
       [string]$ready.manifestHash -ne [string]$applied.manifestHash -or
       [long]$ready.manifestSequence -ne [long]$applied.sequence -or
       [string]$ready.policyHash -ne [string]$applied.policyHash -or
       [string]$ready.capacityPolicyHash -ne [string]$applied.capacityPolicyHash -or
+      [string]$ready.contentContractHash -ne [string]$applied.contentContractHash -or
       [string]$ready.adaptiveWorkPolicyHash -ne [string]$applied.adaptiveWorkPolicyHash) {
     Disable-HchWorkerReady -Config $Config -Reason 'ready-manifest-mismatch'
     throw 'worker-ready-manifest-mismatch'
@@ -2615,6 +2632,7 @@ function Invoke-HchManifestPlan {
           adaptiveWorkPolicyHash = Get-HchCanonicalSha256 -Config $Config -Value $Manifest.Payload.adaptiveWorkPolicy
           manifestSequence = [long]$Manifest.Payload.sequence
           manifestHash = [string]$Manifest.ManifestHash
+          contentContractHash = [string]$Manifest.ContentContractHash
         }
         [void](Install-HchJsonConfiguration -Config $Config -Transaction $Transaction `
           -Value $engineConfig -RelativeTarget 'config\engine.json')
@@ -2672,13 +2690,96 @@ function Test-HchAppliedEnvironment {
   }
 }
 
+function Update-HchCompatibleManifestMetadata {
+  param([hashtable]$Config, $Manifest, $Transaction)
+  [void](Assert-HchCapacityPolicy -Policy $Manifest.Payload.capacityPolicy)
+  [void](Assert-HchAdaptiveWorkPolicy -Policy $Manifest.Payload.adaptiveWorkPolicy)
+  $engineConfig = [ordered]@{
+    schemaVersion = 2
+    engine = $Manifest.Payload.engine
+    generation = $Manifest.Payload.generation
+    capacityPolicy = $Manifest.Payload.capacityPolicy
+    capacityPolicyHash = Get-HchCanonicalSha256 -Config $Config -Value $Manifest.Payload.capacityPolicy
+    adaptiveWorkPolicy = $Manifest.Payload.adaptiveWorkPolicy
+    adaptiveWorkPolicyHash = Get-HchCanonicalSha256 -Config $Config -Value $Manifest.Payload.adaptiveWorkPolicy
+    manifestSequence = [long]$Manifest.Payload.sequence
+    manifestHash = [string]$Manifest.ManifestHash
+    contentContractHash = [string]$Manifest.ContentContractHash
+  }
+  [void](Install-HchJsonConfiguration -Config $Config -Transaction $Transaction `
+    -Value $engineConfig -RelativeTarget 'config\engine.json')
+}
+
+function Test-HchCompatibleAppliedEnvironment {
+  param([hashtable]$Config, $Manifest)
+  $installedArtifacts = [ordered]@{
+    policy = 'editorial\policy.json'
+    prompt = 'editorial\prompt.md'
+    'editorial-content-schema' = 'editorial\editorial-content-schema.json'
+    'editorial-source-schema' = 'editorial\editorial-source-schema.json'
+  }
+  foreach ($artifact in @($Manifest.Payload.artifacts)) {
+    $name = [string]$artifact.name
+    if (-not $installedArtifacts.Contains($name)) { throw "compatible-artifact-target-unknown:$name" }
+    $target = Get-HchSafeInstallPath -Config $Config -RelativePath ([string]$installedArtifacts[$name])
+    if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or
+        (Get-HchSha256File -Path $target) -ne
+          (Get-HchNormalizedHash -Value ([string]$artifact.sha256))) {
+      throw "compatible-installed-artifact-invalid:$name"
+    }
+  }
+  [void](Test-HchModelAvailable -Config $Config -Manifest $Manifest)
+  $engineConfigPath = Get-HchSafeInstallPath -Config $Config -RelativePath 'config\engine.json'
+  $engineConfig = Read-HchJsonFile -Path $engineConfigPath
+  if ([string]$engineConfig.contentContractHash -ne [string]$Manifest.ContentContractHash -or
+      [string]$engineConfig.manifestHash -ne [string]$Manifest.ManifestHash -or
+      [long]$engineConfig.manifestSequence -ne [long]$Manifest.Payload.sequence) {
+    throw 'compatible-engine-metadata-mismatch'
+  }
+  return [ordered]@{
+    configurationApplied = $true
+    artifactsVerified = $true
+    modelAvailable = $true
+    generatorReachable = $true
+    selfTestPassed = $true
+  }
+}
+
+function Get-HchActiveAssignmentCount {
+  param([hashtable]$Config)
+  $counts = [Collections.Generic.List[int]]::new()
+  $counts.Add(0)
+  $capacityPath = Join-Path ([string]$Config.StateRoot) 'capacity.json'
+  if (Test-Path -LiteralPath $capacityPath -PathType Leaf) {
+    try { $counts.Add([Math]::Max(0, [int](Read-HchJsonFile -Path $capacityPath).activeAssignments)) }
+    catch { }
+  }
+  $journalPath = Join-Path (Join-Path ([string]$Config.StateRoot) 'cycles') 'active-batch.json'
+  if (Test-Path -LiteralPath $journalPath -PathType Leaf) {
+    try { $counts.Add(@((Read-HchJsonFile -Path $journalPath).items).Count) }
+    catch { }
+  }
+  $statusPath = Join-Path ([string]$Config.StateRoot) 'status.json'
+  if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+    try {
+      $currentBatch = (Read-HchJsonFile -Path $statusPath).currentBatch
+      if ($null -ne $currentBatch) { $counts.Add(@($currentBatch.assignmentIds).Count) }
+    } catch { }
+  }
+  return ($counts | Measure-Object -Maximum).Maximum
+}
+
 function New-HchUpdateReceipt {
   param([hashtable]$Config, $Identity, $Manifest, $Transaction, [string]$Result)
   if ($Result -notin @('applied', 'no-change')) { throw 'update-receipt-result-invalid' }
   $appliedPath = Join-Path ([string]$Config.StateRoot) 'applied-manifest.json'
   $previousManifestHash = $null
+  $previousContentContractHash = $null
   if (Test-Path -LiteralPath $appliedPath) {
-    $previousManifestHash = [string](Read-HchJsonFile -Path $appliedPath).manifestHash
+    $previousApplied = Read-HchJsonFile -Path $appliedPath
+    $previousManifestHash = [string]$previousApplied.manifestHash
+    $previousContentContractHash = Get-HchNestedValue -InputObject $previousApplied `
+      -Path @('contentContractHash') -Default $null
   }
   $artifactHashes = [ordered]@{}
   foreach ($artifact in @($Manifest.Payload.artifacts | Sort-Object -Property name)) {
@@ -2693,10 +2794,11 @@ function New-HchUpdateReceipt {
     rollbackPerformed = $false
     appliedAt = $appliedAt
   }
-  $sameManifest = -not [string]::IsNullOrWhiteSpace([string]$previousManifestHash) -and
-    (Get-HchNormalizedHash -Value ([string]$previousManifestHash)) -eq
-    (Get-HchNormalizedHash -Value ([string]$Manifest.ManifestHash))
-  if (($sameManifest -and $Result -ne 'no-change') -or (-not $sameManifest -and $Result -ne 'applied')) {
+  $sameContent = -not [string]::IsNullOrWhiteSpace([string]$previousContentContractHash) -and
+    (Get-HchNormalizedHash -Value ([string]$previousContentContractHash)) -eq
+    (Get-HchNormalizedHash -Value ([string](Get-HchNestedValue -InputObject $Manifest `
+      -Path @('ContentContractHash') -Default $Manifest.ManifestHash)))
+  if (($sameContent -and $Result -ne 'no-change') -or (-not $sameContent -and $Result -ne 'applied')) {
     throw 'update-receipt-result-manifest-consistency-invalid'
   }
   $localLog = [ordered]@{
@@ -2707,6 +2809,9 @@ function New-HchUpdateReceipt {
     transactionId = [string]$Transaction.Id
     previousManifestHash = $previousManifestHash
     targetManifestHash = [string]$Manifest.ManifestHash
+    contentContractHash = [string](Get-HchNestedValue -InputObject $Manifest `
+      -Path @('ContentContractHash') -Default $Manifest.ManifestHash)
+    previousContentContractHash = $previousContentContractHash
     result = $Result
     rollbackPerformed = $false
     appliedAt = $appliedAt
@@ -2752,15 +2857,34 @@ function Invoke-HchWorkerBootstrap {
   }
   if ($null -eq $bootstrapLock) { throw 'worker-bootstrap-already-running' }
   $transaction = $null
+  $contentChanged = $true
+  $preserveReadyOnFailure = $false
+  $activeAssignments = 0
   $timer = [Diagnostics.Stopwatch]::StartNew()
   try {
     $identity = Initialize-HchWorkerIdentity -Config $Config
-    Set-HchWorkerStatus -Config $Config -State 'bootstrap-required'
     [void](Invoke-HchWorkerEnrollment -Config $Config -Identity $identity)
+    $activeAssignments = [int](Get-HchActiveAssignmentCount -Config $Config)
+    $readyPath = Join-Path ([string]$Config.StateRoot) 'ready.json'
+    $existingReady = if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
+      try { Read-HchJsonFile -Path $readyPath } catch { $null }
+    } else { $null }
+    if ($null -eq $existingReady) {
+      Set-HchWorkerStatus -Config $Config -State 'bootstrap-required'
+    }
     $envelope = Invoke-HchUnsignedJsonRequest -Config $Config -Method GET `
       -Path '/api/editorial/orchestrator/manifest'
     $manifest = Test-HchSignedManifest -Config $Config -Envelope $envelope
-    $readyPath = Join-Path ([string]$Config.StateRoot) 'ready.json'
+    $currentAppliedPath = Join-Path ([string]$Config.StateRoot) 'applied-manifest.json'
+    $currentApplied = if (Test-Path -LiteralPath $currentAppliedPath -PathType Leaf) {
+      Read-HchJsonFile -Path $currentAppliedPath
+    } else { $null }
+    $contentChanged = $null -eq $currentApplied -or
+      -not ($currentApplied.PSObject.Properties.Name -contains 'contentContractHash') -or
+      (Get-HchNormalizedHash -Value ([string]$currentApplied.contentContractHash)) -ne
+        (Get-HchNormalizedHash -Value ([string]$manifest.ContentContractHash))
+    $preserveReadyOnFailure = -not $contentChanged -and $null -ne $existingReady -and
+      [DateTimeOffset]::Parse([string]$existingReady.readyUntil) -gt [DateTimeOffset]::UtcNow
     if (Test-Path -LiteralPath $readyPath) {
       try {
         $ready = Assert-HchClaimGate -Config $Config
@@ -2773,11 +2897,26 @@ function Invoke-HchWorkerBootstrap {
         if ([string]$ready.manifestHash -eq [string]$manifest.ManifestHash -and
             $readyRemainingSeconds -gt $refreshBeforeSeconds) { return $ready }
       } catch {
-        Disable-HchWorkerReady -Config $Config -Reason 'ready-refresh-required'
+        if ($contentChanged) {
+          Disable-HchWorkerReady -Config $Config -Reason 'ready-refresh-required'
+        }
       }
     }
-    Disable-HchWorkerReady -Config $Config -Reason 'manifest-update-started'
-    Set-HchWorkerStatus -Config $Config -State 'updating'
+    if ($contentChanged) {
+      Disable-HchWorkerReady -Config $Config -Reason 'manifest-content-update-started'
+      if ($activeAssignments -gt 0) {
+        Set-HchWorkerStatus -Config $Config -State 'update-required' `
+          -Code 'manifest-content-update-draining'
+        throw 'manifest-content-update-draining'
+      }
+      Set-HchWorkerStatus -Config $Config -State 'updating'
+    } elseif ($activeAssignments -gt 0) {
+      Set-HchWorkerStatus -Config $Config -State 'processing' `
+        -Code 'compatible-manifest-refreshing'
+    } else {
+      Set-HchWorkerStatus -Config $Config -State 'updating' `
+        -Code 'compatible-manifest-refreshing'
+    }
     $nonce = Get-HchChallenge -Config $Config -Identity $identity -Purpose 'bootstrap'
     $bootstrapControl = Get-HchWorkerControl -Config $Config
     $bootstrapRequestedCapacity = if ([bool]$bootstrapControl.acceptingClaims) {
@@ -2821,21 +2960,24 @@ function Invoke-HchWorkerBootstrap {
     Complete-HchOperationRequest -Config $Config -OperationKey $bootstrapOperationKey `
       -RequestId $bootstrapRequestId
     $transaction = New-HchUpdateTransaction -Config $Config -ManifestSequence ([long]$manifest.Payload.sequence)
-    $staged = Stage-HchManifestArtifacts -Config $Config -Manifest $manifest `
-      -StagingDirectory ([string]$transaction.StagingDirectory)
     $transaction.State = 'applying'
     Save-HchTransactionJournal -Transaction $transaction
-    Invoke-HchManifestPlan -Config $Config -Manifest $manifest -Transaction $transaction -StagedArtifacts $staged
-    Set-HchWorkerStatus -Config $Config -State 'self-testing'
-    $checks = Test-HchAppliedEnvironment -Config $Config -Manifest $manifest -StagedArtifacts $staged
-    $receiptResult = 'applied'
-    $currentAppliedPath = Join-Path ([string]$Config.StateRoot) 'applied-manifest.json'
-    if (Test-Path -LiteralPath $currentAppliedPath) {
-      $currentApplied = Read-HchJsonFile -Path $currentAppliedPath
-      if ((Get-HchNormalizedHash -Value ([string]$currentApplied.manifestHash)) -eq
-          (Get-HchNormalizedHash -Value ([string]$manifest.ManifestHash))) {
-        $receiptResult = 'no-change'
-      }
+    Set-HchWorkerStatus -Config $Config `
+      -State $(if (-not $contentChanged -and $activeAssignments -gt 0) { 'processing' } else { 'self-testing' }) `
+      -Code $(if ($contentChanged) { 'self-testing' } else { 'compatible-manifest-refreshing' })
+    if ($contentChanged) {
+      $staged = Stage-HchManifestArtifacts -Config $Config -Manifest $manifest `
+        -StagingDirectory ([string]$transaction.StagingDirectory)
+      Invoke-HchManifestPlan -Config $Config -Manifest $manifest -Transaction $transaction `
+        -StagedArtifacts $staged
+      $checks = Test-HchAppliedEnvironment -Config $Config -Manifest $manifest `
+        -StagedArtifacts $staged
+      $receiptResult = 'applied'
+    } else {
+      Update-HchCompatibleManifestMetadata -Config $Config -Manifest $manifest `
+        -Transaction $transaction
+      $checks = Test-HchCompatibleAppliedEnvironment -Config $Config -Manifest $manifest
+      $receiptResult = 'no-change'
     }
     $updateReceipt = New-HchUpdateReceipt -Config $Config -Identity $identity -Manifest $manifest `
       -Transaction $transaction -Result $receiptResult
@@ -2846,6 +2988,7 @@ function Invoke-HchWorkerBootstrap {
       workerKeyId = [string]$identity.keyId
       manifestSequence = [long]$manifest.Payload.sequence
       manifestHash = [string]$manifest.ManifestHash
+      contentContractHash = [string]$manifest.ContentContractHash
       challenge = [string]$bootstrap.challenge
       workerRuntimeVersion = [string]$script:KitVersion
       policyHash = [string]$editorial.policyHash
@@ -2893,10 +3036,16 @@ function Invoke-HchWorkerBootstrap {
       schemaVersion = 2
       sequence = [long]$manifest.Payload.sequence
       manifestHash = [string]$manifest.ManifestHash
+      contentContractHash = [string]$manifest.ContentContractHash
       policyHash = [string]$editorial.policyHash
       promptConfigHash = [string]$editorial.promptConfigHash
       pipelineVersion = [string]$editorial.pipelineVersion
-      runtimeVersion = [string]$manifest.Payload.runtime.workerVersion
+      runtimeVersion = if (-not $contentChanged -and $null -ne $currentApplied -and
+          $currentApplied.PSObject.Properties.Name -contains 'runtimeVersion') {
+        [string]$currentApplied.runtimeVersion
+      } else {
+        [string]$manifest.Payload.runtime.workerVersion
+      }
       provider = [string]$manifest.Payload.engine.provider
       engineAdapter = [string]$manifest.Payload.engine.adapter
       engineAdapterVersion = [string]$manifest.Payload.engine.adapterVersion
@@ -2919,6 +3068,7 @@ function Invoke-HchWorkerBootstrap {
       workerKeyId = [string]$identity.keyId
       manifestSequence = [long]$manifest.Payload.sequence
       manifestHash = [string]$manifest.ManifestHash
+      contentContractHash = [string]$manifest.ContentContractHash
       policyHash = [string]$editorial.policyHash
       capacityPolicyHash = $capacityPolicyHash
       adaptiveWorkPolicyHash = $adaptiveWorkPolicyHash
@@ -2957,6 +3107,11 @@ function Invoke-HchWorkerBootstrap {
       -ResponseBytes ([long]$script:LastHttpTelemetry.responseBytes))
     return [pscustomobject]$readyRecord
   } catch {
+    if ([string]$_.Exception.Message -eq 'manifest-content-update-draining') {
+      [void](Update-HchWorkerMetrics -Config $Config -Event 'bootstrap-deferred' `
+        -DurationMilliseconds ([long]$timer.ElapsedMilliseconds))
+      throw
+    }
     $failureCode = if ($_.Exception.Message -match '^root-action-refused-no-canonical-authorization:') {
       [string]$_.Exception.Message
     } else { 'bootstrap-or-update-failed' }
@@ -2971,9 +3126,15 @@ function Invoke-HchWorkerBootstrap {
         recordedAt = [DateTimeOffset]::UtcNow.ToString('o')
       })
     }
-    Disable-HchWorkerReady -Config $Config -Reason 'bootstrap-or-update-failed'
-    Set-HchWorkerStatus -Config $Config -State 'update-failed' `
-      -Code $failureCode -ConnectionState 'error'
+    if ($preserveReadyOnFailure) {
+      Set-HchWorkerStatus -Config $Config `
+        -State $(if ($activeAssignments -gt 0) { 'processing' } else { 'standby' }) `
+        -Code 'compatible-manifest-refresh-deferred' -ConnectionState 'error'
+    } else {
+      Disable-HchWorkerReady -Config $Config -Reason 'bootstrap-or-update-failed'
+      Set-HchWorkerStatus -Config $Config -State 'update-failed' `
+        -Code $failureCode -ConnectionState 'error'
+    }
     [void](Update-HchWorkerMetrics -Config $Config -Event 'bootstrap-failure' `
       -DurationMilliseconds ([long]$timer.ElapsedMilliseconds) `
       -RequestBytes ([long]$script:LastHttpTelemetry.requestBytes) `

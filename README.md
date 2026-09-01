@@ -18,6 +18,8 @@ Current worker runtime: **3.1.0**.
 
 Workers verify signed manifests and immutable generation plans before processing. Private worker identity keys remain local. This repository contains no enrollment tokens, production credentials, private signing keys, portal database code, or orchestrator deployment configuration.
 
+The shared [`contentContractHash` compatibility contract](docs/manifest-content-compatibility.md) separates signed content inputs from operational manifest metadata.
+
 See [SECURITY.md](SECURITY.md) and the platform READMEs under `ops/` before installing.
 
 ## Tests

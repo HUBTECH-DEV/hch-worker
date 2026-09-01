@@ -25,6 +25,7 @@ import { stageApplyAndSelfTest } from "./apply.mjs";
 import {
   completeOperation,
   enterStandby,
+  KIT_VERSION,
   operationRequestId,
   recordDuration,
   recordNetwork,
@@ -56,11 +57,23 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
     const startedAt = Date.now();
     const cpuStarted = process.cpuUsage();
     const traffic = createTrafficCounter();
+    const activeAssignments = Number.isSafeInteger(options.activeAssignments) &&
+      options.activeAssignments > 0 ? options.activeAssignments : 0;
+    const [previousApplied, previousReady] = await Promise.all([
+      readOptionalJson(stateRoot, "applied-manifest.json"),
+      readOptionalJson(stateRoot, "ready.json"),
+    ]);
+    let preserveReadyOnFailure = false;
+    let contentUpdateDraining = false;
     await updateStatus(stateRoot, config, {
-      state: "updating",
-      running: false,
+      state: activeAssignments > 0 ? "processing" : "updating",
+      running: activeAssignments > 0,
       standby: false,
-      ready: false,
+      ready: readyIsUsable(previousReady, options.now),
+      readyUntil: previousReady?.readyUntil ?? null,
+      manifestSequence: previousReady?.manifestSequence ?? null,
+      manifestHash: previousReady?.manifestHash ?? null,
+      contentContractHash: previousReady?.contentContractHash ?? null,
       code: "bootstrap-started",
     });
     await updateMetrics(stateRoot, config, (metrics) => {
@@ -99,9 +112,8 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         });
       }
 
-      const [rootPublicKeyPem, previousApplied, previousTrustState] = await Promise.all([
+      const [rootPublicKeyPem, previousTrustState] = await Promise.all([
         readSafeText(config.rootPublicKeyPath),
-        readOptionalJson(stateRoot, "applied-manifest.json"),
         readOptionalJson(stateRoot, "trust-state.json"),
       ]);
       const publishedEnvelope = await fetchSignedManifest(config, {
@@ -133,16 +145,48 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       );
       let pinnedTrustState = trustStateFromManifestVerification(published);
       await atomicWriteJson(stateRoot, "trust-state.json", pinnedTrustState);
-      if (previousApplied?.manifestHash !== published.manifest.hash) {
+      const contentChanged = !previousApplied ||
+        previousApplied.contentContractHash !== published.contentContractHash;
+      const manifestChanged = previousApplied?.manifestHash !== published.manifest.hash;
+      preserveReadyOnFailure = !contentChanged && readyIsUsable(previousReady, options.now);
+      if (manifestChanged && contentChanged) {
         await atomicWriteJson(stateRoot, "ready.json", {
           schemaVersion: 1,
           ready: false,
           nodeId: config.nodeId,
           keyId: config.keyId,
           targetManifestHash: published.manifest.hash,
+          targetContentContractHash: published.contentContractHash,
           invalidatedAt: new Date().toISOString(),
-          reason: "manifest-update-required",
+          reason: "manifest-content-update-required",
         });
+        if (activeAssignments > 0) {
+          contentUpdateDraining = true;
+          await updateStatus(stateRoot, config, {
+            state: "draining",
+            running: true,
+            standby: false,
+            ready: false,
+            readyUntil: null,
+            contentContractHash: published.contentContractHash,
+            code: "manifest-content-update-draining",
+            trust: {
+              status: "verified",
+              rootKeyId: published.rootKeyId,
+              releaseKeyId: published.releaseKeyId,
+              manifestSequence: published.manifest.sequence,
+              manifestHash: published.manifest.hash,
+              contentContractHash: published.contentContractHash,
+              policyHash: published.manifest.editorial.policyHash,
+              lastVerifiedAt: pinnedTrustState.verifiedAt,
+              errorCode: null,
+            },
+          });
+          throw new WorkerKitError(
+            "manifest-content-update-draining",
+            "A content-changing manifest is waiting for active assignments to finish.",
+          );
+        }
       }
 
       const bootstrapBody = {
@@ -185,6 +229,12 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
           "Bootstrap returned a manifest different from the one requested.",
         );
       }
+      if (sessionManifest.contentContractHash !== published.contentContractHash) {
+        throw new WorkerKitError(
+          "bootstrap-content-contract-changed",
+          "Bootstrap returned a different content contract from the one requested.",
+        );
+      }
       const acceptedTrust = sessionManifest;
       await completeOperation(stateRoot, bootstrapOperation.operationKey);
       const adaptiveWorkPolicy = validateAdaptiveWorkPolicy(
@@ -195,10 +245,20 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       );
 
       await updateStatus(stateRoot, config, {
-        state: "updating",
-        manifestSequence: published.manifest.sequence,
-        manifestHash: published.manifest.hash,
-        code: "applying-manifest",
+        state: !contentChanged && activeAssignments > 0 ? "processing" : "updating",
+        running: !contentChanged && activeAssignments > 0,
+        standby: false,
+        ready: !contentChanged && readyIsUsable(previousReady, options.now),
+        manifestSequence: !contentChanged && activeAssignments > 0
+          ? previousReady?.manifestSequence
+          : published.manifest.sequence,
+        manifestHash: !contentChanged && activeAssignments > 0
+          ? previousReady?.manifestHash
+          : published.manifest.hash,
+        contentContractHash: !contentChanged && activeAssignments > 0
+          ? previousReady?.contentContractHash
+          : published.contentContractHash,
+        code: contentChanged ? "applying-manifest" : "refreshing-compatible-manifest",
         connection: {
           api: "connected",
           tls: "verified",
@@ -220,6 +280,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
           releaseKeyId: acceptedTrust.releaseKeyId,
           manifestSequence: published.manifest.sequence,
           manifestHash: published.manifest.hash,
+          contentContractHash: published.contentContractHash,
           policyHash: published.manifest.editorial.policyHash,
           lastVerifiedAt: new Date().toISOString(),
           errorCode: null,
@@ -230,7 +291,11 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         stateRoot,
         published.manifest,
         previousApplied,
-        { ...options, traffic },
+        {
+          ...options,
+          traffic,
+          contentContractHash: published.contentContractHash,
+        },
       );
 
       const attestationBody = {
@@ -238,8 +303,9 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         workerKeyId: config.keyId,
         manifestSequence: published.manifest.sequence,
         manifestHash: published.manifest.hash,
+        contentContractHash: published.contentContractHash,
         challenge: bootstrap.challenge,
-        workerRuntimeVersion: published.manifest.runtime.workerVersion,
+        workerRuntimeVersion: KIT_VERSION,
         policyHash: published.manifest.editorial.policyHash,
         adaptiveWorkPolicyHash: signedAdaptiveWorkPolicyHash,
         rootKeyId: acceptedTrust.rootKeyId,
@@ -295,6 +361,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         keyId: config.keyId,
         manifestSequence: published.manifest.sequence,
         manifestHash: published.manifest.hash,
+        contentContractHash: published.contentContractHash,
         policyHash: published.manifest.editorial.policyHash,
         provider: applied.runtimeProfile.provider,
         engineAdapter: applied.runtimeProfile.engineAdapter,
@@ -321,6 +388,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         readyUntil: readyState.readyUntil,
         manifestSequence: readyState.manifestSequence,
         manifestHash: readyState.manifestHash,
+        contentContractHash: readyState.contentContractHash,
         code: requestedCapacity === 0 ? "drain-requested" : "ready",
         trust: {
           status: "verified",
@@ -328,6 +396,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
           releaseKeyId: acceptedTrust.releaseKeyId,
           manifestSequence: published.manifest.sequence,
           manifestHash: published.manifest.hash,
+          contentContractHash: published.contentContractHash,
           policyHash: published.manifest.editorial.policyHash,
           lastVerifiedAt: readyState.trustVerifiedAt,
           errorCode: null,
@@ -350,13 +419,31 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       };
     } catch (error) {
       const code = errorCode(error, "bootstrap-failed");
+      if (contentUpdateDraining || code === "manifest-content-update-draining") {
+        await updateMetrics(stateRoot, config, (metrics) => {
+          recordNetwork(metrics, traffic);
+          recordDuration(metrics, Date.now() - startedAt, { cpuStarted });
+        }).catch(() => {});
+        throw error;
+      }
+      const compatibleRefreshDeferred = preserveReadyOnFailure &&
+        readyIsUsable(previousReady, options.now);
       await updateStatus(stateRoot, config, {
-        state: "update-failed",
-        running: false,
-        standby: false,
-        ready: false,
-        readyUntil: null,
-        code,
+        state: compatibleRefreshDeferred
+          ? (activeAssignments > 0 ? "processing" : "standby")
+          : "update-failed",
+        running: compatibleRefreshDeferred && activeAssignments > 0,
+        standby: compatibleRefreshDeferred && activeAssignments === 0,
+        ready: compatibleRefreshDeferred,
+        readyUntil: compatibleRefreshDeferred ? previousReady.readyUntil : null,
+        manifestSequence: compatibleRefreshDeferred
+          ? previousReady.manifestSequence
+          : null,
+        manifestHash: compatibleRefreshDeferred ? previousReady.manifestHash : null,
+        contentContractHash: compatibleRefreshDeferred
+          ? previousReady.contentContractHash
+          : null,
+        code: compatibleRefreshDeferred ? "compatible-manifest-refresh-deferred" : code,
         connection: {
           api: "error",
           ...(code === "network-request-failed" ? { tls: "error" } : {}),
@@ -372,7 +459,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
             errorCode: code,
           },
         } : {}),
-        trust: {
+        trust: compatibleRefreshDeferred ? undefined : {
           status: code === "manifest-expired" ? "expired" : "error",
           errorCode: code,
         },
@@ -384,6 +471,18 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       }).catch(() => {});
       throw error;
     }
+}
+
+function readyIsUsable(ready, nowValue) {
+  const now = nowValue instanceof Function ? nowValue() : normalizedNow(nowValue);
+  return ready?.ready === true && Number.isFinite(Date.parse(ready.readyUntil)) &&
+    Date.parse(ready.readyUntil) > now;
+}
+
+function normalizedNow(value) {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "number") return value < 10_000_000_000 ? value * 1_000 : value;
+  return Date.now();
 }
 
 export async function resolveEnrollmentToken(config, options = {}) {

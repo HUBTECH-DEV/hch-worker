@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import {
   canonicalizeJson,
+  manifestContentContractHash,
   signManifestEnvelope,
   signReleaseKeyDelegation,
   verifyWorkerRequestSignature,
@@ -91,7 +92,11 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
   const expectedRuntimeProfile = await createRuntimeProfileFromManifest(
     fixture.manifest,
   );
+  const expectedContentContractHash = await manifestContentContractHash(
+    fixture.manifest,
+  );
   assert.equal(applied.manifestSequence, fixture.manifest.sequence);
+  assert.equal(applied.contentContractHash, expectedContentContractHash);
   assert.deepEqual(applied.runtimeProfile, expectedRuntimeProfile);
   assert.equal(applied.runtimeProfileHash, expectedRuntimeProfile.runtimeProfileHash);
   assert.equal(applied.provider, fixture.manifest.engine.provider);
@@ -101,6 +106,7 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
     fixture.manifest.engine.adapterVersion,
   );
   assert.equal(ready.ready, true);
+  assert.equal(ready.contentContractHash, expectedContentContractHash);
   assert.equal(ready.runtimeProfileHash, expectedRuntimeProfile.runtimeProfileHash);
   assert.equal(status.state, "standby");
   assert.equal(status.ready, true);
@@ -110,6 +116,8 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
   assert.equal(status.trust.status, "verified");
   assert.equal(status.trust.rootKeyId, fixture.control.rootKeyId);
   assert.equal(status.trust.releaseKeyId, fixture.control.releaseKeyId);
+  assert.equal(status.contentContractHash, expectedContentContractHash);
+  assert.equal(status.trust.contentContractHash, expectedContentContractHash);
   assert.equal(status.capacity.requestedCapacity, 2);
   assert.equal(status.capacity.grantedCapacity, 2);
   assert.equal(status.capacity.effectiveGrantedCapacity, 2);
@@ -124,6 +132,7 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
     await sha256Hex(canonicalizeJson(fixture.delegation)),
   );
   assert.deepEqual(Object.keys(trustState).sort(), [
+    "contentContractHash",
     "delegationHash",
     "delegationSequence",
     "manifestHash",
@@ -143,6 +152,7 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
     "capacity",
     "code",
     "connection",
+    "contentContractHash",
     "currentBatch",
     "kitVersion",
     "manifestHash",
@@ -170,6 +180,7 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
     "tlsStatus",
   ]);
   assert.deepEqual(Object.keys(status.trust).sort(), [
+    "contentContractHash",
     "errorCode",
     "lastVerifiedAt",
     "manifestHash",
@@ -271,10 +282,15 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
     fixture.control.attestations[0].engineAdapterVersion,
     fixture.manifest.engine.adapterVersion,
   );
+  assert.equal(
+    fixture.control.attestations[0].contentContractHash,
+    expectedContentContractHash,
+  );
   assert.deepEqual(Object.keys(fixture.control.attestations[0]).sort(), [
     "adaptiveWorkPolicyHash",
     "challenge",
     "checks",
+    "contentContractHash",
     "engineAdapter",
     "engineAdapterVersion",
     "manifestHash",
@@ -334,6 +350,108 @@ test("anti-rollback rejects an older signed manifest before bootstrap or artifac
   assert.equal(rollback.sequence, fixture.manifest.sequence - 1);
   const newPaths = fixture.control.paths.slice(previousPathCount);
   assert.deepEqual(newPaths, ["/api/editorial/orchestrator/manifest"]);
+});
+
+test("a metadata-only manifest refresh preserves content and skips artifact apply", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  const originalContentContractHash = await manifestContentContractHash(fixture.manifest);
+  const artifactRequestsBefore = fixture.control.paths.filter((path) =>
+    path.startsWith("/api/editorial/orchestrator/artifacts/")
+  ).length;
+  const refreshed = await fixture.control.replaceManifest({
+    sequence: fixture.manifest.sequence + 1,
+    previousManifestHash: fixture.manifest.hash,
+    releaseId: "hch-editorial-test.3-metadata",
+    runtime: { ...fixture.manifest.runtime, workerVersion: "2.0.1" },
+    capacityPolicy: {
+      ...fixture.manifest.capacityPolicy,
+      defaultNodeCeiling: fixture.manifest.capacityPolicy.defaultNodeCeiling + 1,
+    },
+  });
+  assert.equal(await manifestContentContractHash(refreshed), originalContentContractHash);
+
+  const result = await bootstrapWorker(fixture.config, {
+    fetchImpl: fixture.control.fetch,
+  });
+  const artifactRequestsAfter = fixture.control.paths.filter((path) =>
+    path.startsWith("/api/editorial/orchestrator/artifacts/")
+  ).length;
+  assert.equal(artifactRequestsAfter, artifactRequestsBefore);
+  assert.equal(result.manifestHash, refreshed.hash);
+  const [applied, ready, status, trust, receipt] = await Promise.all([
+    jsonFile(fixture.stateDirectory, "applied-manifest.json"),
+    jsonFile(fixture.stateDirectory, "ready.json"),
+    jsonFile(fixture.stateDirectory, "status.json"),
+    jsonFile(fixture.stateDirectory, "trust-state.json"),
+    jsonFile(fixture.stateDirectory, `receipts/${refreshed.hash}.json`),
+  ]);
+  for (const state of [applied, ready, status, trust]) {
+    assert.equal(state.contentContractHash, originalContentContractHash);
+  }
+  assert.equal(status.trust.contentContractHash, originalContentContractHash);
+  assert.equal(receipt.updateReceipt.result, "no-change");
+  assert.equal(fixture.control.attestations.at(-1).contentContractHash, originalContentContractHash);
+});
+
+test("a content-changing manifest drains active assignments before apply", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  const before = fixture.control.paths.length;
+  const changed = await fixture.control.replaceManifest({
+    sequence: fixture.manifest.sequence + 1,
+    previousManifestHash: fixture.manifest.hash,
+    releaseId: "hch-editorial-test.3-content",
+    generation: {
+      ...fixture.manifest.generation,
+      maxOutputTokens: fixture.manifest.generation.maxOutputTokens + 1,
+    },
+  });
+  assert.notEqual(
+    await manifestContentContractHash(changed),
+    await manifestContentContractHash(fixture.manifest),
+  );
+  await assert.rejects(
+    bootstrapWorker(fixture.config, {
+      activeAssignments: 1,
+      fetchImpl: fixture.control.fetch,
+    }),
+    (error) => error?.code === "manifest-content-update-draining",
+  );
+  assert.deepEqual(
+    fixture.control.paths.slice(before),
+    ["/api/editorial/orchestrator/manifest"],
+  );
+  const ready = await jsonFile(fixture.stateDirectory, "ready.json");
+  assert.equal(ready.ready, false);
+  assert.equal(ready.targetContentContractHash, await manifestContentContractHash(changed));
+  assert.equal(ready.reason, "manifest-content-update-required");
+});
+
+test("an expired delegation cannot authorize a different unapplied manifest", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  await fixture.control.replaceWithExpiredDelegation({
+    sequence: fixture.manifest.sequence + 1,
+    previousManifestHash: fixture.manifest.hash,
+    releaseId: "hch-editorial-test.3-expired-delegation",
+  });
+  await assert.rejects(
+    bootstrapWorker(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "manifest-expired-update-refused",
+  );
 });
 
 test("delegation anti-rollback rejects an older still-valid root delegation", async (t) => {
@@ -404,6 +522,15 @@ test("a higher delegation is pinned before apply and rejects an old replay after
     fetchImpl: fixture.control.fetch,
   });
   const nextDelegation = await fixture.control.replaceDelegation({ sequence: 3 });
+  await fixture.control.replaceManifest({
+    sequence: fixture.manifest.sequence + 1,
+    previousManifestHash: fixture.manifest.hash,
+    releaseId: "hch-editorial-test.3-content-failure",
+    generation: {
+      ...fixture.manifest.generation,
+      maxOutputTokens: fixture.manifest.generation.maxOutputTokens + 1,
+    },
+  });
   fixture.control.setCorruptArtifact("policy");
   await assert.rejects(
     bootstrapWorker(fixture.config, { fetchImpl: fixture.control.fetch }),
@@ -766,6 +893,27 @@ test("zero parallelism remains heartbeat-only and cannot receive work", async (t
   assert.equal(capacity.grantedCapacity, 0);
   assert.equal(status.state, "draining");
   assert.equal(status.capacity.effectiveGrantedCapacity, 0);
+});
+
+test("readiness drain heartbeat reports zero without changing operator parallelism", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  await setLocalParallelism(fixture.config, 2);
+  await nodeHeartbeat(fixture.config, {
+    fetchImpl: fixture.control.fetch,
+    forceDrain: true,
+  });
+  const heartbeat = fixture.control.requests.findLast(
+    (request) => request.path === "/api/editorial/orchestrator/nodes/heartbeat",
+  );
+  assert.equal(heartbeat.body.requestedCapacity, 0);
+  const control = await jsonFile(fixture.stateDirectory, "worker-control.json");
+  assert.equal(control.requestedCapacity, 2);
+  assert.equal(control.acceptingClaims, true);
 });
 
 test("bootstrap with requested capacity zero attests directly into drain", async (t) => {
@@ -1336,6 +1484,40 @@ function createControlPlane(context) {
       );
       await api.refreshEnvelope();
       return activeDelegation;
+    },
+    async replaceWithExpiredDelegation(patch) {
+      const { hash: _oldHash, ...base } = activeManifest;
+      activeManifest = await withManifestHash({ ...base, ...patch });
+      const now = Math.floor(Date.now() / 1_000);
+      const created = now - 600;
+      const expires = now - 300;
+      activeDelegation = await signReleaseKeyDelegation(
+        context.releasePublicKey,
+        context.rootPrivateKey,
+        {
+          rootKeyId: context.rootKeyId,
+          releaseKeyId: context.releaseKeyId,
+          sequence: 3,
+          created,
+          notBefore: created,
+          expires,
+        },
+      );
+      envelope = {
+        manifest: await signManifestEnvelope(
+          activeManifest,
+          context.releasePrivateKey,
+          {
+            keyId: context.releaseKeyId,
+            created: created + 30,
+            expires: expires - 30,
+          },
+        ),
+        delegation: activeDelegation,
+        rootKeyId: context.rootKeyId,
+        rootPublicKeyFingerprint: context.rootFingerprint,
+      };
+      return activeManifest;
     },
     setCorruptArtifact(name) {
       context.behavior.corruptArtifact = name;

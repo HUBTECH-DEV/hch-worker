@@ -1,4 +1,8 @@
-import { canonicalizeJson, sha256Hex } from "../crypto.mjs";
+import {
+  canonicalizeJson,
+  manifestContentContractHash,
+  sha256Hex,
+} from "../crypto.mjs";
 import { capacityPolicyHash } from "./capacity.mjs";
 import { adaptiveWorkPolicyHash, validateAdaptiveWorkPolicy } from "./adaptive-work.mjs";
 import { downloadArtifact, queryLocalModel } from "./http.mjs";
@@ -30,6 +34,30 @@ export async function stageApplyAndSelfTest(
   const signedCapacityPolicyHash = await capacityPolicyHash(manifest.capacityPolicy);
   const adaptiveWorkPolicy = validateAdaptiveWorkPolicy(manifest.adaptiveWorkPolicy);
   const signedAdaptiveWorkPolicyHash = await adaptiveWorkPolicyHash(adaptiveWorkPolicy);
+  const contentContractHash = options.contentContractHash ??
+    await manifestContentContractHash(manifest);
+  if (!/^[a-f0-9]{64}$/.test(contentContractHash)) {
+    throw new WorkerKitError(
+      "manifest-content-contract-invalid",
+      "The verified manifest content contract hash is invalid.",
+    );
+  }
+  if (previousApplied?.contentContractHash === contentContractHash) {
+    return refreshCompatibleManifestMetadata(
+      config,
+      stateRoot,
+      manifest,
+      previousApplied,
+      {
+        adaptiveWorkPolicy,
+        contentContractHash,
+        runtimeProfile,
+        signedAdaptiveWorkPolicyHash,
+        signedCapacityPolicyHash,
+      },
+      options,
+    );
+  }
   const staged = new Map();
   const artifactHashes = {};
   for (const artifact of manifest.artifacts) {
@@ -75,6 +103,7 @@ export async function stageApplyAndSelfTest(
     schemaVersion: 1,
     manifestSequence: manifest.sequence,
     manifestHash: manifest.hash,
+    contentContractHash,
     previousManifestHash: manifest.previousManifestHash,
     releaseId: manifest.releaseId,
     workerRuntimeVersion: manifest.runtime.workerVersion,
@@ -121,6 +150,7 @@ export async function stageApplyAndSelfTest(
       capacityPolicyHash: signedCapacityPolicyHash,
       adaptiveWorkPolicy,
       adaptiveWorkPolicyHash: signedAdaptiveWorkPolicyHash,
+      contentContractHash,
       sourceManifestHash: manifest.hash,
     });
 
@@ -176,6 +206,7 @@ export async function stageApplyAndSelfTest(
       runtimeProfile,
       capacityPolicyHash: signedCapacityPolicyHash,
       adaptiveWorkPolicyHash: signedAdaptiveWorkPolicyHash,
+      contentContractHash,
     };
     const localAuditHash = await sha256Hex(canonicalizeJson(localJournal));
     const updateReceipt = {
@@ -193,6 +224,155 @@ export async function stageApplyAndSelfTest(
       appliedState,
       updateReceipt,
       runtimeProfile,
+      checks: {
+        configurationApplied: true,
+        artifactsVerified: true,
+        modelAvailable: true,
+        generatorReachable: true,
+        selfTestPassed: true,
+      },
+    };
+  } catch (error) {
+    await restoreBackup(stateRoot, backup);
+    throw error;
+  }
+}
+
+async function refreshCompatibleManifestMetadata(
+  config,
+  stateRoot,
+  manifest,
+  previousApplied,
+  calculated,
+  options,
+) {
+  const {
+    adaptiveWorkPolicy,
+    contentContractHash,
+    runtimeProfile,
+    signedAdaptiveWorkPolicyHash,
+    signedCapacityPolicyHash,
+  } = calculated;
+  await verifyInstalledArtifacts(stateRoot, manifest);
+  const engine = await queryLocalModel(config, options);
+  assertLocalModel(engine.payload, manifest);
+  const artifactHashes = Object.fromEntries(
+    manifest.artifacts.map((artifact) => [artifact.name, artifact.sha256]),
+  );
+  const appliedAt = new Date().toISOString();
+  const appliedState = {
+    ...previousApplied,
+    schemaVersion: 1,
+    manifestSequence: manifest.sequence,
+    manifestHash: manifest.hash,
+    contentContractHash,
+    previousManifestHash: manifest.previousManifestHash,
+    releaseId: manifest.releaseId,
+    policyHash: manifest.editorial.policyHash,
+    promptConfigHash: manifest.editorial.promptConfigHash,
+    pipelineVersion: manifest.editorial.pipelineVersion,
+    provider: manifest.engine.provider,
+    engineAdapter: manifest.engine.adapter,
+    engineAdapterVersion: manifest.engine.adapterVersion,
+    model: manifest.engine.model,
+    modelDigest: normalizeDigest(manifest.engine.modelDigest),
+    protocol: manifest.engine.protocol,
+    runtimeProfileHash: runtimeProfile.runtimeProfileHash,
+    runtimeProfile,
+    capacityPolicyHash: signedCapacityPolicyHash,
+    capacityPolicy: manifest.capacityPolicy,
+    adaptiveWorkPolicyHash: signedAdaptiveWorkPolicyHash,
+    adaptiveWorkPolicy,
+    artifacts: manifest.artifacts,
+    artifactHashes,
+    appliedAt,
+    metadataRefreshedAt: appliedAt,
+  };
+  const backup = new Map([
+    ["runtime/config/engine.json", await readOptionalFile(stateRoot, "runtime/config/engine.json")],
+    ["applied-manifest.json", await readOptionalFile(stateRoot, "applied-manifest.json")],
+  ]);
+  try {
+    await atomicWriteJson(stateRoot, "runtime/config/engine.json", {
+      schemaVersion: 1,
+      provider: manifest.engine.provider,
+      adapter: manifest.engine.adapter,
+      adapterVersion: manifest.engine.adapterVersion,
+      model: manifest.engine.model,
+      modelDigest: normalizeDigest(manifest.engine.modelDigest),
+      protocol: manifest.engine.protocol,
+      generation: manifest.generation,
+      capacityPolicy: manifest.capacityPolicy,
+      capacityPolicyHash: signedCapacityPolicyHash,
+      adaptiveWorkPolicy,
+      adaptiveWorkPolicyHash: signedAdaptiveWorkPolicyHash,
+      contentContractHash,
+      sourceManifestHash: manifest.hash,
+    });
+    await atomicWriteJson(stateRoot, "applied-manifest.json", appliedState);
+    const receiptCore = {
+      previousManifestHash: previousApplied.manifestHash,
+      targetManifestHash: manifest.hash,
+      artifactHashes,
+      result: "no-change",
+      rollbackPerformed: false,
+      appliedAt,
+    };
+    const receiptHash = await sha256Hex(canonicalizeJson(receiptCore));
+    const localJournal = {
+      schemaVersion: 1,
+      nodeId: config.nodeId,
+      keyId: config.keyId,
+      manifestSequence: manifest.sequence,
+      manifestHash: manifest.hash,
+      contentContractHash,
+      previousContentContractHash: previousApplied.contentContractHash,
+      releaseId: manifest.releaseId,
+      receiptHash,
+      receipt: receiptCore,
+      actionResults: manifest.actions.map((action) => ({
+        type: action.type,
+        authorizationClass: action.authorizationClass,
+        result: "unchanged-compatible",
+      })),
+      artifacts: manifest.artifacts.map((artifact) => ({
+        name: artifact.name,
+        bytes: artifact.bytes,
+        sha256: artifact.sha256,
+      })),
+      checks: {
+        configurationApplied: true,
+        artifactsVerified: true,
+        modelAvailable: true,
+        generatorReachable: true,
+        selfTestPassed: true,
+      },
+      engine: {
+        provider: manifest.engine.provider,
+        adapter: manifest.engine.adapter,
+        adapterVersion: manifest.engine.adapterVersion,
+        observedEngineVersion: engine.observedEngineVersion,
+        model: manifest.engine.model,
+        modelDigest: normalizeDigest(manifest.engine.modelDigest),
+        protocol: manifest.engine.protocol,
+      },
+      runtimeProfile,
+      capacityPolicyHash: signedCapacityPolicyHash,
+      adaptiveWorkPolicyHash: signedAdaptiveWorkPolicyHash,
+    };
+    const localAuditHash = await sha256Hex(canonicalizeJson(localJournal));
+    const updateReceipt = { ...receiptCore, receiptHash, localAuditHash };
+    await atomicWriteJson(stateRoot, `receipts/${manifest.hash}.json`, {
+      schemaVersion: 1,
+      journal: localJournal,
+      localAuditHash,
+      updateReceipt,
+    });
+    return {
+      appliedState,
+      updateReceipt,
+      runtimeProfile,
+      metadataOnly: true,
       checks: {
         configurationApplied: true,
         artifactsVerified: true,

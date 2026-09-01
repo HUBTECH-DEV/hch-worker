@@ -11,6 +11,7 @@ import {
 import { readFileSync, writeFileSync } from "node:fs";
 import {
   canonicalizeJson,
+  manifestContentContractHash,
   verifyManifestWithDelegation,
   workerPublicKeyFingerprint,
 } from "../../../../lib/editorial-worker-signatures.mjs";
@@ -134,7 +135,11 @@ async function verifyManifestChain(
     .update(canonicalizeJson(outer.delegation))
     .digest("hex");
   if (payload?.schemaVersion !== "2.0") throw new Error("manifest-schema-unsupported");
-  const payloadExpired = Date.parse(payload.expiresAt) <= Date.now() - clockSkewSeconds * 1000;
+  const expiryBoundary = Date.now() - clockSkewSeconds * 1000;
+  const payloadExpired = Date.parse(payload.expiresAt) <= expiryBoundary;
+  const chainExpired = payloadExpired ||
+    verified.protectedHeader.exp * 1000 <= expiryBoundary ||
+    delegated.expires * 1000 <= expiryBoundary;
   if (payloadExpired && allowExpiredHash === null) {
     throw new Error("manifest-payload-expired");
   }
@@ -153,9 +158,10 @@ async function verifyManifestChain(
   if (calculated !== hash && legacyCalculated !== hash) {
     throw new Error("manifest-payload-hash-mismatch");
   }
-  if (payloadExpired && String(hash).toLowerCase() !== String(allowExpiredHash).toLowerCase()) {
+  if (chainExpired && String(hash).toLowerCase() !== String(allowExpiredHash).toLowerCase()) {
     throw new Error("manifest-expired-update-refused");
   }
+  const contentContractHash = await manifestContentContractHash(payload);
   writeFileSync(outputPath, canonicalizeJson(payload), { encoding: "utf8", flag: "wx", mode: 0o600 });
   print({
     valid: true,
@@ -163,6 +169,8 @@ async function verifyManifestChain(
     delegationSequence: delegated.sequence,
     manifestHash: hash,
     manifestSequence: payload.sequence,
+    contentContractHash,
+    expiredFallback: chainExpired,
     releaseKeyId: delegated.releaseKeyId,
     rootKeyId,
     rootFingerprint,

@@ -19,6 +19,31 @@
     "issuedAt": { "type": "string", "format": "date-time" },
     "expiresAt": { "type": "string", "format": "date-time" },
     "runtime": { "type": "object" },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classification", "contentContractHash", "previousContentContractHash",
+        "minimumWorkerVersion", "testedThroughWorkerVersion", "contentImpact"
+      ],
+      "properties": {
+        "classification": { "enum": ["initial", "compatible", "content-incompatible"] },
+        "contentContractHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "previousContentContractHash": {
+          "type": ["string", "null"],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "minimumWorkerVersion": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+        },
+        "testedThroughWorkerVersion": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+        },
+        "contentImpact": { "enum": ["none", "generated-content"] }
+      }
+    },
     "engine": {
       "type": "object",
       "required": ["provider", "adapter", "adapterVersion", "model", "modelDigest", "protocol"],
@@ -215,6 +240,13 @@
     "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": { "bootstrapVersion": { "const": "2.3.0" } },
+        "required": ["bootstrapVersion"]
+      },
+      "then": { "required": ["compatibility"] }
+    },
     {
       "if": {
         "properties": { "bootstrapVersion": { "const": "2.2.0" } },

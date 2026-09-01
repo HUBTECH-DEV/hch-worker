@@ -147,6 +147,13 @@ O fluxo é deliberadamente fail-closed:
     produzido durante o apply segue na atestação, e a âncora de delegação já foi
     fixada antes da aplicação.
 
+O `contentContractHash` verificado acompanha manifesto aplicado, prontidão,
+status, trust state e atestação. Uma renovação com o mesmo hash atualiza apenas
+metadados e não baixa artefatos nem interrompe o pool. Um hash diferente fecha
+novos claims e aguarda o pool ativo chegar a zero antes do apply; ele não
+cancela assignments em execução nem o heartbeat de presença, que continua com
+capacidade de novos claims igual a zero durante o drain.
+
 A ação declarativa `pull-model-by-digest` não autoriza shell remoto nem inicia
 a engine. Nesta versão ela representa o estado desejado; o bootstrap confirma
 que o modelo exato já está presente e falha com `model-digest-unavailable` caso
@@ -251,6 +258,11 @@ resposta HTTP 409 `generator-stalled` aborta a inferência local e registra
 `fail` de forma fail-closed. `complete` e `fail` precisam ecoar o mesmo
 `generationPlanHash`; conclusão válida permanece `pending-review` e exige
 `automaticApproval=false` e `automaticPublication=false`.
+
+Com paralelismo maior que um, as transições de status/métricas são
+serializadas: `jobs.running` e `currentBatch` representam todo o pool, e não o
+último assignment que escreveu no arquivo. Falha ou conclusão de um item não
+remove os demais da visão local.
 
 ## Supervisor portátil
 
@@ -484,6 +496,11 @@ anti-rollback ou atestação deixa `status.json` fora de `ready`. O comando
 processo interrompido durante apply não fica autorizado a executar, mesmo que
 alguns arquivos atômicos já tenham sido trocados; execute novamente o
 bootstrap após corrigir a causa.
+
+A exceção operacional é um refresh comprovadamente compatível: se a renovação
+falhar, o `ready.json` anterior continua autorizando trabalho somente até seu
+`readyUntil`. Expiração de manifesto ou delegação aceita fallback apenas para
+o mesmo hash e sequência já aplicados; nunca para promover conteúdo novo.
 
 Uma terminação não capturável pode deixar `.worker.lock`. Antes de removê-lo,
 confirme administrativamente que o PID registrado no arquivo não existe e que

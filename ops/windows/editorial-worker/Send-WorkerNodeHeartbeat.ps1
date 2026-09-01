@@ -19,10 +19,13 @@ $refreshBefore = if ($config.ContainsKey('ReadyRefreshBeforeSeconds')) {
 if ($null -eq $ready -or
     ([DateTimeOffset]::Parse([string]$ready.readyUntil) - [DateTimeOffset]::UtcNow).TotalSeconds -le $refreshBefore) {
   # This runner belongs to the service heartbeat loop. Renewal does not claim.
-  [void](Invoke-HchWorkerBootstrap -Config $config)
+  try { [void](Invoke-HchWorkerBootstrap -Config $config) } catch { }
+  try { $ready = Assert-HchClaimGate -Config $config } catch { $ready = $null }
 }
 $control = Get-HchWorkerControl -Config $config
-$capacity = if ($RequestedCapacity -ge 0) {
+$capacity = if ($null -eq $ready) {
+  0
+} elseif ($RequestedCapacity -ge 0) {
   $RequestedCapacity
 } elseif ([bool]$control.acceptingClaims) {
   [int]$control.requestedParallelism

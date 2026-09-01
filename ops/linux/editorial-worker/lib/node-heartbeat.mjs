@@ -68,7 +68,11 @@ export async function nodeHeartbeat(config, options = {}) {
 
     const identity = await ensureWorkerIdentity(config, stateRoot);
     const control = await readWorkerControl(stateRoot, config);
-    const requestedCapacity = effectiveRequestedCapacity(control);
+    // A readiness/content drain must remain visible to the orchestrator while
+    // making it impossible for the control plane to reserve new local work.
+    const requestedCapacity = options.forceDrain === true
+      ? 0
+      : effectiveRequestedCapacity(control);
     const requestId = options.requestId ?? crypto.randomUUID();
     identifier(requestId, "requestId", 160);
     const pressure = options.pressure === undefined

@@ -267,6 +267,9 @@ test("service heartbeat renews readiness without enabling claims", () => {
   const heartbeat = readFileSync(join(kitRoot, "Send-WorkerNodeHeartbeat.ps1"), "utf8");
   assert.match(heartbeat, /Assert-HchClaimGate/);
   assert.match(heartbeat, /Invoke-HchWorkerBootstrap/);
+  assert.match(heartbeat, /try\s*\{\s*\[void\]\(Invoke-HchWorkerBootstrap[\s\S]*?\}\s*catch\s*\{\s*\}/);
+  assert.match(heartbeat, /if\s*\(\$null\s*-eq\s*\$ready\)\s*\{\s*0/);
+  assert.match(heartbeat, /Invoke-HchWorkerNodeHeartbeat/);
   assert.match(heartbeat, /RequestedCapacity \$capacity/);
   assert.doesNotMatch(heartbeat, /Invoke-HchWorkerClaim|editorial-generator/);
 });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
@@ -24,6 +24,7 @@ import {
   validatePublicSourceUrl,
 } from "../lib/generator.mjs";
 import {
+  createConcurrentWorkloadTracker,
   runPortableSupervisor,
   renewReadyAttestation,
   startAssignmentHeartbeat,
@@ -366,6 +367,43 @@ test("portable supervisor keeps heartbeat at capacity zero and never claims", as
   assert.equal(workStarts, 0);
 });
 
+test("portable supervisor keeps node presence while a content update drains claims", async (t) => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "hch-portable-drain-heartbeat-"));
+  t.after(() => rm(stateDirectory, { recursive: true, force: true }));
+  await writeFile(join(stateDirectory, "ready.json"), JSON.stringify({
+    ready: false,
+    readyUntil: null,
+    code: "manifest-content-update-draining",
+  }));
+  let clock = 0;
+  let heartbeats = 0;
+  let workStarts = 0;
+  let renewalErrors = 0;
+  const result = await runPortableSupervisor({ stateDirectory }, {
+    maximumCycles: 3,
+    waitForWorkOnStop: false,
+    now: () => clock,
+    delay: async (milliseconds) => { clock += milliseconds; },
+    nodeHeartbeat: async (_config, heartbeatOptions) => {
+      heartbeats += 1;
+      assert.equal(heartbeatOptions.forceDrain, true);
+      return heartbeatSnapshot(4, true, 4);
+    },
+    runAssignment: async () => { workStarts += 1; },
+    bootstrapWorkerLocked: async () => {
+      throw new WorkerKitError(
+        "manifest-content-update-draining",
+        "Active assignments must drain before applying changed content.",
+      );
+    },
+    onHeartbeatError: () => { renewalErrors += 1; },
+  });
+  assert.equal(result.cycles, 3);
+  assert.equal(heartbeats, 3);
+  assert.equal(workStarts, 0);
+  assert.equal(renewalErrors, 3);
+});
+
 test("portable supervisor honors the orchestrator parallel-work target", async (t) => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "hch-portable-single-"));
   t.after(() => rm(stateDirectory, { recursive: true, force: true }));
@@ -398,6 +436,56 @@ test("portable supervisor honors the orchestrator parallel-work target", async (
   assert.equal(starts, 3);
   assert.equal(maximumActive, 3);
   release();
+});
+
+test("concurrent workload state keeps every active assignment until the batch ends", async (t) => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "hch-portable-progress-"));
+  t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  const config = {
+    nodeId: "portable-progress-01",
+    keyId: "portable-progress-key-01",
+    requestedCapacity: 3,
+  };
+  const tracker = createConcurrentWorkloadTracker(stateRoot, config);
+  const assignments = [1, 2, 3].map((number) => ({
+    assignmentId: `assignment-${number}`,
+  }));
+  await Promise.all(assignments.map((assignment, index) =>
+    tracker.started({ requestId: `claim-${index + 1}` }, assignment)
+  ));
+  let status = JSON.parse(await readFile(join(stateRoot, "status.json"), "utf8"));
+  let metrics = JSON.parse(await readFile(join(stateRoot, "metrics.json"), "utf8"));
+  assert.equal(status.currentBatch.jobs, 3);
+  assert.equal(status.currentBatch.activeJobs, 3);
+  assert.equal(status.currentBatch.completedJobs, 0);
+  assert.deepEqual(status.currentBatch.assignmentIds, assignments.map((item) => item.assignmentId));
+  assert.equal(metrics.jobs.running, 3);
+  assert.equal(metrics.batches.total, 1);
+
+  await Promise.all([
+    tracker.finished(assignments[0], true, "assignment-completed"),
+    tracker.finished(assignments[1], false, "generator-failed"),
+  ]);
+  status = JSON.parse(await readFile(join(stateRoot, "status.json"), "utf8"));
+  metrics = JSON.parse(await readFile(join(stateRoot, "metrics.json"), "utf8"));
+  assert.equal(status.state, "processing");
+  assert.equal(status.currentBatch.activeJobs, 1);
+  assert.equal(status.currentBatch.completedJobs, 2);
+  assert.equal(status.currentBatch.failedJobs, 1);
+  assert.equal(metrics.jobs.running, 1);
+  assert.equal(metrics.jobs.completed, 1);
+  assert.equal(metrics.jobs.failed, 1);
+
+  await tracker.finished(assignments[2], true, "assignment-completed");
+  status = JSON.parse(await readFile(join(stateRoot, "status.json"), "utf8"));
+  metrics = JSON.parse(await readFile(join(stateRoot, "metrics.json"), "utf8"));
+  assert.equal(status.state, "connection-error");
+  assert.equal(status.currentBatch, null);
+  assert.equal(metrics.jobs.running, 0);
+  assert.equal(metrics.jobs.completed, 2);
+  assert.equal(metrics.jobs.failed, 1);
+  assert.equal(metrics.batches.failed, 1);
+  assert.equal(metrics.batches.completed, 0);
 });
 
 test("portable readiness renewal is independent from capacity zero", async (t) => {

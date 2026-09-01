@@ -15,6 +15,7 @@
     "running",
     "standby",
     "ready",
+    "contentContractHash",
     "connection",
     "transport",
     "trust",
@@ -52,6 +53,7 @@
     "readyUntil": { "type": ["string", "null"], "format": "date-time" },
     "manifestSequence": { "type": ["integer", "null"] },
     "manifestHash": { "type": ["string", "null"] },
+    "contentContractHash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
     "connection": {
       "type": "object",
       "additionalProperties": false,
@@ -109,6 +111,7 @@
         "releaseKeyId",
         "manifestSequence",
         "manifestHash",
+        "contentContractHash",
         "policyHash",
         "lastVerifiedAt",
         "errorCode"
@@ -119,6 +122,7 @@
         "releaseKeyId": { "type": ["string", "null"] },
         "manifestSequence": { "type": ["integer", "null"], "minimum": 1 },
         "manifestHash": { "type": ["string", "null"] },
+        "contentContractHash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
         "policyHash": { "type": ["string", "null"] },
         "lastVerifiedAt": { "type": ["string", "null"], "format": "date-time" },
         "errorCode": { "type": ["string", "null"] }
