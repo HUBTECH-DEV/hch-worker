@@ -15,6 +15,7 @@ import { WorkerKitError } from "./errors.mjs";
 
 const MAX_SOURCE_BYTES = 2_000_000;
 const MAX_EVIDENCE_CHARACTERS = 8_000;
+const MAX_MODEL_EVIDENCE_CHARACTERS = 3_000;
 const SOURCE_TIMEOUT_MS = 25_000;
 const MAX_GENERATOR_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_GENERATION_ATTEMPTS = 2;
@@ -43,7 +44,7 @@ export async function generateEditorialDraft(
     signal: options.signal,
     sourceTimeoutMilliseconds: options.sourceTimeoutMilliseconds,
   });
-  const sourceExcerpt = evidence.text;
+  const sourceExcerpt = modelEvidenceExcerpt(evidence.text);
   const source = {
     sourceId: "S1",
     canonicalUrl: assignment.entry.source_url,
@@ -89,6 +90,8 @@ export async function generateEditorialDraft(
       prompt,
       editorialProfile,
       input,
+      platform: options.platform ?? process.platform,
+      localEngineNumThreads: options.localEngineNumThreads,
       attempt,
       lastValidation,
       previousCandidate,
@@ -108,7 +111,14 @@ export async function generateEditorialDraft(
         },
       );
     } catch (error) {
-      throw normalizeGeneratorError(error);
+      const normalized = normalizeGeneratorError(error);
+      const retryFeedback = generationBudgetRetryFeedback(normalized, attempt);
+      if (retryFeedback) {
+        previousCandidate = null;
+        lastValidation = retryFeedback;
+        continue;
+      }
+      throw normalized;
     }
     const parsed = parseCandidateAttempt(payload);
     if (!parsed.ok) {
@@ -146,14 +156,49 @@ export async function generateEditorialDraft(
   throw error;
 }
 
+export function generationBudgetRetryFeedback(error, attempt) {
+  if (
+    error?.code !== "generator-output-budget-exhausted" ||
+    !Number.isSafeInteger(attempt) ||
+    attempt < 1 ||
+    attempt >= MAX_GENERATION_ATTEMPTS
+  ) {
+    return null;
+  }
+  return {
+    valid: false,
+    errors: [{
+      code: "GEN-OUTPUT-BUDGET-EXHAUSTED",
+      message: "A resposta atingiu o limite de saída. Retorne somente o JSON final, sem raciocínio, próximo aos mínimos permitidos e preservando todos os requisitos editoriais.",
+    }],
+  };
+}
+
 export function ollamaGenerationRequest(input) {
+  const profileRequirements = requirements(input.editorialProfile);
+  if (input.localEngineNumThreads !== null && input.localEngineNumThreads !== undefined &&
+      (!Number.isSafeInteger(input.localEngineNumThreads) ||
+       input.localEngineNumThreads < 1 || input.localEngineNumThreads > 64)) {
+    throw new TypeError("localEngineNumThreads must be an integer between 1 and 64.");
+  }
   return {
     model: input.profile.model,
     stream: true,
-    format: candidateSchema(input.editorialProfile),
+    // Ollama's JSON-schema grammar can terminate complex constrained output
+    // with HTTP 500 before the worker can validate or repair the candidate.
+    // JSON mode keeps transport portable; the signed editorial policy remains
+    // authoritative in buildDraft/validateEditorialDraft below.
+    format: "json",
     options: {
       temperature: input.profile.temperature,
       num_ctx: input.profile.contextWindow,
+      // Large Darwin prefill batches can make Ollama fail with HTTP 500 under
+      // memory pressure before the first progress chunk. Keep the signed
+      // context/output budgets intact while lowering only the local batch.
+      ...(input.platform === "darwin" ? { num_batch: 256 } : {}),
+      ...(input.localEngineNumThreads === null || input.localEngineNumThreads === undefined
+        ? {}
+        : { num_thread: input.localEngineNumThreads }),
       // The immutable generation plan owns the exact output budget. Never
       // infer, increase, or renegotiate it locally.
       num_predict: input.generationPlan.maxOutputTokens,
@@ -168,8 +213,28 @@ export function ollamaGenerationRequest(input) {
         content: JSON.stringify({
           operation: input.attempt === 1
             ? "generate-editorial-content"
-            : "repair-editorial-content",
-          requirements: requirements(input.editorialProfile),
+            : input.previousCandidate
+              ? "repair-editorial-content"
+              : "regenerate-editorial-content",
+          requiredResponseKeys: ["title", "excerpt", "paragraphs"],
+          fieldRequirements: {
+            title: "string final autoral em português brasileiro, com pelo menos 8 caracteres",
+            excerpt: "string final autoral em português brasileiro, com pelo menos 20 caracteres",
+            paragraphs: {
+              type: "array de strings finais autorais",
+              exactCount: profileRequirements.paragraphs,
+              characterRange: profileRequirements.characters ?? null,
+              wordRange: profileRequirements.words ?? null,
+              minimumWordsPerParagraph: profileRequirements.minimumWordsPerParagraph ?? null,
+            },
+          },
+          responseRules: [
+            "retorne o objeto de conteúdo, não um schema ou objeto wrapper",
+            "paragraphs deve ser um array de strings com a contagem exigida",
+            "não renomeie title, excerpt ou paragraphs",
+            "os valores devem ser o conteúdo editorial final, nunca descrições, instruções ou placeholders",
+          ],
+          requirements: profileRequirements,
           input: input.input,
           validationFeedback: input.lastValidation?.errors ?? [],
           previousCandidate: input.previousCandidate,
@@ -177,6 +242,10 @@ export function ollamaGenerationRequest(input) {
       },
     ],
   };
+}
+
+export function modelEvidenceExcerpt(value) {
+  return String(value).slice(0, MAX_MODEL_EVIDENCE_CHARACTERS).trim();
 }
 
 /**
@@ -202,6 +271,7 @@ export async function requestOllamaNdjson(urlValue, requestBody, options) {
   let received = 0;
   let content = "";
   let finalChunk = null;
+  let terminalSeen = false;
   try {
     const signal = externalSignal
       ? AbortSignal.any([controller.signal, externalSignal])
@@ -233,6 +303,12 @@ export async function requestOllamaNdjson(urlValue, requestBody, options) {
     const consumeLine = (line) => {
       const trimmed = line.trim();
       if (!trimmed) return;
+      if (terminalSeen) {
+        throw new WorkerKitError(
+          "local-generator-response-invalid",
+          "Ollama returned data after the terminal streaming event.",
+        );
+      }
       const chunk = JSON.parse(trimmed);
       if (typeof chunk?.error === "string" && chunk.error.trim()) {
         throw new WorkerKitError("local-generator-error", "Ollama returned an inference error.");
@@ -249,7 +325,10 @@ export async function requestOllamaNdjson(urlValue, requestBody, options) {
         );
         options.onContent?.(bytes);
       }
-      if (chunk?.done === true) finalChunk = chunk;
+      if (chunk?.done === true) {
+        terminalSeen = true;
+        finalChunk = chunk;
+      }
     };
     while (true) {
       const { done, value } = await reader.read();
@@ -273,12 +352,35 @@ export async function requestOllamaNdjson(urlValue, requestBody, options) {
       generationPlan.finalizationGraceSeconds,
       "generator-finalization-stalled",
     );
-    if (
-      !content.trim() ||
-      finalChunk?.done !== true ||
-      finalChunk?.done_reason !== "stop"
-    ) {
-      throw new WorkerKitError("generator-output-incomplete", "Ollama did not complete the response.");
+    if (finalChunk?.done !== true) {
+      throw new WorkerKitError(
+        "generator-output-terminal-missing",
+        "Ollama ended the stream without a terminal event.",
+      );
+    }
+    if (finalChunk.done_reason === "length") {
+      throw new WorkerKitError(
+        "generator-output-budget-exhausted",
+        "Ollama reached the attested output budget before completing the response.",
+      );
+    }
+    if (typeof finalChunk.done_reason !== "string" || !finalChunk.done_reason.trim()) {
+      throw new WorkerKitError(
+        "generator-output-terminal-reason-missing",
+        "Ollama ended the stream without an accepted terminal reason.",
+      );
+    }
+    if (finalChunk.done_reason !== "stop") {
+      throw new WorkerKitError(
+        "generator-output-terminal-reason-unknown",
+        "Ollama ended the stream with an unsupported terminal reason.",
+      );
+    }
+    if (!content.trim()) {
+      throw new WorkerKitError(
+        "generator-output-empty",
+        "Ollama completed the stream without generated content.",
+      );
     }
     const candidate = JSON.parse(content);
     clearTimeout(watchdog);
@@ -303,7 +405,7 @@ export async function requestOllamaNdjson(urlValue, requestBody, options) {
             : "generator-stalled");
       throw new WorkerKitError(code, "The local generator stopped demonstrating progress.");
     }
-    throw error;
+    throw normalizeGeneratorError(error);
   } finally {
     clearTimeout(watchdog);
   }
@@ -370,33 +472,6 @@ function buildDraft(input) {
   };
 }
 
-function candidateSchema(profile) {
-  const constraints = profile === "EDITORIAL_LONG_FORM"
-    ? { minimum: 650, maximum: 1100, paragraphs: 5, excerptMaximum: 360 }
-    : profile === "EDITORIAL_COMPACT"
-      ? { minimum: 450, maximum: 900, paragraphs: 2, excerptMaximum: 360 }
-      : profile === "EDITORIAL_MINIMUM"
-        ? { minimum: 320, maximum: 800, paragraphs: 1, excerptMaximum: 360 }
-        : profile === "EVENT_LISTING"
-          ? { minimum: 220, maximum: 500, paragraphs: 1, excerptMaximum: 500 }
-          : { minimum: 240, maximum: 480, paragraphs: 1, excerptMaximum: 480 };
-  return {
-    type: "object",
-    required: ["title", "excerpt", "paragraphs"],
-    properties: {
-      title: { type: "string", minLength: 8, maxLength: 160 },
-      excerpt: { type: "string", minLength: 20, maxLength: constraints.excerptMaximum },
-      paragraphs: {
-        type: "array",
-        minItems: constraints.paragraphs,
-        maxItems: constraints.paragraphs,
-        items: { type: "string", minLength: constraints.minimum, maxLength: constraints.maximum },
-      },
-    },
-    additionalProperties: false,
-  };
-}
-
 function requirements(profile) {
   const shared = {
     citations: "cada parágrafo deve terminar com [S1]",
@@ -415,9 +490,16 @@ function requirements(profile) {
   return { ...shared, paragraphs: 5, minimumBodyCharacters: 3200, minimumBodyWords: 450 };
 }
 
-function normalizeParagraphs(value, profile) {
+export function normalizeParagraphs(value, profile) {
   if (!Array.isArray(value)) return [];
-  return value.map((raw, index) => {
+  const normalizedValue = new Set([
+    "EDITORIAL_MINIMUM",
+    "CATALOG_SUMMARY",
+    "EVENT_LISTING",
+  ]).has(profile)
+    ? coalesceSingleParagraphCandidate(value)
+    : value;
+  return normalizedValue.map((raw, index) => {
     const requested = raw && typeof raw === "object" ? raw : {};
     const rawText = typeof raw === "string" ? raw : requested.text;
     const text = fitGeneratedParagraphToProfile(ensureCitation(sanitize(rawText)), profile);
@@ -438,6 +520,16 @@ function normalizeParagraphs(value, profile) {
       }],
     };
   });
+}
+
+function coalesceSingleParagraphCandidate(value) {
+  if (value.length <= 1) return value;
+  const text = value
+    .map((raw) => typeof raw === "string" ? raw : raw?.text)
+    .map((raw) => sanitize(raw).replace(/\s*\[S1\][.!?]?\s*$/i, "").trim())
+    .filter(Boolean)
+    .join(" ");
+  return text ? [text] : [];
 }
 
 export async function fetchSourceEvidence(entry, fetcher, options = {}) {
@@ -757,7 +849,19 @@ function normalizeGeneratorError(error) {
   if (error?.code === "generator-stalled") return error;
   if (error?.code === "generator-first-progress-timeout") return error;
   if (error?.code === "generator-finalization-stalled") return error;
-  return error instanceof Error ? error : new Error("worker-generation-failed");
+  if (error instanceof WorkerKitError) return error;
+  if (error instanceof SyntaxError) {
+    return new WorkerKitError(
+      "local-generator-response-invalid",
+      "Ollama returned an invalid streaming response.",
+      { cause: error },
+    );
+  }
+  return new WorkerKitError(
+    "local-generator-transport-failed",
+    "The local generator transport failed.",
+    error instanceof Error ? { cause: error } : {},
+  );
 }
 
 function boundedRepairCandidate(candidate) {

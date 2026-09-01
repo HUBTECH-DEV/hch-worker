@@ -19,6 +19,7 @@ import {
   WorkerGeneratorError,
   generateEditorialDraftFromAssignment,
   loadInstalledEditorialRuntime,
+  normalizeParagraphs,
 } from "../editorial-generator.mjs";
 import { validateEditorialDraft } from "../../../../lib/editorial-policy.mjs";
 import { canonicalizeJson } from "../../../../lib/editorial-worker-signatures.mjs";
@@ -32,6 +33,46 @@ const model = "qwen2.5:1.5b-instruct";
 const modelDigest = "65ec06548149b04c096a120e4a6da9d4017ea809c91734ea5631e89f96ddc57b";
 const manifestHash = "a".repeat(64);
 const pipelineVersion = "1.2.0";
+
+test("single-paragraph profiles coalesce model spillover without inventing content", () => {
+  const first = Array.from({ length: 25 }, (_, index) => `alfa${index}`).join(" ");
+  const second = Array.from({ length: 25 }, (_, index) => `beta${index}`).join(" ");
+  const input = [`${first} [S1]`, `${second} [S1]`];
+
+  for (const profile of ["EDITORIAL_MINIMUM", "CATALOG_SUMMARY", "EVENT_LISTING"]) {
+    const [paragraph, ...extras] = normalizeParagraphs(input, profile);
+    assert.equal(extras.length, 0);
+    assert.match(paragraph.text, /\[S1\]$/);
+    assert.equal((paragraph.text.match(/\[S1\]/g) ?? []).length, 1);
+    assert.ok(paragraph.text.indexOf("alfa0") < paragraph.text.indexOf("beta0"));
+    assert.match(paragraph.text, /beta24/);
+  }
+  const [structured] = normalizeParagraphs([{
+    paragraphId: "source-a",
+    function: "analysis-limitations",
+    text: `${first} [S1]`,
+    claims: [{ claimId: "analysis-a", text: "Análise A", claimType: "analysis", sourceIds: [] }],
+  }, {
+    paragraphId: "source-b",
+    function: "conclusion-access",
+    text: `${second} [S1]`,
+    claims: [{ claimId: "source-b", text: "Fato B", claimType: "source-statement", sourceIds: ["S1"] }],
+  }], "EDITORIAL_MINIMUM");
+  assert.equal(structured.paragraphId, "P1");
+  assert.equal(structured.function, "supporting");
+  assert.deepEqual(structured.claims.map((claim) => claim.claimType), ["source-statement"]);
+  assert.equal(structured.claims.some((claim) => claim.claimId === "source-b"), false);
+  const [truncated] = normalizeParagraphs([{
+    text: `${Array.from({ length: 100 }, () => "alfa").join(" ")} [S1]`,
+    claims: [{ claimId: "claim-a", text: "A", claimType: "analysis", sourceIds: [] }],
+  }, {
+    text: `${Array.from({ length: 100 }, () => "beta").join(" ")} [S1]`,
+    claims: [{ claimId: "claim-b", text: "B", claimType: "source-statement", sourceIds: ["S1"] }],
+  }], "EDITORIAL_MINIMUM");
+  assert.equal(truncated.wordCount, 115);
+  assert.deepEqual(truncated.claims.map((claim) => claim.claimId), ["P1C1"]);
+  assert.deepEqual(normalizeParagraphs(["", { text: " " }], "EDITORIAL_MINIMUM"), []);
+});
 
 test("local Ollama generator emits the canonical pending-review draft", async (context) => {
   const fixture = runtimeFixture(context);

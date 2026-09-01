@@ -22,6 +22,7 @@ import { validateOrchestrationSnapshot } from "./node-heartbeat.mjs";
 import {
   completeOperation,
   enterStandby,
+  KIT_VERSION,
   operationRequestId,
   recordDuration,
   recordNetwork,
@@ -97,20 +98,33 @@ export async function executeWorkerCycle(config, options = {}) {
         applied,
         { ...options, trustState },
       );
+      const verifiedTrustState = trustStateFromManifestVerification(current);
       if (
         trustState.delegationSequence !== current.delegationSequence ||
-        trustState.delegationHash !== current.delegationHash
+        trustState.delegationHash !== current.delegationHash ||
+        trustState.manifestSequence !== current.manifest.sequence ||
+        trustState.manifestHash !== current.manifest.hash ||
+        trustState.policyHash !== current.manifest.editorial.policyHash
       ) {
         await atomicWriteJson(
           stateRoot,
           "trust-state.json",
-          trustStateFromManifestVerification(current),
+          verifiedTrustState,
         );
       }
       if (
         current.manifest.hash !== applied.manifestHash ||
         current.manifest.sequence !== applied.manifestSequence
       ) {
+        await atomicWriteJson(stateRoot, "ready.json", {
+          schemaVersion: 1,
+          ready: false,
+          nodeId: config.nodeId,
+          keyId: config.keyId,
+          targetManifestHash: current.manifest.hash,
+          invalidatedAt: new Date().toISOString(),
+          reason: "manifest-update-required",
+        });
         throw new WorkerKitError(
           "update-required",
           "The canonical manifest changed; bootstrap is required before execute.",
@@ -342,6 +356,8 @@ function assertReadyGate(config, applied, ready, status) {
     ready.nodeId !== config.nodeId ||
     ready.keyId !== config.keyId ||
     ready.manifestHash !== applied.manifestHash ||
+    ready.workerRuntimeVersion !== KIT_VERSION ||
+    applied.workerRuntimeVersion !== KIT_VERSION ||
     ready.manifestSequence !== applied.manifestSequence ||
     ready.contentContractHash !== applied.contentContractHash ||
     ready.policyHash !== applied.policyHash ||

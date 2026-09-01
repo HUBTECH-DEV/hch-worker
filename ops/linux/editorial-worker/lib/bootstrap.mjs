@@ -26,9 +26,10 @@ import {
   stageApplyAndSelfTest,
 } from "./apply.mjs";
 import {
+  KIT_VERSION,
+  assertWorkerRuntimeVersion,
   completeOperation,
   enterStandby,
-  KIT_VERSION,
   operationRequestId,
   recordDuration,
   recordNetwork,
@@ -60,6 +61,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
     const startedAt = Date.now();
     const cpuStarted = process.cpuUsage();
     const traffic = createTrafficCounter();
+    const preserveLifecycle = options.preserveLifecycle === true;
     const activeAssignments = Number.isSafeInteger(options.activeAssignments) &&
       options.activeAssignments > 0 ? options.activeAssignments : 0;
     const [previousApplied, previousReady] = await Promise.all([
@@ -68,20 +70,25 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
     ]);
     let preserveReadyOnFailure = false;
     let contentUpdateDraining = false;
-    await updateStatus(stateRoot, config, {
-      state: activeAssignments > 0 ? "processing" : "updating",
-      running: activeAssignments > 0,
-      standby: false,
-      ready: readyIsUsable(previousReady, options.now),
-      readyUntil: previousReady?.readyUntil ?? null,
-      manifestSequence: previousReady?.manifestSequence ?? null,
-      manifestHash: previousReady?.manifestHash ?? null,
-      contentContractHash: previousReady?.contentContractHash ?? null,
-      code: "bootstrap-started",
-    });
+    const preserveOperationalState = preserveLifecycle || activeAssignments > 0;
+    await updateStatus(stateRoot, config, preserveOperationalState
+      ? {
+          ready: readyIsUsable(previousReady, options.now),
+          readyUntil: previousReady?.readyUntil ?? null,
+          manifestSequence: previousReady?.manifestSequence ?? null,
+          manifestHash: previousReady?.manifestHash ?? null,
+          contentContractHash: previousReady?.contentContractHash ?? null,
+        }
+      : {
+          state: "updating",
+          running: false,
+          standby: false,
+          ready: false,
+          code: "bootstrap-started",
+        });
     await updateMetrics(stateRoot, config, (metrics) => {
       metrics.updates.attempts += 1;
-      leaveStandby(metrics);
+      if (!preserveOperationalState) leaveStandby(metrics);
     });
     try {
       const identity = await ensureWorkerIdentity(config, stateRoot);
@@ -124,7 +131,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         traffic,
       });
       await updateStatus(stateRoot, config, {
-        state: "updating",
+        ...(!preserveLifecycle ? { state: "updating" } : {}),
         connection: {
           api: "connected",
           tls: "verified",
@@ -195,6 +202,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
           );
         }
       }
+      assertWorkerRuntimeVersion(published.manifest);
 
       const bootstrapBody = {
         nodeId: config.nodeId,
@@ -230,6 +238,20 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       );
       pinnedTrustState = trustStateFromManifestVerification(sessionManifest);
       await atomicWriteJson(stateRoot, "trust-state.json", pinnedTrustState);
+      if (previousApplied?.manifestHash !== sessionManifest.manifest.hash &&
+          contentChanged) {
+        await atomicWriteJson(stateRoot, "ready.json", {
+          schemaVersion: 1,
+          ready: false,
+          nodeId: config.nodeId,
+          keyId: config.keyId,
+          targetManifestHash: sessionManifest.manifest.hash,
+          targetContentContractHash: sessionManifest.contentContractHash,
+          invalidatedAt: new Date().toISOString(),
+          reason: "manifest-content-update-required",
+        });
+      }
+      assertWorkerRuntimeVersion(sessionManifest.manifest);
       if (sessionManifest.manifest.hash !== published.manifest.hash) {
         throw new WorkerKitError(
           "bootstrap-manifest-changed",
@@ -252,20 +274,15 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       );
 
       await updateStatus(stateRoot, config, {
-        state: !contentChanged && activeAssignments > 0 ? "processing" : "updating",
-        running: !contentChanged && activeAssignments > 0,
-        standby: false,
-        ready: !contentChanged && readyIsUsable(previousReady, options.now),
-        manifestSequence: !contentChanged && activeAssignments > 0
-          ? previousReady?.manifestSequence
-          : published.manifest.sequence,
-        manifestHash: !contentChanged && activeAssignments > 0
-          ? previousReady?.manifestHash
-          : published.manifest.hash,
-        contentContractHash: !contentChanged && activeAssignments > 0
-          ? previousReady?.contentContractHash
-          : published.contentContractHash,
-        code: contentChanged ? "applying-manifest" : "refreshing-compatible-manifest",
+        ...(!preserveOperationalState ? {
+          state: "updating",
+          running: false,
+          standby: false,
+          code: contentChanged ? "applying-manifest" : "refreshing-compatible-manifest",
+        } : {}),
+        manifestSequence: published.manifest.sequence,
+        manifestHash: published.manifest.hash,
+        contentContractHash: published.contentContractHash,
         connection: {
           api: "connected",
           tls: "verified",
@@ -373,6 +390,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         provider: applied.runtimeProfile.provider,
         engineAdapter: applied.runtimeProfile.engineAdapter,
         engineAdapterVersion: applied.runtimeProfile.engineAdapterVersion,
+        workerRuntimeVersion: KIT_VERSION,
         runtimeProfileHash: applied.runtimeProfile.runtimeProfileHash,
         capacityPolicyHash: await capacityPolicyHash(published.manifest.capacityPolicy),
         adaptiveWorkPolicyHash: signedAdaptiveWorkPolicyHash,
@@ -388,15 +406,17 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       };
       await atomicWriteJson(stateRoot, "ready.json", readyState);
       await updateStatus(stateRoot, config, {
-        state: requestedCapacity === 0 ? "draining" : "standby",
-        running: false,
-        standby: true,
+        ...(!preserveOperationalState ? {
+          state: requestedCapacity === 0 ? "draining" : "standby",
+          running: false,
+          standby: true,
+          code: requestedCapacity === 0 ? "drain-requested" : "ready",
+        } : {}),
         ready: true,
         readyUntil: readyState.readyUntil,
         manifestSequence: readyState.manifestSequence,
         manifestHash: readyState.manifestHash,
         contentContractHash: readyState.contentContractHash,
-        code: requestedCapacity === 0 ? "drain-requested" : "ready",
         trust: {
           status: "verified",
           rootKeyId: acceptedTrust.rootKeyId,
@@ -413,7 +433,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         metrics.updates.succeeded += 1;
         recordNetwork(metrics, traffic);
         recordDuration(metrics, Date.now() - startedAt, { cpuStarted });
-        enterStandby(metrics);
+        if (!preserveOperationalState) enterStandby(metrics);
       });
       return {
         nodeId: config.nodeId,
@@ -421,6 +441,7 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         state: requestedCapacity === 0 ? "draining" : "ready",
         manifestSequence: readyState.manifestSequence,
         manifestHash: readyState.manifestHash,
+        workerRuntimeVersion: readyState.workerRuntimeVersion,
         readyUntil: readyState.readyUntil,
         workStarted: false,
       };
@@ -436,11 +457,12 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
       const compatibleRefreshDeferred = preserveReadyOnFailure &&
         readyIsUsable(previousReady, options.now);
       await updateStatus(stateRoot, config, {
-        state: compatibleRefreshDeferred
-          ? (activeAssignments > 0 ? "processing" : "standby")
-          : "update-failed",
-        running: compatibleRefreshDeferred && activeAssignments > 0,
-        standby: compatibleRefreshDeferred && activeAssignments === 0,
+        ...(!preserveOperationalState ? {
+          state: compatibleRefreshDeferred ? "standby" : "update-failed",
+          running: false,
+          standby: compatibleRefreshDeferred,
+          code: compatibleRefreshDeferred ? "compatible-manifest-refresh-deferred" : code,
+        } : {}),
         ready: compatibleRefreshDeferred,
         readyUntil: compatibleRefreshDeferred ? previousReady.readyUntil : null,
         manifestSequence: compatibleRefreshDeferred
@@ -450,7 +472,6 @@ export async function bootstrapWorkerLocked(config, stateRoot, options = {}) {
         contentContractHash: compatibleRefreshDeferred
           ? previousReady.contentContractHash
           : null,
-        code: compatibleRefreshDeferred ? "compatible-manifest-refresh-deferred" : code,
         connection: {
           api: "error",
           ...(code === "network-request-failed" ? { tls: "error" } : {}),

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
   mkdtemp,
@@ -47,21 +48,93 @@ test("VPS timer uses the portable claim lifecycle", async () => {
   assert.match(source, /HCH_EDITORIAL_WORKER_ENTRYPOINT\}\" run-one/);
   assert.doesNotMatch(source, /HCH_EDITORIAL_WORKER_ENTRYPOINT\}\" execute/);
 });
+
+test("VPS supervisor uses the installed pinned Node runtime", async () => {
+  const source = await readFile(
+    new URL("../../../systemd/hch-editorial-worker.service", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /ExecStart=\/usr\/local\/libexec\/hch-node .*worker\.mjs supervise/);
+  assert.doesNotMatch(source, /ExecStart=\/usr\/bin\/node/);
+  assert.match(source, /^PrivateDevices=true$/m);
+});
+
+test("Hostinger GPU preflight rejects SSH options and gates the real dashboard contract", async () => {
+  const scriptUrl = new URL(
+    "../../../../scripts/check-hostinger-gpu-worker.sh",
+    import.meta.url,
+  );
+  const source = await readFile(scriptUrl, "utf8");
+  assert.match(source, /-\*\|\*\[!A-Za-z0-9\._-\]\*\|''\)/);
+  assert.match(source, /\.security\.ed25519Chain\.status == "valid"/);
+  assert.match(source, /\.resources\.gpu\.status == "available"/);
+  assert.match(source, /listener_scope=non-loopback/);
+  assert.match(source, /listener_%s=loopback/);
+  assert.match(source, /\.adaptiveWork\.activeWork \| type == "array"/);
+  assert.match(source, /\.operatorControl\.drainRequested == true/);
+  assert.match(source, /printf 'preflight=blocked\\n'/);
+  assert.match(source, /exit 1/);
+  assert.doesNotMatch(source, /\.metrics\.gpu/);
+
+  const refused = spawnSync("/bin/bash", [scriptUrl.pathname], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HCH_GPU_SSH_ALIAS: "-oProxyCommand=forbidden",
+    },
+  });
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /invalid SSH alias/);
+});
+
+test("macOS installer retires conflicting legacy agents and preserves Ollama", async () => {
+  const source = await readFile(
+    new URL("../../../macos/editorial-worker/install-launch-agents.sh", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /online\.hubtech\.hch\.editorial-worker\.cycle\.plist\.in/);
+  for (const label of [
+    "online.hubtech.hch.editorial-worker.bootstrap",
+    "online.hubtech.hch.editorial-worker.heartbeat",
+    "com.hubtech.hch-orchestrator-listener",
+    "com.hubtech.hch-mac-worker",
+    "com.hubtech.hch-worker-dashboard",
+  ]) {
+    assert.match(source, new RegExp(label.replaceAll(".", "\\.")));
+  }
+  assert.doesNotMatch(source, /legacy_label=.*com\.hubtech\.hch-orchestrator-ollama/);
+});
+
+test("macOS cycle is not deferred as a background launchd process", async () => {
+  const source = await readFile(
+    new URL(
+      "../../../macos/editorial-worker/launchd/online.hubtech.hch.editorial-worker.cycle.plist.in",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /<key>ProcessType<\/key>/);
+});
 import {
   bootstrapWorker,
+  bootstrapWorkerLocked,
   resolveEnrollmentToken,
 } from "../lib/bootstrap.mjs";
 import { isLegacyContentContractBackfill } from "../lib/apply.mjs";
 import { executeWorkerCycle } from "../lib/execute.mjs";
-import { nodeHeartbeat } from "../lib/node-heartbeat.mjs";
+import { gpuActiveSecondsDelta, nodeHeartbeat } from "../lib/node-heartbeat.mjs";
 import {
   createRuntimeProfileFromManifest,
   verifyRuntimeProfile,
 } from "../lib/runtime-profile.mjs";
 import {
+  KIT_VERSION,
+  assertWorkerRuntimeVersion,
   completeOperation,
   operationRequestId,
+  updateMetrics,
 } from "../lib/local-state.mjs";
+import { parseDashboardMetrics } from "../../../worker-dashboard/lib/hch-worker-adapter.mjs";
 
 test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never executes work", async (t) => {
   const fixture = await createFixture(t);
@@ -98,6 +171,7 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
   );
   assert.equal(applied.manifestSequence, fixture.manifest.sequence);
   assert.equal(applied.contentContractHash, expectedContentContractHash);
+  assert.equal(applied.workerRuntimeVersion, KIT_VERSION);
   assert.deepEqual(applied.runtimeProfile, expectedRuntimeProfile);
   assert.equal(applied.runtimeProfileHash, expectedRuntimeProfile.runtimeProfileHash);
   assert.equal(applied.provider, fixture.manifest.engine.provider);
@@ -108,8 +182,10 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
   );
   assert.equal(ready.ready, true);
   assert.equal(ready.contentContractHash, expectedContentContractHash);
+  assert.equal(ready.workerRuntimeVersion, KIT_VERSION);
   assert.equal(ready.runtimeProfileHash, expectedRuntimeProfile.runtimeProfileHash);
   assert.equal(status.state, "standby");
+  assert.equal(status.kitVersion, KIT_VERSION);
   assert.equal(status.ready, true);
   assert.equal(status.connection.ed25519, true);
   assert.equal(status.transport.tlsStatus, "verified");
@@ -287,6 +363,10 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
     fixture.control.attestations[0].contentContractHash,
     expectedContentContractHash,
   );
+  assert.equal(
+    fixture.control.attestations[0].workerRuntimeVersion,
+    KIT_VERSION,
+  );
   assert.deepEqual(Object.keys(fixture.control.attestations[0]).sort(), [
     "adaptiveWorkPolicyHash",
     "challenge",
@@ -331,6 +411,55 @@ test("bootstrap enrolls, verifies trust/artifacts/model, attests, and never exec
   }
 });
 
+test("readiness renewal does not overwrite an active assignment lifecycle", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "administrative-test-value",
+    fetchImpl: fixture.control.fetch,
+  });
+  const batch = {
+    batchId: "batch-active",
+    assignmentIds: ["assignment-active"],
+    jobs: 1,
+    completedJobs: 0,
+    startedAt: "2026-08-22T19:40:00.000Z",
+  };
+  const status = await jsonFile(fixture.stateDirectory, "status.json");
+  await writeFile(join(fixture.stateDirectory, "status.json"), JSON.stringify({
+    ...status,
+    state: "processing",
+    running: true,
+    standby: false,
+    currentBatch: batch,
+    code: "assignment-processing",
+  }));
+  const metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  await writeFile(join(fixture.stateDirectory, "metrics.json"), JSON.stringify({
+    ...metrics,
+    jobs: { ...metrics.jobs, running: 1 },
+    standby: { ...metrics.standby, active: false, since: null },
+    currentBatch: batch,
+  }));
+
+  await bootstrapWorkerLocked(fixture.config, fixture.stateDirectory, {
+    fetchImpl: fixture.control.fetch,
+    preserveLifecycle: true,
+  });
+
+  const renewedStatus = await jsonFile(fixture.stateDirectory, "status.json");
+  const renewedMetrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(renewedStatus.state, "processing");
+  assert.equal(renewedStatus.running, true);
+  assert.equal(renewedStatus.standby, false);
+  assert.deepEqual(renewedStatus.currentBatch, batch);
+  assert.equal(renewedStatus.code, "assignment-processing");
+  assert.equal(renewedStatus.ready, true);
+  assert.equal(renewedMetrics.jobs.running, 1);
+  assert.equal(renewedMetrics.standby.active, false);
+  assert.deepEqual(renewedMetrics.currentBatch, batch);
+});
+
 test("anti-rollback rejects an older signed manifest before bootstrap or artifacts", async (t) => {
   const fixture = await createFixture(t);
   await bootstrapWorker(fixture.config, {
@@ -368,7 +497,6 @@ test("a metadata-only manifest refresh preserves content and skips artifact appl
     sequence: fixture.manifest.sequence + 1,
     previousManifestHash: fixture.manifest.hash,
     releaseId: "hch-editorial-test.3-metadata",
-    runtime: { ...fixture.manifest.runtime, workerVersion: "2.0.1" },
     capacityPolicy: {
       ...fixture.manifest.capacityPolicy,
       defaultNodeCeiling: fixture.manifest.capacityPolicy.defaultNodeCeiling + 1,
@@ -501,6 +629,78 @@ test("an expired delegation cannot authorize a different unapplied manifest", as
   await assert.rejects(
     bootstrapWorker(fixture.config, { fetchImpl: fixture.control.fetch }),
     (error) => error?.code === "manifest-expired-update-refused",
+  );
+});
+
+test("manifest requiring 3.1.0 rejects an older executable kit", async (t) => {
+  const fixture = await createFixture(t);
+  assert.equal(fixture.manifest.runtime.workerVersion, KIT_VERSION);
+  assert.throws(
+    () => assertWorkerRuntimeVersion(fixture.manifest, "3.0.0"),
+    (error) => error?.code === "worker-runtime-version-incompatible",
+  );
+});
+
+test("bootstrap rejects a signed manifest for another worker runtime before apply", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.control.replaceManifest({
+    runtime: {
+      ...fixture.manifest.runtime,
+      workerVersion: "3.0.0",
+    },
+  });
+  const before = fixture.control.paths.length;
+  await assert.rejects(
+    bootstrapWorker(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "worker-runtime-version-incompatible",
+  );
+  assert.deepEqual(
+    fixture.control.paths.slice(before),
+    ["/api/editorial/orchestrator/manifest"],
+  );
+  assert.equal(fixture.control.attestations.length, 0);
+});
+
+test("a higher delegation is pinned before an incompatible runtime is rejected", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  const previousReady = await jsonFile(fixture.stateDirectory, "ready.json");
+  const nextDelegation = await fixture.control.replaceDelegation({ sequence: 3 });
+  await fixture.control.replaceManifest({
+    sequence: fixture.manifest.sequence + 1,
+    previousManifestHash: fixture.manifest.hash,
+    runtime: {
+      ...fixture.manifest.runtime,
+      workerVersion: "3.0.0",
+    },
+  });
+  await assert.rejects(
+    bootstrapWorker(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "worker-runtime-version-incompatible",
+  );
+  const preservedReady = await jsonFile(fixture.stateDirectory, "ready.json");
+  assert.equal(preservedReady.ready, true);
+  assert.equal(preservedReady.manifestHash, previousReady.manifestHash);
+  assert.equal("reason" in preservedReady, false);
+  const pinnedTrust = await jsonFile(fixture.stateDirectory, "trust-state.json");
+  assert.equal(pinnedTrust.delegationSequence, 3);
+  assert.equal(
+    pinnedTrust.delegationHash,
+    await sha256Hex(canonicalizeJson(nextDelegation)),
+  );
+  await fixture.control.replaceDelegation({ sequence: 2 });
+  const beforeReplay = fixture.control.paths.length;
+  await assert.rejects(
+    bootstrapWorker(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "delegation-rollback-refused",
+  );
+  assert.deepEqual(
+    fixture.control.paths.slice(beforeReplay),
+    ["/api/editorial/orchestrator/manifest"],
   );
 });
 
@@ -764,6 +964,105 @@ test("Darwin omits misleading generic pressure unless availability is sampled", 
     totalMemoryBytes: 100,
     availableMemoryBytes: 40,
   }), { cpuPercent: 50, memoryPercent: 60 });
+  assert.deepEqual(sampleCapacityPressure({
+    platform: "linux",
+    totalMemoryBytes: 100,
+    availableMemoryBytes: 40,
+  }), { memoryPercent: 60 });
+  assert.deepEqual(sampleCapacityPressure({
+    platform: "linux",
+    cpuPercent: 12.345,
+    totalMemoryBytes: 100,
+    availableMemoryBytes: 40,
+  }), { cpuPercent: 12.35, memoryPercent: 60 });
+});
+
+test("node heartbeat reports durable GPU telemetry without inflating active time", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  await setLocalParallelism(fixture.config, 0);
+  const startedAt = Date.now();
+  const available = (utilizationPercent) => ({
+    available: true,
+    status: "available",
+    utilizationPercent,
+    errorCode: null,
+  });
+
+  await nodeHeartbeat(fixture.config, {
+    fetchImpl: fixture.control.fetch,
+    gpuSample: available(42),
+    now: new Date(startedAt),
+  });
+  const heartbeatRequest = fixture.control.requests.findLast(
+    (request) => request.path === "/api/editorial/orchestrator/nodes/heartbeat",
+  );
+  assert.equal(heartbeatRequest.body.pressure.gpuPercent, 42);
+  let metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(metrics.resources.gpu.status, "available");
+  assert.equal(metrics.resources.gpu.sampleCount, 1);
+  assert.equal(metrics.resources.gpu.totalActiveSeconds, 0);
+  assert.equal(parseDashboardMetrics(metrics).gpu.status, "available");
+
+  await Promise.all([
+    updateMetrics(fixture.stateDirectory, fixture.config, (value) => {
+      value.jobs.claimed += 1;
+    }),
+    updateMetrics(fixture.stateDirectory, fixture.config, (value) => {
+      value.batches.total += 1;
+    }),
+  ]);
+  metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(metrics.jobs.claimed, 1);
+  assert.equal(metrics.batches.total, 1);
+  assert.equal(metrics.resources.gpu.status, "available");
+
+  await nodeHeartbeat(fixture.config, {
+    fetchImpl: fixture.control.fetch,
+    gpuSample: {
+      available: false,
+      status: "unavailable",
+      utilizationPercent: null,
+      errorCode: "gpu-probe-failed",
+    },
+    now: new Date(startedAt + 60_000),
+  });
+  metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(metrics.resources.gpu.status, "unavailable");
+  assert.equal(metrics.resources.gpu.sampleCount, 1);
+  assert.equal(metrics.resources.gpu.averageUtilizationPercent, 42);
+
+  await nodeHeartbeat(fixture.config, {
+    fetchImpl: fixture.control.fetch,
+    gpuSample: available(50),
+    now: new Date(startedAt + 120_000),
+  });
+  metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(metrics.resources.gpu.status, "available");
+  assert.equal(metrics.resources.gpu.sampleCount, 2);
+  assert.equal(metrics.resources.gpu.averageUtilizationPercent, 46);
+  assert.equal(metrics.resources.gpu.totalActiveSeconds, 0);
+
+  await assert.rejects(nodeHeartbeat(fixture.config, {
+    fetchImpl: async () => { throw new Error("control plane offline"); },
+    gpuSample: available(25),
+    now: new Date(startedAt + 180_000),
+  }));
+  metrics = await jsonFile(fixture.stateDirectory, "metrics.json");
+  assert.equal(metrics.resources.gpu.status, "available");
+  assert.equal(metrics.resources.gpu.sampleCount, 3);
+  assert.equal(metrics.resources.gpu.averageUtilizationPercent, 39);
+  assert.equal(metrics.resources.gpu.totalActiveSeconds, 60);
+  assert.equal(parseDashboardMetrics(metrics).gpu.status, "available");
+
+  assert.equal(gpuActiveSecondsDelta(null, new Date(startedAt).toISOString()), 0);
+  assert.equal(gpuActiveSecondsDelta({
+    heartbeat: { lastAttemptAt: new Date(startedAt).toISOString() },
+  }, new Date(startedAt + 300_000).toISOString()), 120);
 });
 
 test("execute requires the current ready/applied gate and retries with one request id and new nonces", async (t) => {
@@ -861,6 +1160,54 @@ test("execute does not contact the API when ready.json diverges", async (t) => {
   assert.equal(fixture.control.paths.length, before);
 });
 
+test("execute pins and invalidates a newer manifest under the same delegation", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  await nodeHeartbeat(fixture.config, { fetchImpl: fixture.control.fetch });
+  const nextManifest = await fixture.control.replaceManifest({
+    sequence: fixture.manifest.sequence + 1,
+    previousManifestHash: fixture.manifest.hash,
+  });
+  await assert.rejects(
+    executeWorkerCycle(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "update-required",
+  );
+  const [ready, trustState, status] = await Promise.all([
+    jsonFile(fixture.stateDirectory, "ready.json"),
+    jsonFile(fixture.stateDirectory, "trust-state.json"),
+    jsonFile(fixture.stateDirectory, "status.json"),
+  ]);
+  assert.equal(ready.ready, false);
+  assert.equal(ready.targetManifestHash, nextManifest.hash);
+  assert.equal(trustState.manifestHash, nextManifest.hash);
+  assert.equal(trustState.manifestSequence, nextManifest.sequence);
+  assert.equal(status.ready, false);
+});
+
+test("execute does not contact the API when the persisted runtime version diverges", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  await nodeHeartbeat(fixture.config, { fetchImpl: fixture.control.fetch });
+  const readyPath = join(fixture.stateDirectory, "ready.json");
+  const ready = JSON.parse(await readFile(readyPath, "utf8"));
+  ready.workerRuntimeVersion = "3.0.0";
+  await writeFile(readyPath, JSON.stringify(ready), "utf8");
+  const before = fixture.control.paths.length;
+  await assert.rejects(
+    executeWorkerCycle(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "worker-not-ready",
+  );
+  assert.equal(fixture.control.paths.length, before);
+});
+
 test("execute refuses an installed engine identity outside RuntimeProfile v2", async (t) => {
   const fixture = await createFixture(t);
   await bootstrapWorker(fixture.config, {
@@ -919,6 +1266,12 @@ test("zero parallelism remains heartbeat-only and cannot receive work", async (t
     fetchImpl: fixture.control.fetch,
     pressure: { cpuPercent: 25, memoryPercent: 40 },
   });
+  const heartbeatStatus = await jsonFile(fixture.stateDirectory, "status.json");
+  assert.equal(heartbeatStatus.state, "draining");
+  assert.equal(heartbeatStatus.running, false);
+  assert.equal(heartbeatStatus.standby, true);
+  assert.equal(heartbeatStatus.currentBatch, null);
+  assert.equal(heartbeatStatus.code, "drain-requested");
   const executeCountBefore = fixture.control.paths.filter(
     (path) => path === "/api/editorial/orchestrator/execute",
   ).length;
@@ -966,6 +1319,43 @@ test("readiness drain heartbeat reports zero without changing operator paralleli
   assert.equal(control.acceptingClaims, true);
 });
 
+test("node heartbeat refreshes status without overwriting active work", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  const statusPath = join(fixture.stateDirectory, "status.json");
+  const status = await jsonFile(fixture.stateDirectory, "status.json");
+  const batch = {
+    batchId: "heartbeat-active",
+    assignmentIds: ["assignment-active"],
+    jobs: 1,
+    completedJobs: 0,
+    startedAt: "2026-08-22T20:00:00.000Z",
+  };
+  await writeFile(statusPath, JSON.stringify({
+    ...status,
+    observedAt: "2026-08-22T20:00:00.000Z",
+    state: "processing",
+    running: true,
+    standby: false,
+    currentBatch: batch,
+    code: "assignment-processing",
+  }));
+
+  await nodeHeartbeat(fixture.config, { fetchImpl: fixture.control.fetch });
+
+  const refreshed = await jsonFile(fixture.stateDirectory, "status.json");
+  assert.notEqual(refreshed.observedAt, "2026-08-22T20:00:00.000Z");
+  assert.equal(refreshed.state, "processing");
+  assert.equal(refreshed.running, true);
+  assert.equal(refreshed.standby, false);
+  assert.deepEqual(refreshed.currentBatch, batch);
+  assert.equal(refreshed.code, "assignment-processing");
+});
+
 test("bootstrap with requested capacity zero attests directly into drain", async (t) => {
   const fixture = await createFixture(t);
   const drainConfig = validateWorkerConfig({
@@ -1008,7 +1398,6 @@ test("local control CLI operations validate without claiming and stop during an 
   assert.equal(validation.valid, true);
   assert.equal(validation.reservationAttempted, false);
   assert.deepEqual(fixture.control.paths.slice(beforeValidate), ["/api/tags"]);
-
   const configuredParallelism = await setLocalParallelism(fixture.config, 8);
   assert.equal(configuredParallelism.requestedParallelism, 8);
   assert.equal(configuredParallelism.effectiveParallelism, 0);
@@ -1040,6 +1429,23 @@ test("local control CLI operations validate without claiming and stop during an 
   assert.equal(
     fixture.control.paths.slice(beforeValidate).includes("/api/editorial/orchestrator/execute"),
     false,
+  );
+});
+
+test("local validation rejects ready state from another worker runtime", async (t) => {
+  const fixture = await createFixture(t);
+  await bootstrapWorker(fixture.config, {
+    enroll: true,
+    enrollmentToken: "admin",
+    fetchImpl: fixture.control.fetch,
+  });
+  const readyPath = join(fixture.stateDirectory, "ready.json");
+  const ready = JSON.parse(await readFile(readyPath, "utf8"));
+  ready.workerRuntimeVersion = "3.0.0";
+  await writeFile(readyPath, JSON.stringify(ready), "utf8");
+  await assert.rejects(
+    validateLocalWorker(fixture.config, { fetchImpl: fixture.control.fetch }),
+    (error) => error?.code === "worker-local-validation-failed",
   );
 });
 
@@ -1126,6 +1532,7 @@ test("configuration enforces HTTPS control plane and loopback local engine", asy
   };
   const validated = validateWorkerConfig(base);
   assert.equal(validated.nodeId, "vps-primary");
+  assert.equal(validated.localEngineNumThreads, undefined);
   assert.equal(validated.requestTimeoutMilliseconds, 15_000);
   assert.equal(validated.executeRequestTimeoutMilliseconds, 45 * 60_000);
   assert.equal(
@@ -1157,6 +1564,16 @@ test("configuration enforces HTTPS control plane and loopback local engine", asy
   assert.throws(
     () => validateWorkerConfig({ ...base, enrollmentTokenEnvironment: "HCH/TOKEN" }),
     /environment variable name/,
+  );
+  for (const localEngineNumThreads of [0, -1, 1.5, "2", 65]) {
+    assert.throws(
+      () => validateWorkerConfig({ ...base, localEngineNumThreads }),
+      /localEngineNumThreads/,
+    );
+  }
+  assert.equal(
+    validateWorkerConfig({ ...base, localEngineNumThreads: 2 }).localEngineNumThreads,
+    2,
   );
 });
 
@@ -1237,6 +1654,7 @@ test("published config example and JSON schemas are valid JSON", async () => {
     await readFile(new URL("../config.example.json", import.meta.url), "utf8"),
   );
   assert.equal(validateWorkerConfig(example).nodeId, "vps-primary");
+  assert.equal(validateWorkerConfig(example).localEngineNumThreads, 1);
   const schemaDirectory = new URL("../schemas/", import.meta.url);
   const schemaNames = await readdir(schemaDirectory);
   assert.deepEqual(schemaNames.sort(), [
@@ -1334,7 +1752,7 @@ async function createFixture(t, behavior = {}) {
     updateMode: "mandatory",
     configurationHash: "configuration-test",
     runtime: {
-      workerVersion: "2.0.0",
+      workerVersion: KIT_VERSION,
       supportedPlatforms: ["linux", "macos", "windows"],
       executableUpdatesRequireRoot: true,
     },

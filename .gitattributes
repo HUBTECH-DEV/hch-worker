@@ -1,0 +1,12 @@
+* text=auto
+
+# Portable runtime and Unix service artifacts must remain executable in POSIX
+# worktrees even when commits are prepared from Windows.
+*.sh text eol=lf
+*.mjs text eol=lf
+*.plist text eol=lf
+*.plist.in text eol=lf
+
+# Windows service tooling is consumed by Windows PowerShell 5.1.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf

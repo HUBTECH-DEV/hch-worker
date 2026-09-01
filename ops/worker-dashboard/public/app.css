@@ -145,9 +145,111 @@ footer { color: var(--muted); }
 
 main { padding-block: 1.5rem 5rem; }
 
+.worker-view-nav {
+  position: sticky;
+  z-index: 5;
+  top: 0;
+  display: grid;
+  gap: .7rem;
+  padding: 1rem 0 .8rem;
+  background: color-mix(in srgb, var(--page) 92%, transparent);
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(16px);
+}
+
+.worker-view-tabs {
+  display: flex;
+  gap: .45rem;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.worker-view-tab {
+  flex: 0 0 auto;
+  min-height: 2.55rem;
+  padding: .55rem .9rem;
+  color: var(--muted);
+  font: inherit;
+  font-size: .82rem;
+  font-weight: 760;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.worker-view-tab[aria-pressed="true"] {
+  color: #07100d;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.worker-view-description {
+  margin: 0;
+  color: var(--muted);
+  font-size: .82rem;
+}
+
 main > section {
   padding-block: 2.5rem;
   border-bottom: 1px solid var(--line);
+}
+
+.contributor-auth {
+  position: relative;
+}
+
+.contributor-auth[aria-busy="true"] { opacity: .78; }
+
+.contributor-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(24rem, .8fr);
+  gap: 2rem;
+  align-items: start;
+  padding: 1.4rem;
+  background:
+    linear-gradient(105deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent 58%),
+    var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.contributor-checks {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .7rem;
+  margin: 0;
+}
+
+.contributor-checks > div {
+  min-width: 0;
+  padding: .85rem;
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.contributor-checks .status {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: .66rem;
+}
+
+.contributor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .7rem;
+  margin-top: 1rem;
+}
+
+.privacy-note {
+  margin: 1rem 0 0;
+  padding: .9rem 1rem;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--good) 7%, var(--surface));
+  border-left: 3px solid var(--good);
+  border-radius: 0 10px 10px 0;
+  font-size: .82rem;
 }
 
 .identity {
@@ -237,6 +339,9 @@ main > section {
 }
 
 .control-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 2.85rem;
   padding: .7rem 1rem;
   color: var(--text);
@@ -247,6 +352,7 @@ main > section {
   border: 1px solid var(--line);
   border-radius: 10px;
   cursor: pointer;
+  text-decoration: none;
 }
 
 .control-button[hidden] { display: none !important; }
@@ -381,6 +487,7 @@ dd { margin: .45rem 0 0; }
 .resources-grid { grid-template-columns: repeat(3, 1fr); }
 .flow-grid { grid-template-columns: repeat(3, 1fr); }
 .adaptive-summary-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.impact-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
 .metric-card {
   min-width: 0;
@@ -565,9 +672,10 @@ footer p { margin: 0; }
   .masthead { align-items: flex-start; flex-direction: column; min-height: auto; padding-top: 3rem; }
   .overall { justify-items: start; }
   .identity { grid-template-columns: 1fr; }
+  .contributor-layout { grid-template-columns: 1fr; }
   .control-layout { grid-template-columns: 1fr; }
   .control-actions { justify-content: flex-start; }
-  .trust-grid, .resources-grid, .flow-grid, .adaptive-summary-grid { grid-template-columns: 1fr 1fr; }
+  .trust-grid, .resources-grid, .flow-grid, .adaptive-summary-grid, .impact-grid { grid-template-columns: 1fr 1fr; }
   .trust-grid .featured { grid-column: 1 / -1; }
   .adaptive-work-item { grid-template-columns: 1fr; }
 }
@@ -576,7 +684,8 @@ footer p { margin: 0; }
   .masthead, main, footer { width: min(100% - 1.2rem, 1180px); }
   h1 { font-size: 3.3rem; }
   .identity-facts { grid-template-columns: 1fr; }
-  .trust-grid, .resources-grid, .flow-grid, .adaptive-summary-grid { grid-template-columns: 1fr; }
+  .trust-grid, .resources-grid, .flow-grid, .adaptive-summary-grid, .impact-grid { grid-template-columns: 1fr; }
+  .contributor-checks { grid-template-columns: 1fr; }
   .trust-grid .featured { grid-column: auto; }
   .adaptive-work-facts { grid-template-columns: 1fr 1fr; }
   .compact-details { grid-template-columns: 1fr; }

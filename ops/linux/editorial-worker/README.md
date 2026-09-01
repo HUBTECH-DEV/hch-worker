@@ -502,10 +502,12 @@ falhar, o `ready.json` anterior continua autorizando trabalho somente até seu
 `readyUntil`. Expiração de manifesto ou delegação aceita fallback apenas para
 o mesmo hash e sequência já aplicados; nunca para promover conteúdo novo.
 
-Uma terminação não capturável pode deixar `.worker.lock`. Antes de removê-lo,
-confirme administrativamente que o PID registrado no arquivo não existe e que
-nenhuma instância do kit está ativa. O kit não apaga automaticamente um lock
-preexistente, evitando duas operações concorrentes por uma inferência insegura.
+Uma terminação não capturável pode deixar `.worker.lock`. Ao encontrar um lock
+preexistente, o kit só o recupera quando o JSON está bem-formado, contém PID e
+timestamp válidos e a sondagem do processo comprova `ESRCH` (PID inexistente).
+Lock malformado, PID vivo, erro de permissão ou qualquer falha de leitura,
+sondagem ou quarentena permanece fail-closed como operação concorrente. Não
+remova o arquivo manualmente enquanto houver uma instância ativa do kit.
 
 Não apague ou regenere as chaves para contornar uma falha. Revogação, rotação
 de raiz, alteração de `nodeId/keyId` e recuperação da identidade são operações

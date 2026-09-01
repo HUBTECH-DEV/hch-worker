@@ -24,7 +24,44 @@
     </header>
 
     <main id="main">
-      <section class="identity" aria-labelledby="worker-title">
+      <nav class="worker-view-nav" aria-label="Visões do Worker Beta">
+        <div class="worker-view-tabs" role="group" aria-label="Escolha o nível de detalhe">
+          <button class="worker-view-tab" type="button" aria-pressed="true" data-view-target="contribution">Contribuição</button>
+          <button class="worker-view-tab" type="button" aria-pressed="false" data-view-target="activity">Atividade</button>
+          <button class="worker-view-tab" type="button" aria-pressed="false" data-view-target="performance">Desempenho</button>
+          <button class="worker-view-tab" type="button" aria-pressed="false" data-view-target="impact">Impacto</button>
+          <button class="worker-view-tab" type="button" aria-pressed="false" data-view-target="preferences">Modo discreto</button>
+        </div>
+        <p id="worker-view-description" class="worker-view-description">Pareie este Worker com sua sessão HIH no navegador e decida quando compartilhar capacidade.</p>
+      </nav>
+
+      <section id="contributor-auth" class="contributor-auth" aria-labelledby="contributor-title" aria-busy="true">
+        <div class="section-heading contributor-heading">
+          <div>
+            <p class="section-kicker">Identidade da pessoa</p>
+            <h2 id="contributor-title">Contribuidor HIH</h2>
+          </div>
+          <span id="contributor-ready" class="status" data-tone="neutral">Verificando</span>
+        </div>
+        <div class="contributor-layout">
+          <div>
+            <p id="contributor-summary" class="control-summary">Validando pareamento, cadastro e consentimento sem ler seus documentos.</p>
+            <p id="contributor-identity" class="metric-note">O Worker não recebe identidade humana.</p>
+          </div>
+          <dl class="contributor-checks">
+            <div><dt>Pareamento HIH</dt><dd id="contributor-pairing"><span class="status" data-tone="neutral">—</span></dd></div>
+            <div><dt>Cadastro completo</dt><dd id="contributor-eligibility"><span class="status" data-tone="neutral">—</span></dd></div>
+            <div><dt>Consentimento</dt><dd id="contributor-consent"><span class="status" data-tone="neutral">—</span></dd></div>
+          </dl>
+        </div>
+        <div class="contributor-actions">
+          <a id="contributor-pair" class="control-button primary" href="#" target="_blank" rel="noreferrer noopener" hidden>Parear no navegador</a>
+          <button id="contributor-pair-unavailable" class="control-button secondary" type="button" disabled>Pareamento HIH ainda não configurado</button>
+        </div>
+        <p class="privacy-note">CPF, passaporte, endereço, contatos e credenciais permanecem no HIH. O pareamento usa código/nonce de uso único e prova da chave Ed25519; senha, cookie e token HIH nunca entram no Worker.</p>
+      </section>
+
+      <section class="identity" aria-labelledby="worker-title" data-worker-view="contribution">
         <div>
           <p class="section-kicker">Nó observado</p>
           <h2 id="worker-title">Worker não configurado</h2>
@@ -37,7 +74,7 @@
         </dl>
       </section>
 
-      <section class="worker-controls" aria-labelledby="public-identity-title">
+      <section class="worker-controls" aria-labelledby="public-identity-title" data-worker-view="preferences" hidden>
         <div class="section-heading"><div><p class="section-kicker">Enrollment</p><h2 id="public-identity-title">Chave pública deste Worker</h2></div><span class="status" data-tone="good">Somente pública</span></div>
         <p id="public-identity-meta" class="metric-note">Carregando identidade pública…</p>
         <pre id="public-identity-key" class="control-summary" style="white-space:pre-wrap;overflow-wrap:anywhere">—</pre>
@@ -45,7 +82,7 @@
         <p id="public-identity-feedback" class="control-feedback" role="status" aria-live="polite"></p>
       </section>
 
-      <section id="worker-controls" class="worker-controls" aria-labelledby="controls-title" aria-busy="false">
+      <section id="worker-controls" class="worker-controls" aria-labelledby="controls-title" aria-busy="false" data-worker-view="contribution">
         <div class="section-heading control-heading">
           <div>
             <p class="section-kicker">Ação neste notebook</p>
@@ -84,7 +121,7 @@
         <p id="control-feedback" class="control-feedback" role="status" aria-live="polite" aria-atomic="true"></p>
       </section>
 
-      <section id="worker-update" class="worker-controls" aria-labelledby="update-title" aria-busy="false">
+      <section id="worker-update" class="worker-controls" aria-labelledby="update-title" aria-busy="false" data-worker-view="preferences" hidden>
         <div class="section-heading control-heading">
           <div>
             <p class="section-kicker">Canal estável</p>
@@ -106,7 +143,7 @@
         <p id="update-feedback" class="control-feedback" role="status" aria-live="polite" aria-atomic="true"></p>
       </section>
 
-      <section id="alerts-section" class="alerts" aria-labelledby="alerts-title">
+      <section id="alerts-section" class="alerts" aria-labelledby="alerts-title" data-worker-view="contribution">
         <div class="section-heading">
           <div>
             <p class="section-kicker">Atenção operacional</p>
@@ -117,7 +154,7 @@
         <ol id="alerts-list" class="alerts-list" aria-live="polite"></ol>
       </section>
 
-      <section aria-labelledby="trust-title">
+      <section aria-labelledby="trust-title" data-worker-view="preferences" hidden>
         <div class="section-heading">
           <div>
             <p class="section-kicker">Canal e identidade</p>
@@ -154,7 +191,7 @@
         </div>
       </section>
 
-      <section aria-labelledby="orchestration-title">
+      <section aria-labelledby="orchestration-title" data-worker-view="activity" hidden>
         <div class="section-heading">
           <div>
             <p class="section-kicker">Presença independente da execução</p>
@@ -181,7 +218,7 @@
         </div>
       </section>
 
-      <section aria-labelledby="adaptive-work-title">
+      <section aria-labelledby="adaptive-work-title" data-worker-view="performance" hidden>
         <div class="section-heading">
           <div>
             <p class="section-kicker">Política adaptativa assinada</p>
@@ -216,7 +253,7 @@
         </div>
       </section>
 
-      <section aria-labelledby="resources-title">
+      <section aria-labelledby="resources-title" data-worker-view="performance" hidden>
         <div class="section-heading">
           <div>
             <p class="section-kicker">Capacidade observada</p>
@@ -258,7 +295,7 @@
         </div>
       </section>
 
-      <section aria-labelledby="flow-title">
+      <section aria-labelledby="flow-title" data-worker-view="activity" hidden>
         <div class="section-heading">
           <div>
             <p class="section-kicker">Fluxo editorial</p>
@@ -304,7 +341,7 @@
         </div>
       </section>
 
-      <section class="current-batch" aria-labelledby="batch-title">
+      <section class="current-batch" aria-labelledby="batch-title" data-worker-view="activity" hidden>
         <div class="section-heading">
           <div>
             <p class="section-kicker">Agora</p>
@@ -325,10 +362,65 @@
           </div>
         </div>
       </section>
+
+      <section aria-labelledby="impact-title" data-worker-view="impact" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Retorno para o projeto</p>
+            <h2 id="impact-title">Impacto da contribuição</h2>
+          </div>
+          <span class="status" data-tone="good">Transparente</span>
+        </div>
+        <div class="card-grid impact-grid">
+          <article class="metric-card featured">
+            <p class="metric-label">Tempo de geração</p>
+            <p id="impact-generation-time" class="metric-value">—</p>
+            <p class="metric-note">Tempo efetivo registrado pelo Worker, não o tempo em espera.</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Enviados para revisão</p>
+            <p id="impact-review-total" class="metric-value">—</p>
+            <p class="metric-note">Conteúdos gerados com sucesso ainda dependem de revisão editorial.</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Falhas reportadas</p>
+            <p id="impact-failures-total" class="metric-value">—</p>
+            <p class="metric-note">Falhas são registradas para diagnóstico; não são publicações.</p>
+          </article>
+        </div>
+        <p class="privacy-note">O painel não promete recompensa, publicação ou autoria automática. A atribuição usa o identificador HIH vinculado no momento do claim e cada resultado segue para revisão humana.</p>
+      </section>
+
+      <section class="preferences-panel" aria-labelledby="preferences-title" data-worker-view="preferences" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="section-kicker">Execução em segundo plano</p>
+            <h2 id="preferences-title">Modo discreto e privacidade</h2>
+          </div>
+          <span class="status" data-tone="good">Local</span>
+        </div>
+        <div class="card-grid flow-grid">
+          <article class="metric-card">
+            <p class="metric-label">Painel</p>
+            <p class="metric-value status-value">Somente loopback</p>
+            <p class="metric-note">A WebUI aceita conexões apenas deste computador.</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Conteúdo exibido</p>
+            <p class="metric-value status-value">Metadados seguros</p>
+            <p class="metric-note">Prompts, respostas editoriais e credenciais não aparecem no painel.</p>
+          </article>
+          <article class="metric-card">
+            <p class="metric-label">Operação</p>
+            <p class="metric-value status-value">Iniciar, pausar ou parar</p>
+            <p class="metric-note">Pausar preserva trabalhos ativos; parar cancela e reporta a causa.</p>
+          </article>
+        </div>
+      </section>
     </main>
 
     <footer>
-      <p>Painel local · controles fixos · nenhuma credencial ou conteúdo editorial é exibido</p>
+      <p>Worker Beta · cinco visões em uma WebUI local · nenhuma credencial ou conteúdo editorial é exibido</p>
       <p id="telemetry-meta">Telemetria ainda não recebida</p>
     </footer>
 

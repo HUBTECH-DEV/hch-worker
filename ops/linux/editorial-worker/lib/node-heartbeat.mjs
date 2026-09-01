@@ -7,12 +7,19 @@ import {
 } from "./capacity.mjs";
 import { signedPost } from "./http.mjs";
 import { ensureWorkerIdentity } from "./identity.mjs";
-import { assertSecretFree } from "./local-state.mjs";
+import { sampleNvidiaGpu } from "./gpu.mjs";
+import {
+  assertSecretFree,
+  recordGpuSample,
+  updateMetrics,
+  updateStatus,
+} from "./local-state.mjs";
 import {
   atomicWriteJson,
   ensurePrivateDirectory,
   readOptionalJson,
 } from "./storage.mjs";
+import { sampleCgroupCpuPercent } from "./runtime-resources.mjs";
 
 export const NODE_HEARTBEAT_INTERVAL_SECONDS = 60;
 export const NODE_HEARTBEAT_PATH = "/api/editorial/orchestrator/nodes/heartbeat";
@@ -75,9 +82,22 @@ export async function nodeHeartbeat(config, options = {}) {
       : effectiveRequestedCapacity(control);
     const requestId = options.requestId ?? crypto.randomUUID();
     identifier(requestId, "requestId", 160);
+    const gpuSample = options.gpuSample ?? await sampleNvidiaGpu(options.gpuProbe);
+    const sampledCpuPercent = options.resources?.cpuPercent ?? sampleCgroupCpuPercent();
+    const cpuPercent = sampledCpuPercent ?? (process.platform === "linux" ? 100 : null);
+    const sampledResources = {
+      ...(options.resources ?? {}),
+      ...(cpuPercent === null || cpuPercent === undefined ? {} : { cpuPercent }),
+      ...(gpuSample.status === "available"
+        ? { gpuPercent: gpuSample.utilizationPercent }
+        : {}),
+    };
     const pressure = options.pressure === undefined
-      ? sampleCapacityPressure(options.resources)
+      ? sampleCapacityPressure(sampledResources)
       : validateCapacityPressure(options.pressure);
+    await updateMetrics(stateRoot, config, (metrics) => {
+      recordGpuSample(metrics, gpuSample, gpuActiveSecondsDelta(previous, attemptedAt));
+    });
     const requestBody = {
       nodeId: config.nodeId,
       workerKeyId: config.keyId,
@@ -114,6 +134,19 @@ export async function nodeHeartbeat(config, options = {}) {
         source: "node-heartbeat",
       });
     }
+    const metrics = await readOptionalJson(stateRoot, "metrics.json");
+    await updateStatus(stateRoot, config, (status) => {
+      const activeWork = status?.running === true || status?.currentBatch !== null &&
+        typeof status?.currentBatch === "object" || metrics?.jobs?.running > 0 ||
+        metrics?.currentBatch !== null && typeof metrics?.currentBatch === "object";
+      return activeWork ? {} : {
+        state: requestedCapacity === 0 ? "draining" : "standby",
+        running: false,
+        standby: true,
+        currentBatch: null,
+        code: requestedCapacity === 0 ? "drain-requested" : "ready",
+      };
+    });
     return {
       ...snapshot,
       requestId: response.requestId,
@@ -137,6 +170,17 @@ export async function nodeHeartbeat(config, options = {}) {
     }
     throw error;
   }
+}
+
+export function gpuActiveSecondsDelta(previous, attemptedAt) {
+  const previousAttempt = Date.parse(previous?.heartbeat?.lastAttemptAt ?? "");
+  const currentAttempt = Date.parse(attemptedAt ?? "");
+  if (!Number.isFinite(previousAttempt) || !Number.isFinite(currentAttempt) ||
+      currentAttempt <= previousAttempt) return 0;
+  return Math.min(
+    NODE_HEARTBEAT_INTERVAL_SECONDS * 2,
+    (currentAttempt - previousAttempt) / 1_000,
+  );
 }
 
 function heartbeatRequestOptions(options, deadlineMilliseconds) {

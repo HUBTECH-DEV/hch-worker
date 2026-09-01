@@ -8,6 +8,7 @@
   "rootPublicKeyFingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   "rootKeyId": "hch-root-v1",
   "localEngineBaseUrl": "http://127.0.0.1:11434",
+  "localEngineNumThreads": 1,
   "requestedCapacity": 2,
   "artifactMaximumBytes": 16777216,
   "requestTimeoutMilliseconds": 15000,

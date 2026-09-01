@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 
 import { buildDashboardStatus } from "./lib/status.mjs";
 import { createReleaseMonitor } from "./lib/releases.mjs";
+import { readContributorStatus } from "./lib/contributor.mjs";
 import {
   executeWorkerControlAction,
   resolveWorkerControlConfig,
@@ -55,6 +56,9 @@ export function resolveDashboardConfig(options = {}) {
       process.env.HCH_WORKER_RELEASE_REPOSITORY ?? "HUBTECH-DEV/hch-worker",
     releaseCheckIntervalMilliseconds: options.releaseCheckIntervalMilliseconds ??
       process.env.HCH_WORKER_RELEASE_CHECK_INTERVAL_MS ?? 15 * 60_000,
+    hihPairingUrl: normalizeHihPairingUrl(
+      options.hihPairingUrl ?? process.env.HCH_WORKER_HIH_PAIRING_URL ?? null,
+    ),
     workerControl: resolveWorkerControlConfig({
       driver: options.controlDriver,
       workerCliPath: options.workerCliPath,
@@ -172,6 +176,14 @@ async function handleRequest(request, response, context) {
     }, true, method === "HEAD");
     return;
   }
+  if (pathname === "/api/contributor") {
+    const contributor = await readContributorStatus(context.dataDirectory, {
+      now: context.now,
+      pairingUrl: context.hihPairingUrl,
+    });
+    sendJson(response, 200, contributor, true, method === "HEAD");
+    return;
+  }
   if (pathname === "/api/identity") {
     const identity = await readPublicWorkerIdentity(context.dataDirectory);
     sendJson(response, identity ? 200 : 404, identity ?? { error:"worker-public-identity-unavailable" }, true, method === "HEAD");
@@ -216,6 +228,16 @@ async function handleControlPost(request, response, context) {
   try {
     assertControlRequestHeaders(request, context.control);
     const payload = await readControlPayload(request);
+    if (payload.action === "start" ||
+        (payload.action === "set-parallelism" && payload.parallelism > 0)) {
+      const contributor = await readContributorStatus(context.dataDirectory, {
+        now: context.now,
+        pairingUrl: context.hihPairingUrl,
+      });
+      if (!contributor.readyForContribution) {
+        throw new ControlHttpError(403, "contributor-not-authorized");
+      }
+    }
     let requested = payload;
     if (payload.action === "update") {
       const current = await buildDashboardStatus(context.dataDirectory, {
@@ -261,6 +283,21 @@ async function handleControlPost(request, response, context) {
     }
     sendJson(response, 500, { error: "worker-control-internal-error" }, true);
   }
+}
+
+function normalizeHihPairingUrl(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  const text = String(value).trim();
+  if (text.length > 2_048) throw new TypeError("HIH pairing URL is too long.");
+  let parsed;
+  try { parsed = new URL(text); }
+  catch { throw new TypeError("HIH pairing URL is invalid."); }
+  const loopbackHttp = parsed.protocol === "http:" && isLoopbackName(parsed.hostname);
+  if ((parsed.protocol !== "https:" && !loopbackHttp) || parsed.username || parsed.password ||
+      parsed.hash || parsed.search) {
+    throw new TypeError("HIH pairing URL must be HTTPS without credentials, query, or fragment.");
+  }
+  return parsed.toString();
 }
 
 function createControlState(config, options = {}) {
@@ -516,6 +553,9 @@ function parseCliArguments(argv) {
     }
     else if (argument === "--release-check-interval-ms") {
       options.releaseCheckIntervalMilliseconds = requiredValue(args, argument);
+    }
+    else if (argument === "--hih-pairing-url") {
+      options.hihPairingUrl = requiredValue(args, argument);
     }
     else throw new TypeError("Unsupported dashboard argument.");
   }

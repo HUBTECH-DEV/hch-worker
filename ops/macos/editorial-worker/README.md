@@ -22,8 +22,11 @@ HCH_NODE_BIN=/opt/homebrew/bin/node \
 ./hch-editorial-workerctl start
 ```
 
-O agente de ciclo é contínuo, mantém o heartbeat e supervisiona o dashboard no
-mesmo processo. O instalador remove o agente de heartbeat legado. Paralelismo
-zero e `pause` preservam trabalhos ativos; `stop` cancela e relata a falha ao
-orquestrador. O runtime é fail-closed e não publica nem aprova conteúdo.
+O agente de ciclo é contínuo, renova o bootstrap, mantém o heartbeat e
+supervisiona o dashboard no mesmo processo. O instalador remove os agentes
+legados de bootstrap isolado, heartbeat, listener, executor e dashboard para
+evitar disputa pelo lock, presença duplicada e conflito na porta `4319`; o
+agente local do Ollama é preservado. Paralelismo zero e `pause` preservam
+trabalhos ativos; `stop` cancela e relata a falha ao orquestrador. O runtime é
+fail-closed e não publica nem aprova conteúdo.
 O rollout canário obrigatório é VPS, macOS/Linux e somente depois Windows.

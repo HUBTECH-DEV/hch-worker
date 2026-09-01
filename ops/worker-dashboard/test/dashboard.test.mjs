@@ -57,10 +57,15 @@ import {
   updateWorkerState,
 } from "../collector.mjs";
 import {
+  CONTRIBUTOR_AUTH_FILE,
   WORKER_CONTROL_FILE,
   atomicWriteJson,
   safeReadJson,
 } from "../lib/storage.mjs";
+import {
+  parseContributorAuth,
+  readContributorStatus,
+} from "../lib/contributor.mjs";
 import {
   buildDashboardStatus,
   operatorControlMatchesWorkerState,
@@ -85,6 +90,63 @@ import { compareVersions, createReleaseMonitor } from "../lib/releases.mjs";
 import { runUpdateHandoff } from "../../worker-updater/hch-worker-update.mjs";
 
 const T0 = new Date("2026-08-11T21:00:00.000Z");
+
+test("contributor auth contract exposes only safe pairing and eligibility fields", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const state = eligibleContributorState();
+  await writeFile(join(directory, CONTRIBUTOR_AUTH_FILE), JSON.stringify(state), "utf8");
+
+  assert.deepEqual(parseContributorAuth(state), state);
+  const status = await readContributorStatus(directory, {
+    now: new Date("2026-08-11T21:01:00Z"),
+    pairingUrl: "https://identity.hubtech.dev/desktop/worker",
+  });
+  assert.equal(status.readyForContribution, true);
+  assert.equal(status.browserPairing.available, true);
+  assert.equal(status.browserPairing.method, "browser-session-one-time-code-ed25519");
+  const publicBody = JSON.stringify(status);
+  assert.doesNotMatch(publicBody, /bindingId|displayName|subjectId|tenantId|membershipId|cpf|passport|passaporte|address|endereco|email|phone|token|secret|credential/i);
+
+  assert.throws(
+    () => parseContributorAuth({ ...state, accessToken: "must-not-be-stored" }),
+    /unsupported fields/,
+  );
+  for (const unsafeBindingId of [
+    "12345678901",
+    "person@example.com",
+    "AB1234567",
+    "passport_BR_AB1234567",
+  ]) {
+    assert.throws(
+      () => parseContributorAuth({ ...state, bindingId: unsafeBindingId }),
+      /pairwise bindingId/,
+    );
+  }
+});
+
+test("contributor auth expires or becomes stale fail-closed", async (t) => {
+  const directory = await temporaryDirectory(t);
+  await writeFile(
+    join(directory, CONTRIBUTOR_AUTH_FILE),
+    JSON.stringify(eligibleContributorState()),
+    "utf8",
+  );
+  const status = await readContributorStatus(directory, {
+    now: new Date("2100-08-11T22:00:01Z"),
+    staleAfterMilliseconds: 3_000_000_000_000,
+  });
+  assert.equal(status.pairing.status, "expired");
+  assert.equal(status.readyForContribution, false);
+  assert.equal(Object.hasOwn(status, "bindingId"), false);
+  assert.deepEqual(status.blockingReasons, ["hih-browser-pairing-required"]);
+
+  const stale = await readContributorStatus(directory, {
+    now: new Date("2026-08-11T21:06:00Z"),
+  });
+  assert.equal(stale.sourceStatus, "stale");
+  assert.equal(stale.readyForContribution, false);
+  assert.equal(Object.hasOwn(stale, "bindingId"), false);
+});
 
 test("release monitor detects only newer stable semantic releases", async () => {
   const payload = {
@@ -922,6 +984,15 @@ test("dashboard serves an accessible page and a no-store status API", async (t) 
   });
   assert.equal(JSON.stringify(status).includes(directory), false);
 
+  const contributorResponse = await fetch(`${base}/api/contributor`);
+  assert.equal(contributorResponse.status, 200);
+  assert.equal(contributorResponse.headers.get("cache-control"), "no-store, max-age=0");
+  const contributor = await contributorResponse.json();
+  assert.equal(contributor.schema, "hch.worker-contributor-auth/v1");
+  assert.equal(contributor.readyForContribution, false);
+  assert.equal(Object.hasOwn(contributor, "bindingId"), false);
+  assert.equal(contributor.browserPairing.available, false);
+
   const pageResponse = await fetch(base);
   const html = await pageResponse.text();
   assert.equal(pageResponse.status, 200);
@@ -936,6 +1007,11 @@ test("dashboard serves an accessible page and a no-store status API", async (t) 
   assert.match(html, /id="control-stop"[^>]*>\s*Parar e cancelar ativos/);
   assert.match(html, /id="control-parallelism"[^>]*min="0"[^>]*max="64"/);
   assert.match(html, /id="control-feedback"[^>]*role="status"/);
+  assert.match(html, /id="contributor-auth"/);
+  assert.match(html, /CPF, passaporte, endereço, contatos e credenciais permanecem no HIH/);
+  for (const label of ["Contribuição", "Atividade", "Desempenho", "Impacto", "Modo discreto"]) {
+    assert.match(html, new RegExp(`>${label}<`));
+  }
   assert.match(html, /<dialog id="control-confirmation"/);
   assert.match(html, /id="adaptive-work-title"/);
   assert.match(html, /id="adaptive-tier"/);
@@ -1203,7 +1279,9 @@ test("fixed Node.js worker control executes only the canonical local script", as
     assert.equal(call.options.shell, false);
     assert.equal(call.options.cwd, options.controlScriptRootPath);
     assert.deepEqual(call.options.env, {
-      PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+      PATH: call.args[1] === options.updateScriptPath && process.platform === "win32"
+        ? process.env.PATH ?? ""
+        : "/usr/bin:/bin:/usr/sbin:/sbin",
       LANG: "C",
       LC_ALL: "C",
     });
@@ -1337,6 +1415,58 @@ test("control API enforces same-origin CSRF and never exposes command output", a
   assert.equal(foreignHost.statusCode, 403);
 });
 
+test("control API blocks start and positive claims without an eligible HIH contributor", async (t) => {
+  const fixture = await controlFixture(t);
+  await writeFile(
+    join(fixture.dataDirectory, CONTRIBUTOR_AUTH_FILE),
+    JSON.stringify({
+      schema: "hch.worker-contributor-auth/v1",
+      schemaVersion: 1,
+      observedAt: "2026-08-11T21:00:00.000Z",
+      pairing: { status: "unpaired", pairedAt: null, expiresAt: null },
+      eligibility: { status: "unknown", checkedAt: null, reasonCodes: [] },
+      consent: { status: "required", version: null, acceptedAt: null },
+      bindingId: null,
+    }),
+    "utf8",
+  );
+  const calls = [];
+  const running = await listenDashboard({
+    host: "127.0.0.1",
+    port: 0,
+    dataDirectory: fixture.dataDirectory,
+    releaseFetch: async () => new Response(null, { status: 404 }),
+    ...fixture,
+    controlCsrfToken: "E".repeat(43),
+    controlExecFile(file, args, options, callback) {
+      calls.push({ file, args, options });
+      queueMicrotask(() => callback(null, "", ""));
+    },
+  });
+  t.after(() => new Promise((resolvePromise) => running.server.close(resolvePromise)));
+  const base = `http://127.0.0.1:${running.address.port}`;
+  const contract = await (await fetch(`${base}/api/control`)).json();
+
+  const start = await postControl(base, contract.csrfToken, { action: "start" });
+  assert.equal(start.status, 403);
+  assert.deepEqual(await start.json(), { error: "contributor-not-authorized" });
+  const positive = await postControl(base, contract.csrfToken, {
+    action: "set-parallelism",
+    parallelism: 3,
+  });
+  assert.equal(positive.status, 403);
+  assert.equal(calls.length, 0);
+
+  const pause = await postControl(base, contract.csrfToken, { action: "pause" });
+  assert.equal(pause.status, 200);
+  const zero = await postControl(base, contract.csrfToken, {
+    action: "set-parallelism",
+    parallelism: 0,
+  });
+  assert.equal(zero.status, 200);
+  assert.equal(calls.length, 2);
+});
+
 test("control API serializes actions and sanitizes execution failures", async (t) => {
   const fixture = await controlFixture(t);
   let releaseFirst;
@@ -1464,6 +1594,22 @@ test("server configuration cannot bind the dashboard to a remote interface", () 
     () => resolveDashboardConfig({ host: "192.0.2.10", port: 4319 }),
     /loopback/,
   );
+  assert.equal(
+    resolveDashboardConfig({ hihPairingUrl: "https://identity.hubtech.dev/desktop/worker" }).hihPairingUrl,
+    "https://identity.hubtech.dev/desktop/worker",
+  );
+  assert.equal(
+    resolveDashboardConfig({ hihPairingUrl: "http://127.0.0.1:3000/desktop/worker" }).hihPairingUrl,
+    "http://127.0.0.1:3000/desktop/worker",
+  );
+  assert.throws(
+    () => resolveDashboardConfig({ hihPairingUrl: "http://identity.hubtech.dev/worker" }),
+    /HTTPS/,
+  );
+  assert.throws(
+    () => resolveDashboardConfig({ hihPairingUrl: "https://identity.hubtech.dev/worker?token=bad" }),
+    /query/,
+  );
 });
 
 test("published JSON schemas are parseable and deny additional properties", async () => {
@@ -1473,6 +1619,7 @@ test("published JSON schemas are parseable and deny additional properties", asyn
     "metrics-snapshot.schema.json",
     "orchestration-snapshot.schema.json",
     "adaptive-work-status.schema.json",
+    "contributor-auth-state.schema.json",
   ]) {
     const schema = JSON.parse(
       await readFile(new URL(`../schemas/${filename}`, import.meta.url), "utf8"),
@@ -1493,6 +1640,11 @@ async function controlFixture(t) {
   await mkdir(configDirectory, { recursive: true });
   await mkdir(powershellDirectory, { recursive: true });
   await mkdir(dataDirectory, { recursive: true });
+  await writeFile(
+    join(dataDirectory, CONTRIBUTOR_AUTH_FILE),
+    JSON.stringify(eligibleContributorState()),
+    "utf8",
+  );
   const workerCliPath = join(kitDirectory, "Hch-Worker.ps1");
   const workerConfigPath = join(configDirectory, "WorkerConfig.psd1");
   const powershellPath = join(powershellDirectory, "powershell.exe");
@@ -1505,9 +1657,34 @@ async function controlFixture(t) {
     workerConfigRootPath: await realpath(configDirectory),
     powershellRootPath: await realpath(powershellDirectory),
     dataDirectory,
+    now: new Date("2026-08-11T21:01:00.000Z"),
     workerCliPath: await realpath(workerCliPath),
     workerConfigPath: await realpath(workerConfigPath),
     powershellPath: await realpath(powershellPath),
+  };
+}
+
+function eligibleContributorState() {
+  return {
+    schema: "hch.worker-contributor-auth/v1",
+    schemaVersion: 1,
+    observedAt: "2026-08-11T21:00:00.000Z",
+    pairing: {
+      status: "paired",
+      pairedAt: "2026-08-11T20:59:00.000Z",
+      expiresAt: "2026-08-11T22:00:00.000Z",
+    },
+    eligibility: {
+      status: "eligible",
+      checkedAt: "2026-08-11T20:59:00.000Z",
+      reasonCodes: [],
+    },
+    consent: {
+      status: "accepted",
+      version: "hch-contribution-v1",
+      acceptedAt: "2026-08-11T20:59:00.000Z",
+    },
+    bindingId: "hchbind_Po43m4KxmP2Kc00NQn5G7A",
   };
 }
 
