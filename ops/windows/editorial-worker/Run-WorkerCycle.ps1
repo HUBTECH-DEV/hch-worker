@@ -164,7 +164,8 @@ function Write-HchCycleSummary {
 
 function Get-HchHeartbeatIntervalSeconds {
   param($Assignment)
-  $remaining = ([DateTimeOffset]::Parse([string]$Assignment.leaseExpiresAt) - [DateTimeOffset]::UtcNow).TotalSeconds
+  $remaining = ((ConvertFrom-HchTimestamp -Value ([string]$Assignment.leaseExpiresAt)) -
+    [DateTimeOffset]::UtcNow).TotalSeconds
   if ($remaining -le 15) { throw 'worker-cycle-lease-window-too-short' }
   return [Math]::Min(30, [Math]::Max(5, [Math]::Floor($remaining / 3)))
 }
@@ -207,8 +208,8 @@ function Get-HchItemProgress {
        [long]$validated.contentBytes -lt [long]$Item.LastProgressContentBytes)) {
     throw 'worker-generator-progress-regressed'
   }
-  if ([DateTimeOffset]::Parse([string]$validated.updatedAt) -lt
-      [DateTimeOffset]::Parse([string]$Item.LastProgressUpdatedAt)) {
+  if ((ConvertFrom-HchTimestamp -Value ([string]$validated.updatedAt)) -lt
+      (ConvertFrom-HchTimestamp -Value ([string]$Item.LastProgressUpdatedAt))) {
     throw 'worker-generator-progress-timestamp-regressed'
   }
   $Item.LastProgressSequence = [long]$validated.sequence
@@ -225,7 +226,7 @@ function Stop-HchGeneratorWhenStalled {
   $progress = Get-HchItemProgress -Item $Item
   $plan = $Item.Assignment.generationPlan
   $now = [DateTimeOffset]::UtcNow
-  $updatedAt = [DateTimeOffset]::Parse([string]$progress.updatedAt)
+  $updatedAt = ConvertFrom-HchTimestamp -Value ([string]$progress.updatedAt)
   $code = $null
   if ([string]$progress.phase -eq 'starting' -and
       ($now - $updatedAt).TotalSeconds -gt [int]$plan.firstProgressGraceSeconds) {
@@ -261,8 +262,10 @@ function Test-HchOperatorStopRequested {
   param([Collections.IEnumerable]$Items)
   $control = Get-HchWorkerControl -Config $script:Config
   if ([string]$control.updatedBy -ne 'stop' -or [bool]$control.acceptingClaims) { return $false }
-  $requestedAt = [DateTimeOffset]::Parse([string]$control.updatedAt)
-  $oldestStart = @($Items | ForEach-Object { [DateTimeOffset]::Parse([string]$_.StartedAt) } |
+  $requestedAt = ConvertFrom-HchTimestamp -Value ([string]$control.updatedAt)
+  $oldestStart = @($Items | ForEach-Object {
+    ConvertFrom-HchTimestamp -Value ([string]$_.StartedAt)
+  } |
     Sort-Object | Select-Object -First 1)
   return $oldestStart.Count -eq 1 -and $requestedAt -ge $oldestStart[0]
 }
@@ -278,7 +281,7 @@ function Stop-HchItemsByOperatorRequest {
     } catch { }
     $item.ErrorCode = 'operator-stop-requested'
     $item.GenerationDurationMilliseconds = [long](
-      [DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse([string]$item.StartedAt)
+      [DateTimeOffset]::UtcNow - (ConvertFrom-HchTimestamp -Value ([string]$item.StartedAt))
     ).TotalMilliseconds
     $item.Phase = 'fail-unknown'
     Save-HchCycleJournal -Items $Items -BatchId $BatchId
@@ -332,7 +335,7 @@ function Test-HchSafeOrphanProcess {
     if (-not [string]::Equals([IO.Path]::GetFullPath([string]$process.Path), [IO.Path]::GetFullPath($script:NodePath), [StringComparison]::OrdinalIgnoreCase)) {
       return $null
     }
-    $expectedStart = [DateTimeOffset]::Parse([string]$JournalItem.processStartedAt).UtcDateTime
+    $expectedStart = (ConvertFrom-HchTimestamp -Value ([string]$JournalItem.processStartedAt)).UtcDateTime
     if ([Math]::Abs(($process.StartTime.ToUniversalTime() - $expectedStart).TotalSeconds) -gt 2) { return $null }
     $cim = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [string]$process.Id) -ErrorAction Stop
     $commandLine = [string]$cim.CommandLine
@@ -394,7 +397,7 @@ function Invoke-HchJournalRecovery {
   $batchId = [string]$journal.batchId
   $requiresBootstrap = $false
   foreach ($item in @($items)) {
-    $expiresAt = [DateTimeOffset]::Parse([string]$item.Assignment.leaseExpiresAt)
+    $expiresAt = ConvertFrom-HchTimestamp -Value ([string]$item.Assignment.leaseExpiresAt)
     if ($expiresAt -le [DateTimeOffset]::UtcNow) {
       # Completion is idempotent on the orchestrator. Once the lease is
       # terminal, retaining the local draft cannot improve safety: a committed
@@ -498,7 +501,8 @@ try {
     [int]$config.ReadyRefreshBeforeSeconds
   } else { 3000 }
   if ($null -eq $ready -or
-      ([DateTimeOffset]::Parse([string]$ready.readyUntil) - [DateTimeOffset]::UtcNow).TotalSeconds -le $refreshBefore) {
+      ((ConvertFrom-HchTimestamp -Value ([string]$ready.readyUntil)) -
+        [DateTimeOffset]::UtcNow).TotalSeconds -le $refreshBefore) {
     [void](Invoke-HchWorkerBootstrap -Config $config)
     $ready = Assert-HchClaimGate -Config $config
   }
@@ -644,7 +648,7 @@ try {
               $item.Process.Dispose()
               $item.Process = $null
             }
-            $startedAt = [DateTimeOffset]::Parse([string]$item.StartedAt)
+            $startedAt = ConvertFrom-HchTimestamp -Value ([string]$item.StartedAt)
             $item.GenerationDurationMilliseconds = [long](
               [DateTimeOffset]::UtcNow - $startedAt
             ).TotalMilliseconds
@@ -720,7 +724,7 @@ try {
       $exitCode = $item.Process.ExitCode
       $item.Process.Dispose()
       $item.Process = $null
-      $startedAt = [DateTimeOffset]::Parse([string]$item.StartedAt)
+      $startedAt = ConvertFrom-HchTimestamp -Value ([string]$item.StartedAt)
       $item.GenerationDurationMilliseconds = [long]([DateTimeOffset]::UtcNow - $startedAt).TotalMilliseconds
 
       if ($exitCode -ne 0) {

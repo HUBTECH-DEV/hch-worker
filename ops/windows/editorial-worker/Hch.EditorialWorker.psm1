@@ -56,6 +56,30 @@ function Get-HchConfigValue {
   return $Default
 }
 
+function ConvertFrom-HchTimestamp {
+  [CmdletBinding()]
+  [OutputType([DateTimeOffset])]
+  param([Parameter(Mandatory = $true)][string]$Value)
+
+  # DateTimeOffset.Parse uses CurrentCulture. On pt-BR, for example,
+  # 2026-09-01 can be interpreted as 9 January instead of 1 September.
+  # Worker protocol and persisted timestamps must be explicit ISO-8601 only.
+  if ([string]::IsNullOrWhiteSpace($Value) -or
+      $Value -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})$') {
+    throw 'timestamp-iso8601-invalid'
+  }
+  $parsed = [DateTimeOffset]::MinValue
+  if (-not [DateTimeOffset]::TryParse(
+      $Value,
+      [Globalization.CultureInfo]::InvariantCulture,
+      [Globalization.DateTimeStyles]::None,
+      [ref]$parsed
+    )) {
+    throw 'timestamp-iso8601-invalid'
+  }
+  return $parsed
+}
+
 function Get-HchWorkerControl {
   [CmdletBinding()]
   param([Parameter(Mandatory = $true)][hashtable]$Config)
@@ -160,7 +184,7 @@ function Set-HchWorkerCapacitySnapshot {
   $expires = if ($ClearValidUntil) {
     $null
   } elseif (-not [string]::IsNullOrWhiteSpace($ValidUntil)) {
-    [DateTimeOffset]::Parse($ValidUntil).ToString('o')
+    (ConvertFrom-HchTimestamp -Value $ValidUntil).ToString('o')
   } elseif ($null -ne $previous) { $previous.validUntil } else { $null }
   $record = [ordered]@{
     schema = 'hch.worker-capacity/v1'
@@ -483,7 +507,7 @@ function Get-HchOperationRequestId {
   $now = [DateTimeOffset]::UtcNow
   if (Test-Path -LiteralPath $path) {
     $pending = Read-HchJsonFile -Path $path
-    if ([DateTimeOffset]::Parse([string]$pending.expiresAt) -le $now) {
+    if ((ConvertFrom-HchTimestamp -Value ([string]$pending.expiresAt)) -le $now) {
       throw "idempotency-window-expired-recovery-required:$OperationKey"
     }
     if ([string]$pending.target -ne $Target -or [string]$pending.bodyDigest -ne $digest) {
@@ -568,7 +592,7 @@ function Move-HchExpiredOperationRequest {
   $path = Join-Path $pendingDirectory ($OperationKey + '.json')
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'pending-operation-not-found' }
   $pending = Read-HchJsonFile -Path $path
-  if ([DateTimeOffset]::Parse([string]$pending.expiresAt) -gt [DateTimeOffset]::UtcNow) {
+  if ((ConvertFrom-HchTimestamp -Value ([string]$pending.expiresAt)) -gt [DateTimeOffset]::UtcNow) {
     throw 'idempotency-window-still-active'
   }
   $archiveDirectory = Join-Path ([string]$Config.StateRoot) 'expired-operations'
@@ -961,7 +985,7 @@ function Assert-HchAssignmentIntegrity {
       [string]::IsNullOrWhiteSpace([string]$Assignment.leaseToken)) {
     throw 'assignment-integrity-identity-invalid'
   }
-  try { $leaseExpiresAt = [DateTimeOffset]::Parse([string]$Assignment.leaseExpiresAt) }
+  try { $leaseExpiresAt = ConvertFrom-HchTimestamp -Value ([string]$Assignment.leaseExpiresAt) }
   catch { throw 'assignment-integrity-lease-expiration-invalid' }
   if ($leaseExpiresAt -le [DateTimeOffset]::UtcNow) { throw 'assignment-integrity-lease-expired' }
   $expectedInputHash = Get-HchNormalizedHash -Value ([string]$Assignment.inputSnapshotHash)
@@ -1640,7 +1664,7 @@ function Get-HchChallenge {
   }
   if (-not ($response.PSObject.Properties.Name -contains 'nonce')) { throw 'orchestrator-challenge-missing-nonce' }
   if ($response.PSObject.Properties.Name -contains 'expiresAt') {
-    if ([DateTimeOffset]::Parse([string]$response.expiresAt) -le [DateTimeOffset]::UtcNow) {
+    if ((ConvertFrom-HchTimestamp -Value ([string]$response.expiresAt)) -le [DateTimeOffset]::UtcNow) {
       throw 'orchestrator-challenge-expired'
     }
   }
@@ -1779,7 +1803,8 @@ function Set-HchWorkerStatus {
       updatedAt = [string]$progressCore.updatedAt
     }
   }
-  $isReady = $null -ne $ready -and [DateTimeOffset]::Parse([string]$ready.readyUntil) -gt [DateTimeOffset]::UtcNow
+  $isReady = $null -ne $ready -and
+    (ConvertFrom-HchTimestamp -Value ([string]$ready.readyUntil)) -gt [DateTimeOffset]::UtcNow
   $transport = if ($null -ne $script:LastTransportObservation) {
     $script:LastTransportObservation
   } elseif ($null -ne $previous -and $null -ne $previous.PSObject.Properties['transport']) {
@@ -2099,7 +2124,8 @@ function Update-HchWorkerMetrics {
   $previousUptime = Get-HchNestedValue $previous @('uptimeSeconds') $null
   if ($null -ne $previousObservedAt) {
     try {
-      $wallInterval = [Math]::Max(0.0, ($nowOffset - [DateTimeOffset]::Parse([string]$previousObservedAt)).TotalSeconds)
+      $wallInterval = [Math]::Max(0.0, ($nowOffset -
+        (ConvertFrom-HchTimestamp -Value ([string]$previousObservedAt))).TotalSeconds)
       if ($null -ne $previousUptime -and $null -ne $currentUptime) {
         $sameBoot = [long]$currentUptime -ge [long]$previousUptime
         if ($sameBoot) { $intervalSeconds = [Math]::Min($wallInterval, [double]([long]$currentUptime - [long]$previousUptime + 1)) }
@@ -2285,7 +2311,7 @@ function Assert-HchClaimGate {
   if ([string]$ready.workerKeyId -ne [string](Get-HchWorkerIdentity -Config $Config).keyId) {
     throw 'ready-state-worker-key-mismatch'
   }
-  if ([DateTimeOffset]::Parse([string]$ready.readyUntil) -le [DateTimeOffset]::UtcNow) {
+  if ((ConvertFrom-HchTimestamp -Value ([string]$ready.readyUntil)) -le [DateTimeOffset]::UtcNow) {
     Disable-HchWorkerReady -Config $Config -Reason 'ready-attestation-expired'
     throw 'worker-ready-attestation-expired'
   }
@@ -2906,7 +2932,7 @@ function Invoke-HchWorkerBootstrap {
         (Get-HchNormalizedHash -Value ([string]$manifest.ContentContractHash))
     ))
     $preserveReadyOnFailure = -not $contentChanged -and $null -ne $existingReady -and
-      [DateTimeOffset]::Parse([string]$existingReady.readyUntil) -gt [DateTimeOffset]::UtcNow
+      (ConvertFrom-HchTimestamp -Value ([string]$existingReady.readyUntil)) -gt [DateTimeOffset]::UtcNow
     if (Test-Path -LiteralPath $readyPath) {
       try {
         $ready = Assert-HchClaimGate -Config $Config
@@ -2914,7 +2940,7 @@ function Invoke-HchWorkerBootstrap {
         if ($refreshBeforeSeconds -lt 300 -or $refreshBeforeSeconds -gt 3300) {
           throw 'ready-refresh-window-out-of-range'
         }
-        $readyRemainingSeconds = ([DateTimeOffset]::Parse([string]$ready.readyUntil) -
+        $readyRemainingSeconds = ((ConvertFrom-HchTimestamp -Value ([string]$ready.readyUntil)) -
           [DateTimeOffset]::UtcNow).TotalSeconds
         if ([string]$ready.manifestHash -eq [string]$manifest.ManifestHash -and
             $readyRemainingSeconds -gt $refreshBeforeSeconds) { return $ready }
@@ -3263,8 +3289,8 @@ function Assert-HchCapacityWindow {
     [switch]$AllowExpired
   )
   try {
-    $grantedUntilValue = [DateTimeOffset]::Parse($GrantedUntil)
-    $serverTimeValue = [DateTimeOffset]::Parse($ServerTime)
+    $grantedUntilValue = ConvertFrom-HchTimestamp -Value $GrantedUntil
+    $serverTimeValue = ConvertFrom-HchTimestamp -Value $ServerTime
   } catch { throw 'orchestrator-capacity-window-invalid' }
   $clockSkew = [int](Get-HchConfigValue $Config 'ClockSkewSeconds' 60)
   if ($clockSkew -lt 0 -or $clockSkew -gt 300) { throw 'clock-skew-out-of-range' }
@@ -3426,7 +3452,7 @@ function Invoke-HchWorkerClaim {
   }
   try {
     $heartbeatAgeSeconds = ([DateTimeOffset]::UtcNow -
-      [DateTimeOffset]::Parse([string]$orchestration.heartbeat.lastAttemptAt)).TotalSeconds
+      (ConvertFrom-HchTimestamp -Value ([string]$orchestration.heartbeat.lastAttemptAt))).TotalSeconds
   } catch { throw 'claim-node-heartbeat-state-invalid' }
   if ($heartbeatAgeSeconds -lt -30 -or $heartbeatAgeSeconds -gt 90) {
     throw 'claim-node-heartbeat-stale'
@@ -3540,8 +3566,8 @@ function Invoke-HchWorkerClaim {
       throw 'orchestrator-claim-capacity-reason-invalid'
     }
     try {
-      [void][DateTimeOffset]::Parse([string]$response.serverTime)
-      [void][DateTimeOffset]::Parse([string]$claimCapacity.grantedUntil)
+      [void](ConvertFrom-HchTimestamp -Value ([string]$response.serverTime))
+      [void](ConvertFrom-HchTimestamp -Value ([string]$claimCapacity.grantedUntil))
     } catch {
       throw 'orchestrator-claim-capacity-time-invalid'
     }
@@ -3552,7 +3578,7 @@ function Invoke-HchWorkerClaim {
       GrantedCapacity = $grantedCapacity
       ActiveAssignments = $activeAssignments + $assignments.Count
       CapacityReason = $capacityReason
-      ValidUntil = [DateTimeOffset]::Parse([string]$claimCapacity.grantedUntil).ToString('o')
+      ValidUntil = (ConvertFrom-HchTimestamp -Value ([string]$claimCapacity.grantedUntil)).ToString('o')
     }
     [void](Set-HchWorkerCapacitySnapshot @capacitySnapshotParameters)
     $expiredReplay = $false
@@ -3676,7 +3702,7 @@ function Assert-HchNodeHeartbeatResponse {
     throw 'orchestrator-node-heartbeat-node-mismatch'
   }
   foreach ($name in @('heartbeatAt', 'serverTime')) {
-    try { [void][DateTimeOffset]::Parse([string]$Response.$name) }
+    try { [void](ConvertFrom-HchTimestamp -Value ([string]$Response.$name)) }
     catch { throw "orchestrator-node-heartbeat-$($name.ToLowerInvariant())-invalid" }
   }
   if ([int]$Response.nextHeartbeatSeconds -ne 60) {
@@ -3717,7 +3743,9 @@ function Assert-HchNodeHeartbeatResponse {
   $grantedUntil = $null
   if ($null -ne $capacity.grantedUntil -and
       -not [string]::IsNullOrWhiteSpace([string]$capacity.grantedUntil)) {
-    try { $grantedUntil = [DateTimeOffset]::Parse([string]$capacity.grantedUntil).ToString('o') }
+    try {
+      $grantedUntil = (ConvertFrom-HchTimestamp -Value ([string]$capacity.grantedUntil)).ToString('o')
+    }
     catch { throw 'orchestrator-node-heartbeat-capacity-granted-until-invalid' }
   }
 
@@ -3767,7 +3795,7 @@ function Assert-HchNodeHeartbeatResponse {
       [string]$Response.workSizing.algorithmVersion -ne [string]$adaptivePolicy.algorithmVersion) {
     throw 'orchestrator-node-heartbeat-work-sizing-policy-mismatch'
   }
-  try { [void][DateTimeOffset]::Parse([string]$Response.workSizing.updatedAt) }
+  try { [void](ConvertFrom-HchTimestamp -Value ([string]$Response.workSizing.updatedAt)) }
   catch { throw 'orchestrator-node-heartbeat-work-sizing-updated-at-invalid' }
 
   Assert-HchExactObjectProperties -Value $Response.claim -Expected @(
@@ -3795,8 +3823,8 @@ function Assert-HchNodeHeartbeatResponse {
     throw 'orchestrator-node-heartbeat-zero-capacity-contract-invalid'
   }
   return [pscustomobject]@{
-    heartbeatAt = [DateTimeOffset]::Parse([string]$Response.heartbeatAt).ToString('o')
-    serverTime = [DateTimeOffset]::Parse([string]$Response.serverTime).ToString('o')
+    heartbeatAt = (ConvertFrom-HchTimestamp -Value ([string]$Response.heartbeatAt)).ToString('o')
+    serverTime = (ConvertFrom-HchTimestamp -Value ([string]$Response.serverTime)).ToString('o')
     nextHeartbeatSeconds = 60
     capacity = [pscustomobject][ordered]@{
       configuredCapacity = $capacityValues.configuredCapacity
@@ -3843,8 +3871,8 @@ function Write-HchNodeHeartbeatSnapshot {
     [int]$ValidatedResponse.nextHeartbeatSeconds
   } else { [int](Get-HchConfigValue $Config 'NodeHeartbeatIntervalSeconds' 60) }
   $nextHeartbeatBase = if ($Status -eq 'succeeded') {
-    [DateTimeOffset]::Parse([string]$ValidatedResponse.heartbeatAt)
-  } else { [DateTimeOffset]::Parse($LastAttemptAt) }
+    ConvertFrom-HchTimestamp -Value ([string]$ValidatedResponse.heartbeatAt)
+  } else { ConvertFrom-HchTimestamp -Value $LastAttemptAt }
   $nextHeartbeatAt = $nextHeartbeatBase.AddSeconds($intervalSeconds).ToString('o')
   $capacity = if ($Status -eq 'succeeded') {
     $ValidatedResponse.capacity
@@ -3882,7 +3910,7 @@ function Write-HchNodeHeartbeatSnapshot {
     mode = $mode
     heartbeat = [ordered]@{
       status = $Status
-      lastAttemptAt = [DateTimeOffset]::Parse($LastAttemptAt).ToString('o')
+      lastAttemptAt = (ConvertFrom-HchTimestamp -Value $LastAttemptAt).ToString('o')
       lastSuccessAt = $lastSuccessAt
       nextHeartbeatAt = $nextHeartbeatAt
       intervalSeconds = $intervalSeconds
@@ -3978,7 +4006,8 @@ function Invoke-HchWorkerNodeHeartbeat {
       if (Test-Path -LiteralPath $readyPath -PathType Leaf) {
         try {
           $ready = Read-HchJsonFile -Path $readyPath
-          $readyIsValid = [DateTimeOffset]::Parse([string]$ready.readyUntil) -gt [DateTimeOffset]::UtcNow
+          $readyIsValid = (ConvertFrom-HchTimestamp -Value ([string]$ready.readyUntil)) -gt
+            [DateTimeOffset]::UtcNow
         } catch { $readyIsValid = $false }
       }
       if ($readyIsValid) {
@@ -4051,7 +4080,7 @@ function Assert-HchAssignmentProgress {
       -not (Test-HchIntegerInRange $Progress.contentBytes 0 4000000)) {
     throw 'assignment-progress-value-invalid'
   }
-  try { $updatedAt = [DateTimeOffset]::Parse([string]$Progress.updatedAt) }
+  try { $updatedAt = ConvertFrom-HchTimestamp -Value ([string]$Progress.updatedAt) }
   catch { throw 'assignment-progress-timestamp-invalid' }
   if ($updatedAt -gt [DateTimeOffset]::UtcNow.AddMinutes(5)) {
     throw 'assignment-progress-timestamp-invalid'
@@ -4094,8 +4123,8 @@ function Assert-HchAssignmentHeartbeatResponse {
     throw 'orchestrator-heartbeat-assignment-mismatch'
   }
   try {
-    $serverTime = [DateTimeOffset]::Parse([string]$Response.serverTime)
-    $leaseExpiresAt = [DateTimeOffset]::Parse([string]$Response.leaseExpiresAt)
+    $serverTime = ConvertFrom-HchTimestamp -Value ([string]$Response.serverTime)
+    $leaseExpiresAt = ConvertFrom-HchTimestamp -Value ([string]$Response.leaseExpiresAt)
   } catch { throw 'orchestrator-heartbeat-time-invalid' }
   if ($leaseExpiresAt -le $serverTime) { throw 'orchestrator-heartbeat-lease-invalid' }
 
@@ -4118,7 +4147,7 @@ function Assert-HchAssignmentHeartbeatResponse {
     throw 'orchestrator-heartbeat-liveness-grace-invalid'
   }
   if ($null -ne $liveness.lastProgressAt) {
-    try { $lastProgressAt = [DateTimeOffset]::Parse([string]$liveness.lastProgressAt) }
+    try { $lastProgressAt = ConvertFrom-HchTimestamp -Value ([string]$liveness.lastProgressAt) }
     catch { throw 'orchestrator-heartbeat-last-progress-invalid' }
     if ($lastProgressAt -gt $serverTime) { throw 'orchestrator-heartbeat-last-progress-invalid' }
   }
@@ -4399,6 +4428,7 @@ function Get-HchWorkerKitStatus {
 
 Export-ModuleMember -Function @(
   'Import-HchWorkerConfig',
+  'ConvertFrom-HchTimestamp',
   'Get-HchWorkerControl',
   'Set-HchWorkerControl',
   'Set-HchWorkerCapacitySnapshot',

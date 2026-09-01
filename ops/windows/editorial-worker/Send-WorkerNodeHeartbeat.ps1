@@ -17,7 +17,8 @@ $refreshBefore = if ($config.ContainsKey('ReadyRefreshBeforeSeconds')) {
   [int]$config.ReadyRefreshBeforeSeconds
 } else { 3000 }
 if ($null -eq $ready -or
-    ([DateTimeOffset]::Parse([string]$ready.readyUntil) - [DateTimeOffset]::UtcNow).TotalSeconds -le $refreshBefore) {
+    ((ConvertFrom-HchTimestamp -Value ([string]$ready.readyUntil)) -
+      [DateTimeOffset]::UtcNow).TotalSeconds -le $refreshBefore) {
   # This runner belongs to the service heartbeat loop. Renewal does not claim.
   try { [void](Invoke-HchWorkerBootstrap -Config $config) } catch { }
   try { $ready = Assert-HchClaimGate -Config $config } catch { $ready = $null }

@@ -34,7 +34,7 @@ function Invoke-HchLocalValidate {
   $applied = Read-HchJsonFile -Path $appliedPath
   if ([string]$ready.nodeId -ne [string]$config.NodeId -or
       [string]$ready.workerKeyId -ne $workerKeyId) { throw 'worker-ready-identity-mismatch' }
-  if ([DateTimeOffset]::Parse([string]$ready.readyUntil) -le [DateTimeOffset]::UtcNow) {
+  if ((ConvertFrom-HchTimestamp -Value ([string]$ready.readyUntil)) -le [DateTimeOffset]::UtcNow) {
     throw 'worker-ready-attestation-expired'
   }
   if ([string]$ready.manifestHash -ne [string]$applied.manifestHash -or
@@ -110,7 +110,10 @@ function Get-HchCliStatus {
   }
   $grantCurrent = $false
   if ($null -ne $capacity.validUntil) {
-    try { $grantCurrent = [DateTimeOffset]::Parse([string]$capacity.validUntil) -gt [DateTimeOffset]::UtcNow }
+    try {
+      $grantCurrent = (ConvertFrom-HchTimestamp -Value ([string]$capacity.validUntil)) -gt
+        [DateTimeOffset]::UtcNow
+    }
     catch { $grantCurrent = $false }
   }
   return [pscustomobject]@{

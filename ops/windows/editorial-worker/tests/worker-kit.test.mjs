@@ -431,6 +431,58 @@ test("PowerShell files parse under the Windows PowerShell 5.1 grammar", (context
   }
 });
 
+test("PowerShell timestamps are strict ISO-8601 and culture invariant", (context) => {
+  if (process.platform !== "win32") return context.skip("Windows PowerShell integration test");
+  const escapedModule = modulePath.replaceAll("'", "''");
+  const script = `
+    Import-Module '${escapedModule}' -Force
+    $previousCulture=[Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+      [Threading.Thread]::CurrentThread.CurrentCulture=
+        [Globalization.CultureInfo]::GetCultureInfo('pt-BR')
+      $utc=ConvertFrom-HchTimestamp -Value '2026-09-01T07:52:44.616Z'
+      $offset=ConvertFrom-HchTimestamp -Value '2026-09-01T10:52:44.616+03:00'
+      $invalid=@()
+      foreach($value in @(
+        '01/09/2026 07:52:44','2026-09-01 07:52:44Z',
+        '2026-09-01T07:52:44','2026-02-30T07:52:44Z'
+      )) {
+        try {[void](ConvertFrom-HchTimestamp -Value $value);$invalid+='accepted'}
+        catch {$invalid+=$_.Exception.Message}
+      }
+      [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((@{
+        utc=@{year=$utc.Year;month=$utc.Month;day=$utc.Day;hour=$utc.Hour;offset=$utc.Offset.TotalMinutes}
+        sameInstant=($utc.ToUniversalTime() -eq $offset.ToUniversalTime())
+        invalid=$invalid
+      }|ConvertTo-Json -Depth 10 -Compress)))
+    } finally {
+      [Threading.Thread]::CurrentThread.CurrentCulture=$previousCulture
+    }
+  `;
+  const encoded = execFileSync(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+    { encoding: "utf8" },
+  ).trim();
+  const result = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  assert.deepEqual(result.utc, { year: 2026, month: 9, day: 1, hour: 7, offset: 0 });
+  assert.equal(result.sameInstant, true);
+  assert.deepEqual(result.invalid, Array(4).fill("timestamp-iso8601-invalid"));
+
+  for (const name of [
+    "Hch.EditorialWorker.psm1",
+    "Hch-Worker.ps1",
+    "Run-WorkerCycle.ps1",
+    "Send-WorkerNodeHeartbeat.ps1",
+  ]) {
+    assert.doesNotMatch(
+      readFileSync(join(kitRoot, name), "utf8"),
+      /\[DateTimeOffset\]::Parse/,
+      `${name} must not use CurrentCulture for protocol timestamps`,
+    );
+  }
+});
+
 test("PowerShell produces the canonical HTTP Message Signature base", async (context) => {
   if (process.platform !== "win32") return context.skip("Windows PowerShell integration test");
   const pair = generateKeyPairSync("ed25519");
