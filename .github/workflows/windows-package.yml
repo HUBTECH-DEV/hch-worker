@@ -72,6 +72,7 @@ jobs:
           persist-credentials: false
 
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        if: env.WIX_EULA_ACCEPTED == 'wix7'
         with:
           global-json-file: global.json
           cache: true
