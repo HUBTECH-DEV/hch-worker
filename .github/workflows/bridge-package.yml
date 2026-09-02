@@ -365,6 +365,7 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      HCH_RELEASE_ADMIN_READ_TOKEN: ${{ secrets.HCH_RELEASE_ADMIN_READ_TOKEN }}
       HCH_SIGNER_THUMBPRINT: ${{ vars.HCH_SIGNER_THUMBPRINT }}
       HCH_SIGNER_CERTIFICATE_SHA256: ${{ vars.HCH_SIGNER_CERTIFICATE_SHA256 }}
       RELEASE_IMMUTABILITY_ENFORCED: ${{ vars.RELEASE_IMMUTABILITY_ENFORCED }}
@@ -385,13 +386,22 @@ jobs:
           if ($env:RELEASE_IMMUTABILITY_ENFORCED -cne 'true') {
             throw 'Repository release immutability must be administratively enabled and reviewed.'
           }
-          $immutableReleaseState = gh api `
-            -H 'Accept: application/vnd.github+json' `
-            -H 'X-GitHub-Api-Version: 2026-03-10' `
-            "repos/$env:GITHUB_REPOSITORY/immutable-releases" |
-            ConvertFrom-Json -Depth 10
-          if ($LASTEXITCODE -ne 0 -or $immutableReleaseState.enabled -ne $true) {
-            throw 'Repository release immutability is not enabled.'
+          if ([string]::IsNullOrWhiteSpace($env:HCH_RELEASE_ADMIN_READ_TOKEN)) {
+            throw 'A protected Administration-read token is required to verify immutable releases.'
+          }
+          $workflowToken = $env:GH_TOKEN
+          try {
+            $env:GH_TOKEN = $env:HCH_RELEASE_ADMIN_READ_TOKEN
+            $immutableReleaseState = gh api `
+              -H 'Accept: application/vnd.github+json' `
+              -H 'X-GitHub-Api-Version: 2026-03-10' `
+              "repos/$env:GITHUB_REPOSITORY/immutable-releases" |
+              ConvertFrom-Json -Depth 10
+            if ($LASTEXITCODE -ne 0 -or $immutableReleaseState.enabled -ne $true) {
+              throw 'Repository release immutability is not enabled.'
+            }
+          } finally {
+            $env:GH_TOKEN = $workflowToken
           }
           $rulesets = @(gh api "repos/$env:GITHUB_REPOSITORY/rulesets?includes_parents=true" |
             ConvertFrom-Json -Depth 50)

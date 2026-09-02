@@ -100,15 +100,12 @@ try {
 
         if ($platform -ceq 'linux') {
             foreach ($relative in @('ops/systemd', 'scripts/hch-editorial-workerctl',
-                    'scripts/run-editorial-bootstrap.sh', 'scripts/run-editorial-node-heartbeat.sh',
                     'scripts/run-editorial-republication.sh', 'scripts/run-editorial-enrollment.sh')) {
                 Copy-BridgePath (Join-Path $repositoryRoot $relative) (Join-Path $productRoot $relative)
             }
             $executables = @(
                 'ops/linux/editorial-worker/worker.mjs',
                 'scripts/hch-editorial-workerctl',
-                'scripts/run-editorial-bootstrap.sh',
-                'scripts/run-editorial-node-heartbeat.sh',
                 'scripts/run-editorial-republication.sh',
                 'scripts/run-editorial-enrollment.sh')
         } else {
