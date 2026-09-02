@@ -1,0 +1,470 @@
+name: Build and publish compatibility bridge 3.1.1
+
+on:
+  # This workflow publishes the stable branch-protection check `bridge-source`.
+  # It must run for every PR so GitHub never leaves the required check pending
+  # because a path filter skipped the workflow.
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - 'lib/**'
+      - 'ops/linux/**'
+      - 'ops/macos/**'
+      - 'ops/systemd/**'
+      - 'ops/windows/editorial-worker/**'
+      - 'ops/windows/installer/**'
+      - 'ops/worker-dashboard/**'
+      - 'scripts/**'
+      - '.github/workflows/bridge-package.yml'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Sign, attest and publish the immutable v3.1.1 compatibility bridge'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-package-3.1.1-${{ github.event_name == 'workflow_dispatch' && inputs.publish && 'publish' || github.sha }}
+  cancel-in-progress: false
+
+env:
+  BRIDGE_VERSION: '3.1.1'
+
+jobs:
+  portable-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+
+      - name: Test portable bridge source
+        run: |
+          npm run test:shared
+          npm run test:linux
+          npm run test:dashboard
+
+      - name: Build deterministic Linux and macOS archives
+        shell: pwsh
+        run: |
+          ./scripts/windows/Build-HchWorkerBridgeArchives.ps1 `
+            -Version $env:BRIDGE_VERSION `
+            -SourceCommit $env:GITHUB_SHA `
+            -OutputDirectory artifacts/bridge `
+            -Force
+
+      - name: Smoke-test extracted Linux archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/hch-bridge-linux"
+          mkdir -p "$root"
+          tar -xzf "artifacts/bridge/HCH-Worker-${BRIDGE_VERSION}-linux-x64.tar.gz" -C "$root"
+          test "$(cat "$root/hch-worker/VERSION")" = "$BRIDGE_VERSION"
+          node --check "$root/hch-worker/ops/linux/editorial-worker/worker.mjs"
+          node --check "$root/hch-worker/ops/worker-dashboard/server.mjs"
+          bash -n "$root/hch-worker/scripts/hch-editorial-workerctl"
+          test -x "$root/hch-worker/ops/linux/editorial-worker/worker.mjs"
+          test -x "$root/hch-worker/scripts/hch-editorial-workerctl"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bridge-portable-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/bridge/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-source:
+    needs: portable-source
+    runs-on: macos-latest
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: bridge-portable-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/bridge
+
+      - name: Smoke-test extracted macOS archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/hch-bridge-macos"
+          mkdir -p "$root"
+          tar -xzf "artifacts/bridge/HCH-Worker-${BRIDGE_VERSION}-macos-universal.tar.gz" -C "$root"
+          test "$(cat "$root/hch-worker/VERSION")" = "$BRIDGE_VERSION"
+          node --check "$root/hch-worker/ops/linux/editorial-worker/worker.mjs"
+          node --check "$root/hch-worker/ops/worker-dashboard/server.mjs"
+          bash -n "$root/hch-worker/ops/macos/editorial-worker/hch-editorial-workerctl"
+          bash -n "$root/hch-worker/ops/macos/editorial-worker/install-launch-agents.sh"
+          plutil -lint "$root/hch-worker/ops/macos/editorial-worker/launchd/online.hubtech.hch.editorial-worker.cycle.plist.in"
+          test -x "$root/hch-worker/ops/macos/editorial-worker/hch-editorial-workerctl"
+          test -x "$root/hch-worker/ops/macos/editorial-worker/install-launch-agents.sh"
+
+  windows-source:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+
+      - name: Build version-stamped legacy service and unsigned Setup
+        shell: pwsh
+        run: |
+          $service = Join-Path $env:RUNNER_TEMP 'HchEditorialWorkerService.exe'
+          ./ops/windows/editorial-worker/Build-HchWorkerService.ps1 `
+            -Version $env:BRIDGE_VERSION `
+            -OutputPath $service
+          $sourceService = 'ops/windows/editorial-worker/service/bin/HchEditorialWorkerService.exe'
+          New-Item -ItemType Directory -Path (Split-Path -Parent $sourceService) -Force | Out-Null
+          Copy-Item -LiteralPath $service -Destination $sourceService -Force
+          $root = Join-Path $env:RUNNER_TEMP 'development-root.pem'
+          @"
+          -----BEGIN PUBLIC KEY-----
+          MCowBQYDK2VwAyEA5yP9kX7g6t+1OJPrHPoNWLC1hQW1c6RZyYF4q5V9mTQ=
+          -----END PUBLIC KEY-----
+          "@ | Set-Content -LiteralPath $root -Encoding ascii
+          $node = (Get-Command node.exe -ErrorAction Stop).Source
+          $nodeSignature = Get-AuthenticodeSignature -LiteralPath $node
+          if ([string]$nodeSignature.Status -ne 'Valid') { throw 'setup-node Node.js is not Authenticode-valid.' }
+          $result = ./ops/windows/installer/Build-HchWorkerSetup.ps1 `
+            -Version $env:BRIDGE_VERSION `
+            -NodePath $node `
+            -RootPublicKeyPath $root `
+            -OutputDirectory (Join-Path $env:RUNNER_TEMP 'bridge-unsigned') `
+            -SigningThumbprint ''
+          ./ops/windows/editorial-worker/Test-HchWorkerReleaseArtifact.ps1 `
+            -BinaryPath $result.artifact `
+            -AllowUnsignedDevelopmentBuild
+          if ([Diagnostics.FileVersionInfo]::GetVersionInfo($result.artifact).FileVersion -ne "$env:BRIDGE_VERSION.0") {
+            throw 'Unsigned Setup did not receive the exact bridge file version.'
+          }
+
+      - name: Test Windows bridge source
+        run: npm run test:windows
+
+  bridge-source:
+    if: always()
+    needs: [portable-source, macos-source, windows-source]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every compatibility source gate
+        env:
+          PORTABLE_RESULT: ${{ needs.portable-source.result }}
+          MACOS_RESULT: ${{ needs.macos-source.result }}
+          WINDOWS_RESULT: ${{ needs.windows-source.result }}
+        run: |
+          test "$PORTABLE_RESULT" = success
+          test "$MACOS_RESULT" = success
+          test "$WINDOWS_RESULT" = success
+
+  reject-unsafe-publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.publish == true &&
+      (github.ref != 'refs/heads/main' ||
+       github.ref_protected != true ||
+       github.event.repository.default_branch != 'main')
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 1
+
+  signed-candidate:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.publish == true &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.event.repository.default_branch == 'main'
+    needs: [bridge-source]
+    runs-on: windows-latest
+    environment: bridge-release-signing
+    outputs:
+      artifact-name: ${{ steps.names.outputs.artifact }}
+    env:
+      HCH_SIGNER_THUMBPRINT: ${{ vars.HCH_SIGNER_THUMBPRINT }}
+      HCH_SIGNER_CERTIFICATE_SHA256: ${{ vars.HCH_SIGNER_CERTIFICATE_SHA256 }}
+      HCH_TIMESTAMP_URL: ${{ vars.HCH_TIMESTAMP_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: bridge-portable-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/bridge
+
+      - name: Prove exact protected source and unused annotated bridge tag
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:HCH_SIGNER_THUMBPRINT -notmatch '^[A-Fa-f0-9]{40}$' -or
+              $env:HCH_SIGNER_CERTIFICATE_SHA256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+              [string]::IsNullOrWhiteSpace($env:HCH_TIMESTAMP_URL)) {
+            throw 'Reviewed signer pins and timestamp URL are required.'
+          }
+          if ((git cat-file -t refs/tags/v3.1.1) -cne 'tag' -or
+              (git rev-parse 'refs/tags/v3.1.1^{commit}') -cne $env:GITHUB_SHA) {
+            throw 'The protected annotated v3.1.1 tag must resolve to this exact main commit.'
+          }
+          $errorPath = Join-Path $env:RUNNER_TEMP 'bridge-release-probe.stderr'
+          & gh api --silent "repos/$env:GITHUB_REPOSITORY/releases/tags/v3.1.1" 2> $errorPath
+          $probeExit = $LASTEXITCODE
+          $probe = if (Test-Path -LiteralPath $errorPath) { Get-Content -Raw -LiteralPath $errorPath } else { '' }
+          if ($probeExit -eq 0) { throw 'The v3.1.1 release already exists.' }
+          if ($probe -notmatch 'HTTP 404') { throw "Could not prove that v3.1.1 is unused: $probe" }
+
+      - name: Materialize public root trust and import isolated signing identity
+        shell: pwsh
+        env:
+          HCH_ROOT_PUBLIC_KEY_PEM_BASE64: ${{ vars.HCH_ROOT_PUBLIC_KEY_PEM_BASE64 }}
+          HCH_SIGN_PFX_BASE64: ${{ secrets.HCH_SIGN_PFX_BASE64 }}
+          HCH_SIGN_PFX_PASSWORD: ${{ secrets.HCH_SIGN_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:HCH_ROOT_PUBLIC_KEY_PEM_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:HCH_SIGN_PFX_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:HCH_SIGN_PFX_PASSWORD)) {
+            throw 'Public root trust and protected signing secret are required.'
+          }
+          $root = Join-Path $env:RUNNER_TEMP 'orchestrator-root.pem'
+          [IO.File]::WriteAllBytes($root, [Convert]::FromBase64String($env:HCH_ROOT_PUBLIC_KEY_PEM_BASE64))
+          $pfx = Join-Path $env:RUNNER_TEMP 'bridge-signer.pfx'
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:HCH_SIGN_PFX_BASE64))
+            $password = ConvertTo-SecureString $env:HCH_SIGN_PFX_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My `
+              -Password $password -Exportable:$false
+            if ($certificate.Thumbprint -cne $env:HCH_SIGNER_THUMBPRINT.ToUpperInvariant()) {
+              throw 'Imported signer SHA-1 pin mismatch.'
+            }
+            $sha256 = [Convert]::ToHexString($certificate.GetCertHash(
+              [Security.Cryptography.HashAlgorithmName]::SHA256))
+            if ($sha256 -cne $env:HCH_SIGNER_CERTIFICATE_SHA256.ToUpperInvariant()) {
+              throw 'Imported signer SHA-256 pin mismatch.'
+            }
+          } finally {
+            Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+          }
+          "HCH_BRIDGE_ROOT_PATH=$root" >> $env:GITHUB_ENV
+
+      - name: Build and sign the exact Windows bridge package
+        shell: pwsh
+        run: |
+          $service = 'ops/windows/editorial-worker/service/bin/HchEditorialWorkerService.exe'
+          ./ops/windows/editorial-worker/Build-HchWorkerService.ps1 `
+            -Version $env:BRIDGE_VERSION `
+            -OutputPath $service
+          ./ops/windows/editorial-worker/Sign-HchWorkerReleaseArtifact.ps1 `
+            -BinaryPath $service `
+            -CertificateThumbprint $env:HCH_SIGNER_THUMBPRINT `
+            -TimestampUrl $env:HCH_TIMESTAMP_URL
+          $node = (Get-Command node.exe -ErrorAction Stop).Source
+          $result = ./ops/windows/installer/Build-HchWorkerSetup.ps1 `
+            -Version $env:BRIDGE_VERSION `
+            -NodePath $node `
+            -RootPublicKeyPath $env:HCH_BRIDGE_ROOT_PATH `
+            -OutputDirectory (Join-Path $env:RUNNER_TEMP 'bridge-windows') `
+            -SigningThumbprint $env:HCH_SIGNER_THUMBPRINT `
+            -TimestampUrl $env:HCH_TIMESTAMP_URL
+          Copy-Item -LiteralPath $result.artifact -Destination artifacts/bridge -Force
+
+      - name: Produce signed exact checksums and verify the candidate
+        shell: pwsh
+        run: |
+          ./scripts/windows/Complete-HchWorkerBridgePackage.ps1 `
+            -PackageDirectory artifacts/bridge `
+            -Version $env:BRIDGE_VERSION `
+            -SignerThumbprint $env:HCH_SIGNER_THUMBPRINT `
+            -SignerCertificateSha256 $env:HCH_SIGNER_CERTIFICATE_SHA256
+          ./scripts/windows/Test-HchWorkerBridgeRelease.ps1 `
+            -Version $env:BRIDGE_VERSION `
+            -BridgeSourceCommit $env:GITHUB_SHA `
+            -CmsSignerSha1 $env:HCH_SIGNER_THUMBPRINT `
+            -CmsSignerSha256 $env:HCH_SIGNER_CERTIFICATE_SHA256 `
+            -CandidateMode `
+            -AssetDirectory artifacts/bridge
+
+      - name: Remove imported signing identity
+        if: always()
+        shell: pwsh
+        run: |
+          $path = "Cert:\CurrentUser\My\$env:HCH_SIGNER_THUMBPRINT"
+          if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+
+      - name: Name immutable candidate artifact
+        id: names
+        shell: pwsh
+        run: |
+          "artifact=hch-worker-bridge-3.1.1-${{ github.sha }}-${{ github.run_attempt }}" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.names.outputs.artifact }}
+          path: |
+            artifacts/bridge/HCH-Worker-Setup-3.1.1-x64.exe
+            artifacts/bridge/HCH-Worker-3.1.1-linux-x64.tar.gz
+            artifacts/bridge/HCH-Worker-3.1.1-macos-universal.tar.gz
+            artifacts/bridge/SHA256SUMS.txt
+            artifacts/bridge/SHA256SUMS.p7s
+          if-no-files-found: error
+          retention-days: 90
+
+  attest-candidate:
+    if: inputs.publish == true
+    needs: signed-candidate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.signed-candidate.outputs.artifact-name }}
+          path: artifacts/bridge
+
+      - uses: actions/attest-build-provenance@8beda2b7ed98355c0e97c0a63bec38ae472e66c4 # v4
+        with:
+          subject-path: |
+            artifacts/bridge/HCH-Worker-Setup-3.1.1-x64.exe
+            artifacts/bridge/HCH-Worker-3.1.1-linux-x64.tar.gz
+            artifacts/bridge/HCH-Worker-3.1.1-macos-universal.tar.gz
+
+  publish-immutable-bridge:
+    if: inputs.publish == true
+    needs: [signed-candidate, attest-candidate]
+    runs-on: windows-latest
+    environment: bridge-release-promotion
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HCH_SIGNER_THUMBPRINT: ${{ vars.HCH_SIGNER_THUMBPRINT }}
+      HCH_SIGNER_CERTIFICATE_SHA256: ${{ vars.HCH_SIGNER_CERTIFICATE_SHA256 }}
+      RELEASE_IMMUTABILITY_ENFORCED: ${{ vars.RELEASE_IMMUTABILITY_ENFORCED }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.signed-candidate.outputs.artifact-name }}
+          path: artifacts/bridge
+
+      - name: Re-prove immutable controls and exact attested packages
+        shell: pwsh
+        env:
+          HCH_RELEASE_ADMIN_READ_TOKEN: ${{ secrets.HCH_RELEASE_ADMIN_READ_TOKEN }}
+        run: |
+          if ($env:RELEASE_IMMUTABILITY_ENFORCED -cne 'true') {
+            throw 'Repository release immutability must be administratively enabled and reviewed.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:HCH_RELEASE_ADMIN_READ_TOKEN)) {
+            throw 'A protected Administration-read token is required to verify immutable releases.'
+          }
+          $workflowToken = $env:GH_TOKEN
+          try {
+            $env:GH_TOKEN = $env:HCH_RELEASE_ADMIN_READ_TOKEN
+            $immutableReleaseState = gh api `
+              -H 'Accept: application/vnd.github+json' `
+              -H 'X-GitHub-Api-Version: 2026-03-10' `
+              "repos/$env:GITHUB_REPOSITORY/immutable-releases" |
+              ConvertFrom-Json -Depth 10
+            if ($LASTEXITCODE -ne 0 -or $immutableReleaseState.enabled -ne $true) {
+              throw 'Repository release immutability is not enabled.'
+            }
+          } finally {
+            $env:GH_TOKEN = $workflowToken
+          }
+          $rulesets = @(gh api "repos/$env:GITHUB_REPOSITORY/rulesets?includes_parents=true" |
+            ConvertFrom-Json -Depth 50)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read repository tag rulesets.' }
+          $protectedBridgeTag = $false
+          foreach ($summary in @($rulesets | Where-Object { $_.target -eq 'tag' -and $_.enforcement -eq 'active' })) {
+            $detail = gh api "repos/$env:GITHUB_REPOSITORY/rulesets/$($summary.id)" |
+              ConvertFrom-Json -Depth 50
+            if ($LASTEXITCODE -ne 0) { throw 'Could not inspect an active repository tag ruleset.' }
+            $ruleTypes = @($detail.rules.type)
+            if (@($detail.conditions.ref_name.include) -ccontains 'refs/tags/v3.1.1' `
+                -and @($detail.conditions.ref_name.exclude).Count -eq 0 `
+                -and @($detail.bypass_actors).Count -eq 0 `
+                -and $ruleTypes -ccontains 'update' `
+                -and $ruleTypes -ccontains 'deletion') {
+              $protectedBridgeTag = $true
+            }
+          }
+          if (-not $protectedBridgeTag) {
+            throw 'No active no-bypass ruleset protects refs/tags/v3.1.1 from mutation.'
+          }
+          if ((git cat-file -t refs/tags/v3.1.1) -cne 'tag' -or
+              (git rev-parse 'refs/tags/v3.1.1^{commit}') -cne $env:GITHUB_SHA) {
+            throw 'Protected annotated bridge tag changed after signing.'
+          }
+          foreach ($name in @(
+              'HCH-Worker-Setup-3.1.1-x64.exe',
+              'HCH-Worker-3.1.1-linux-x64.tar.gz',
+              'HCH-Worker-3.1.1-macos-universal.tar.gz')) {
+            gh attestation verify "artifacts/bridge/$name" `
+              --repo $env:GITHUB_REPOSITORY `
+              --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/bridge-package.yml" `
+              --source-digest $env:GITHUB_SHA `
+              --source-ref refs/heads/main `
+              --deny-self-hosted-runners
+            if ($LASTEXITCODE -ne 0) { throw "Attestation verification failed for $name." }
+          }
+          $probePath = Join-Path $env:RUNNER_TEMP 'bridge-release-probe.stderr'
+          & gh api --silent "repos/$env:GITHUB_REPOSITORY/releases/tags/v3.1.1" 2> $probePath
+          $probeExit = $LASTEXITCODE
+          $probe = if (Test-Path -LiteralPath $probePath) { Get-Content -Raw -LiteralPath $probePath } else { '' }
+          if ($probeExit -eq 0) { throw 'The v3.1.1 release already exists.' }
+          if ($probe -notmatch 'HTTP 404') { throw "Could not prove that v3.1.1 is unused: $probe" }
+
+      - name: Publish the exact bridge without rebuilding
+        shell: pwsh
+        run: |
+          $notes = @(
+            'Final cross-platform compatibility bridge for Worker 3.1 clients.'
+            'This release only introduces OS-specific release discovery and remains content-compatible.'
+            ''
+            'HCH-Worker-Compatibility: compatible'
+            'HCH-Worker-Content-Impact: none'
+          ) -join "`n"
+          gh release create v3.1.1 `
+            artifacts/bridge/HCH-Worker-Setup-3.1.1-x64.exe `
+            artifacts/bridge/HCH-Worker-3.1.1-linux-x64.tar.gz `
+            artifacts/bridge/HCH-Worker-3.1.1-macos-universal.tar.gz `
+            artifacts/bridge/SHA256SUMS.txt `
+            artifacts/bridge/SHA256SUMS.p7s `
+            --verify-tag `
+            --latest `
+            --title 'HCH Worker 3.1.1 compatibility bridge' `
+            --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw 'Bridge release publication failed.' }

@@ -139,7 +139,8 @@ public sealed class WindowsPlatformTests
     public void TelemetryUsesNullForUnavailableOrInvalidMeasurements()
     {
         using var collector = new WindowsTelemetryCollector(
-            gpuProvider: new InvalidGpuTelemetryProvider());
+            gpuProvider: new InvalidGpuTelemetryProvider(),
+            auxiliaryProcessProvider: new FixedAuxiliaryProcessCountProvider(3));
 
         WindowsTelemetrySnapshot first = collector.Collect();
         WindowsTelemetrySnapshot second = collector.Collect();
@@ -149,12 +150,40 @@ public sealed class WindowsPlatformTests
         Assert.Null(first.SystemCpuPercent);
         Assert.Null(first.GpuPercent);
         Assert.Equal(512UL, first.VramUsedBytes);
+        Assert.Equal(3, first.AuxiliaryProcessCount);
         Assert.True(first.ProcessWorkingSetBytes is null or > 0);
         Assert.True(first.TotalMemoryBytes is null or > 0);
         Assert.True(first.NetworkReceivedBytes is null or >= 0);
         Assert.True(first.NetworkSentBytes is null or >= 0);
         Assert.True(second.ProcessCpuPercent is null or >= 0 and <= 100);
         Assert.True(second.SystemCpuPercent is null or >= 0 and <= 100);
+    }
+
+    [Fact]
+    public void RegistryOnlyGpuTelemetryLeavesDynamicCountersUnavailable()
+    {
+        GpuTelemetry sample = new WindowsGpuTelemetryProvider().Collect();
+
+        Assert.Null(sample.UtilizationPercent);
+        Assert.Null(sample.VramUsedBytes);
+        Assert.True(sample.Name is null or { Length: > 0 });
+        Assert.True(sample.VramTotalBytes is null or > 0);
+    }
+
+    [Fact]
+    public void ScmStateIsRunningOnlyWhenItBelongsToTheExpectedProcess()
+    {
+        WindowsServiceStatus running = WindowsServiceStateProvider.Normalize(4, 4242, 4242);
+        WindowsServiceStatus mismatch = WindowsServiceStateProvider.Normalize(4, 4243, 4242);
+        WindowsServiceStatus stopped = WindowsServiceStateProvider.Normalize(1, 0, 4242);
+
+        Assert.True(running.Available);
+        Assert.Equal("Running", running.State);
+        Assert.False(mismatch.Available);
+        Assert.Equal("Unknown", mismatch.State);
+        Assert.Equal("service-process-mismatch", mismatch.UnavailableReason);
+        Assert.True(stopped.Available);
+        Assert.Equal("Stopped", stopped.State);
     }
 
     [Fact]
@@ -220,5 +249,11 @@ public sealed class WindowsPlatformTests
     private sealed class InvalidGpuTelemetryProvider : IGpuTelemetryProvider
     {
         public GpuTelemetry Collect() => new(double.NaN, 512);
+    }
+
+    private sealed class FixedAuxiliaryProcessCountProvider(int value)
+        : IAuxiliaryProcessCountProvider
+    {
+        public int Collect() => value;
     }
 }

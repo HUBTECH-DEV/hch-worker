@@ -55,6 +55,16 @@ public sealed class AssignmentRuntimeRegistry(TimeProvider? timeProvider = null)
         .OrderBy(static progress => progress.AssignmentId, StringComparer.Ordinal)
         .ToArray();
 
+    public TimeSpan? Elapsed(string assignmentId, DateTimeOffset completedAt)
+    {
+        if (!active.TryGetValue(assignmentId, out AssignmentRuntimeContext? context))
+        {
+            return null;
+        }
+
+        return context.Elapsed(completedAt);
+    }
+
     public async Task RunHeartbeatLoopAsync(
         IOrchestratorClient client,
         CancellationToken serviceStopping)
@@ -62,9 +72,39 @@ public sealed class AssignmentRuntimeRegistry(TimeProvider? timeProvider = null)
         while (!serviceStopping.IsCancellationRequested)
         {
             await Task.Delay(HeartbeatInterval, clock, serviceStopping).ConfigureAwait(false);
-            var contexts = active.Values.ToArray();
-            await Task.WhenAll(contexts.Select(context => HeartbeatOneAsync(client, context, serviceStopping)))
-                .ConfigureAwait(false);
+            await RunHeartbeatPassAsync(client, serviceStopping).ConfigureAwait(false);
+        }
+    }
+
+    internal Task RunHeartbeatPassAsync(
+        IOrchestratorClient client,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        AssignmentRuntimeContext[] contexts = active.Values.ToArray();
+        return Task.WhenAll(contexts.Select(context =>
+            HeartbeatOneIsolatedAsync(client, context, cancellationToken)));
+    }
+
+    private async Task HeartbeatOneIsolatedAsync(
+        IOrchestratorClient client,
+        AssignmentRuntimeContext context,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await HeartbeatOneAsync(client, context, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error) when (IsRecoverableHeartbeatFailure(error))
+        {
+            // Any failure not already classified below belongs to this
+            // assignment. Abort it with a fixed code instead of terminating
+            // the heartbeat loop for every other active assignment.
+            context.Abort("assignment-heartbeat-internal-error");
         }
     }
 
@@ -73,7 +113,11 @@ public sealed class AssignmentRuntimeRegistry(TimeProvider? timeProvider = null)
         AssignmentRuntimeContext context,
         CancellationToken cancellationToken)
     {
-        var snapshot = context.ProtocolSnapshot();
+        if (!context.TryProtocolSnapshot(out AssignmentProgress snapshot))
+        {
+            return;
+        }
+
         var now = clock.GetUtcNow();
         var grace = snapshot.Phase switch
         {
@@ -117,18 +161,34 @@ public sealed class AssignmentRuntimeRegistry(TimeProvider? timeProvider = null)
         {
             context.Abort(error.Code);
         }
+        catch (ProtocolValidationException)
+        {
+            // A syntactically valid HTTP exchange can still carry a response
+            // that violates the assignment contract. Fail only that assignment;
+            // one bad response must not terminate heartbeats for the other work.
+            context.Abort("assignment-heartbeat-response-invalid");
+        }
     }
+
+    private static bool IsRecoverableHeartbeatFailure(Exception error) => error is not (
+        OutOfMemoryException
+        or StackOverflowException
+        or AccessViolationException
+        or AppDomainUnloadedException
+        or BadImageFormatException);
 
     internal sealed class AssignmentRuntimeContext : IDisposable
     {
         private readonly object gate = new();
         private readonly CancellationTokenSource abort = new();
+        private readonly CancellationToken abortToken;
         private AssignmentProgress progress;
         private DateTimeOffset observedAt;
         private DateTimeOffset lastMaterialProgressAt;
         private DateTimeOffset leaseExpiresAt;
         private double? percent;
         private string? abortReason;
+        private bool disposed;
 
         public AssignmentRuntimeContext(
             WorkerAssignment assignment,
@@ -137,10 +197,12 @@ public sealed class AssignmentRuntimeRegistry(TimeProvider? timeProvider = null)
             DateTimeOffset now)
         {
             Assignment = assignment;
+            abortToken = abort.Token;
             progress = new AssignmentProgress { Phase = "starting", Attempt = 1, Sequence = 0, ContentBytes = 0 };
             ItemIndex = itemIndex;
             BatchTotal = batchTotal;
             percent = 0d;
+            StartedAt = now;
             observedAt = now;
             lastMaterialProgressAt = now;
             leaseExpiresAt = ProtocolTime.ParseTimestamp(assignment.LeaseExpiresAt, "leaseExpiresAt");
@@ -152,7 +214,9 @@ public sealed class AssignmentRuntimeRegistry(TimeProvider? timeProvider = null)
 
         public int BatchTotal { get; }
 
-        public CancellationToken CancellationToken => abort.Token;
+        public DateTimeOffset StartedAt { get; }
+
+        public CancellationToken CancellationToken => abortToken;
 
         public DateTimeOffset LastMaterialProgressAt
         {
@@ -168,6 +232,9 @@ public sealed class AssignmentRuntimeRegistry(TimeProvider? timeProvider = null)
         {
             get { lock (gate) { return abortReason; } }
         }
+
+        public TimeSpan Elapsed(DateTimeOffset completedAt) =>
+            completedAt <= StartedAt ? TimeSpan.Zero : completedAt - StartedAt;
 
         public void Update(OllamaProgress value)
         {
@@ -211,17 +278,24 @@ public sealed class AssignmentRuntimeRegistry(TimeProvider? timeProvider = null)
             }
         }
 
-        public AssignmentProgress ProtocolSnapshot()
+        public bool TryProtocolSnapshot(out AssignmentProgress snapshot)
         {
             lock (gate)
             {
-                return new AssignmentProgress
+                if (disposed)
+                {
+                    snapshot = null!;
+                    return false;
+                }
+
+                snapshot = new AssignmentProgress
                 {
                     Phase = progress.Phase,
                     Attempt = progress.Attempt,
                     Sequence = progress.Sequence,
                     ContentBytes = progress.ContentBytes,
                 };
+                return true;
             }
         }
 
@@ -246,7 +320,7 @@ public sealed class AssignmentRuntimeRegistry(TimeProvider? timeProvider = null)
         {
             lock (gate)
             {
-                if (expiresAt > leaseExpiresAt)
+                if (!disposed && expiresAt > leaseExpiresAt)
                 {
                     leaseExpiresAt = expiresAt;
                 }
@@ -257,13 +331,29 @@ public sealed class AssignmentRuntimeRegistry(TimeProvider? timeProvider = null)
         {
             lock (gate)
             {
-                abortReason ??= SignedOrchestratorClient.SafeErrorCode(reason);
-            }
+                if (disposed)
+                {
+                    return;
+                }
 
-            abort.Cancel();
+                abortReason ??= SignedOrchestratorClient.SafeErrorCode(reason);
+                abort.Cancel();
+            }
         }
 
-        public void Dispose() => abort.Dispose();
+        public void Dispose()
+        {
+            lock (gate)
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                disposed = true;
+                abort.Dispose();
+            }
+        }
     }
 }
 
@@ -447,6 +537,11 @@ public sealed class OrchestratorJobSource(
             var pending = await pendingClaims.ReadAsync(cancellationToken).ConfigureAwait(false);
             if (pending is null)
             {
+                if (!control.IsClaimRequestAuthorized(requestedCount))
+                {
+                    return [];
+                }
+
                 pending = new PendingClaimRecord
                 {
                     SchemaVersion = 1,
@@ -472,12 +567,9 @@ public sealed class OrchestratorJobSource(
                 validateAppliedRuntime: true,
                 cancellationToken).ConfigureAwait(false);
             pendingClaims.Delete();
-            var grant = Math.Min(response.Capacity.GrantedCapacity, requestedCount);
-            control.SetGrantedCapacity(grant, "scheduler-capacity");
             if (jobs.Count == 0)
             {
                 await Task.Delay(TimeSpan.FromSeconds(5), clock, cancellationToken).ConfigureAwait(false);
-                control.SetGrantedCapacity(grant, "orchestrator-claim-poll");
             }
 
             return jobs;
@@ -668,7 +760,7 @@ public sealed class JournaledJobReporter(
     string nodeId,
     string keyId,
     Action<string>? unsafeOutcome = null,
-    Action? completed = null,
+    Action<TimeSpan?>? completed = null,
     Action? failed = null,
     TimeProvider? timeProvider = null) : IWorkerJobReporter
 {
@@ -707,7 +799,7 @@ public sealed class JournaledJobReporter(
             journal = journal.Transition(EditorialJournalPhase.Completed, clock.GetUtcNow());
             await journals.WriteAsync(journal, cancellationToken).ConfigureAwait(false);
             recovery.Delete(job.AssignmentId);
-            completed?.Invoke();
+            completed?.Invoke(progress.Elapsed(job.AssignmentId, clock.GetUtcNow()));
         }
         catch (Exception error) when (error is OrchestratorRequestException or WorkerServiceException)
         {

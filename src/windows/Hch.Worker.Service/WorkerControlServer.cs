@@ -211,9 +211,25 @@ public sealed class WorkerControlPipeServer(
     SanitizedLogStore logs,
     OperationalEnrollmentCoordinator? enrollment,
     PostEnrollmentRuntimeActivator? postEnrollmentActivation,
-    TimeProvider? timeProvider = null)
+    TimeProvider? timeProvider = null,
+    TimeSpan? requestReadTimeout = null,
+    TimeSpan? commandTimeout = null,
+    TimeSpan? responseWriteTimeout = null)
 {
+    private static readonly TimeSpan DefaultRequestReadTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DefaultCommandTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan DefaultResponseWriteTimeout = TimeSpan.FromSeconds(5);
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
+    private readonly TimeSpan requestReadTimeout = ValidateTimeout(
+        requestReadTimeout ?? DefaultRequestReadTimeout,
+        nameof(requestReadTimeout));
+    private readonly TimeSpan commandTimeout = ValidateTimeout(
+        commandTimeout ?? DefaultCommandTimeout,
+        nameof(commandTimeout));
+    private readonly TimeSpan responseWriteTimeout = ValidateTimeout(
+        responseWriteTimeout ?? DefaultResponseWriteTimeout,
+        nameof(responseWriteTimeout));
+    private readonly SemaphoreSlim commandExecutionGate = new(1, 1);
 
     public async Task RunAsync(CancellationToken serviceStopping)
     {
@@ -229,8 +245,16 @@ public sealed class WorkerControlPipeServer(
         while (!serviceStopping.IsCancellationRequested)
         {
             await using var pipe = LocalNamedPipe.CreateServer(pipeName, ownerSid, serviceSid);
-            await pipe.WaitForConnectionAsync(serviceStopping).ConfigureAwait(false);
-            await ProcessOneAsync(pipe, ownerSid, serviceStopping).ConfigureAwait(false);
+            try
+            {
+                await pipe.WaitForConnectionAsync(serviceStopping).ConfigureAwait(false);
+                await ProcessOneAsync(pipe, ownerSid, serviceStopping).ConfigureAwait(false);
+            }
+            catch (IOException) when (!serviceStopping.IsCancellationRequested)
+            {
+                // A peer disconnect is scoped to one pipe instance. The next
+                // loop iteration must remain available to the legitimate tray.
+            }
         }
     }
 
@@ -245,14 +269,32 @@ public sealed class WorkerControlPipeServer(
         {
             NamedPipeClientAuthorization authorization =
                 LocalNamedPipe.GetClientAuthorization(pipe, ownerSid);
-            request = await IpcFraming.ReadAsync<IpcRequest>(pipe, cancellationToken).ConfigureAwait(false);
+            using (var readDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                readDeadline.CancelAfter(requestReadTimeout);
+                try
+                {
+                    request = await IpcFraming.ReadAsync<IpcRequest>(pipe, readDeadline.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException error)
+                    when (readDeadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    throw new IpcOperationTimeoutException("ipc-request-timeout", error);
+                }
+            }
+
             IpcValidation.Request(request, clock.GetUtcNow());
             if (!IsCommandAuthorized(authorization, request.Command))
             {
                 throw new UnauthorizedAccessException("ipc-command-owner-required");
             }
 
-            response = await DispatchAsync(request, cancellationToken).ConfigureAwait(false);
+            response = await DispatchWithDeadlineAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception error)
         {
@@ -265,7 +307,29 @@ public sealed class WorkerControlPipeServer(
             response = IpcResponse.Error(requestId!, ErrorCode(error));
         }
 
-        await IpcFraming.WriteAsync(pipe, response, cancellationToken).ConfigureAwait(false);
+        // Without a validated request id there is nothing safe to correlate,
+        // so a peer that never sent a frame is disconnected without a reply.
+        if (request is null || !pipe.IsConnected)
+        {
+            return;
+        }
+
+        using var writeDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        writeDeadline.CancelAfter(responseWriteTimeout);
+        try
+        {
+            await IpcFraming.WriteAsync(pipe, response, writeDeadline.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (
+            writeDeadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            // A peer that does not consume its response cannot monopolize the
+            // only control pipe instance.
+        }
+        catch (IOException)
+        {
+            // The peer disconnected after its command was processed.
+        }
     }
 
     internal static bool IsCommandAuthorized(
@@ -310,6 +374,55 @@ public sealed class WorkerControlPipeServer(
                 .ConfigureAwait(false),
             _ => IpcResponse.Error(request.RequestId, "ipc-command-unsupported"),
         };
+    }
+
+    private async Task<IpcResponse> DispatchWithDeadlineAsync(
+        IpcRequest request,
+        CancellationToken cancellationToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(commandTimeout);
+        CancellationToken commandToken = deadline.Token;
+        try
+        {
+            await commandExecutionGate.WaitAsync(commandToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException error)
+            when (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new IpcOperationTimeoutException("ipc-command-timeout", error);
+        }
+
+        Task<IpcResponse> dispatch;
+        try
+        {
+            dispatch = DispatchAsync(request, commandToken);
+        }
+        catch
+        {
+            commandExecutionGate.Release();
+            throw;
+        }
+
+        _ = dispatch.ContinueWith(
+            static (completed, state) =>
+            {
+                _ = completed.Exception;
+                ((SemaphoreSlim)state!).Release();
+            },
+            commandExecutionGate,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        try
+        {
+            return await dispatch.WaitAsync(commandToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException error)
+            when (deadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new IpcOperationTimeoutException("ipc-command-timeout", error);
+        }
     }
 
     private async Task<IpcResponse> PrepareMaintenanceAsync(
@@ -445,7 +558,24 @@ public sealed class WorkerControlPipeServer(
         Hch.Worker.Protocol.ProtocolValidationException protocol => protocol.Code,
         IpcContractException ipc => ipc.Code,
         UnauthorizedAccessException => "ipc-client-unauthorized",
+        IpcOperationTimeoutException timeout => timeout.Code,
         OperationCanceledException => "ipc-command-cancelled",
         _ => "ipc-command-failed",
     };
+
+    private static TimeSpan ValidateTimeout(TimeSpan value, string parameterName)
+    {
+        if (value <= TimeSpan.Zero || value > TimeSpan.FromMinutes(10))
+        {
+            throw new ArgumentOutOfRangeException(parameterName);
+        }
+
+        return value;
+    }
+
+    private sealed class IpcOperationTimeoutException(string code, Exception innerException)
+        : TimeoutException(code, innerException)
+    {
+        public string Code { get; } = code;
+    }
 }

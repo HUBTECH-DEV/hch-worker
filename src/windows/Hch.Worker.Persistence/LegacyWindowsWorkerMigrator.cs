@@ -65,6 +65,7 @@ public sealed partial class LegacyWindowsWorkerMigrator(
             LegacyRuntimePreflightEvidence firstPreflight = await runtimePreflight
                 .CaptureAsync(descriptor, cancellationToken).ConfigureAwait(false);
             ValidatePreflight(firstPreflight, descriptor);
+            string sourceVersion = ResolveSourceVersion(request, firstPreflight);
 
             IReadOnlyList<LegacySnapshotFile> firstSnapshot = await BuildSnapshotAsync(
                 sourceRoot,
@@ -79,7 +80,7 @@ public sealed partial class LegacyWindowsWorkerMigrator(
             LegacyRootTrustProjection trust = await LegacyWindowsMigrationParsing
                 .ReadRootTrustAsync(sourceRoot, legacy, cancellationToken).ConfigureAwait(false);
             migrationId = CreateMigrationId(
-                request.SourceVersion,
+                sourceVersion,
                 request.TargetVersion,
                 legacy.NodeId,
                 identity.Fingerprint,
@@ -120,6 +121,7 @@ public sealed partial class LegacyWindowsWorkerMigrator(
             string backupRoot = targetState.Resolve(backupRelativePath);
             var prepared = CreateJournal(
                 request,
+                sourceVersion,
                 sourceRoot,
                 snapshotDigest,
                 backupRelativePath,
@@ -162,6 +164,10 @@ public sealed partial class LegacyWindowsWorkerMigrator(
             LegacyRuntimePreflightEvidence secondPreflight = await runtimePreflight
                 .CaptureAsync(descriptor, cancellationToken).ConfigureAwait(false);
             ValidatePreflight(secondPreflight, descriptor);
+            if (ResolveSourceVersion(request, secondPreflight) != sourceVersion)
+            {
+                throw Fail("legacy-source-version-changed-during-migration");
+            }
             ValidateAclCoverage(secondPreflight, secondSnapshot);
             if (PreflightDigest(firstPreflight) != PreflightDigest(secondPreflight))
             {
@@ -696,6 +702,10 @@ public sealed partial class LegacyWindowsWorkerMigrator(
             || !evidence.ExclusiveWriterLocksAvailable
             || evidence.ServiceDefinition.ServiceName != descriptor.ServiceName
             || !ReferencesLegacyServiceExecutable(evidence.ServiceDefinition.ImagePath)
+            || !ExecutablePathMatchesImagePath(
+                evidence.ServiceDefinition.ImagePath,
+                evidence.ServiceDefinition.ExecutablePath)
+            || !HchDigest.IsLowerSha256(evidence.ServiceDefinition.ExecutableSha256)
             || !evidence.ServiceDefinition.AccountName.Equals(
                 $@"NT SERVICE\{descriptor.ServiceName}",
                 StringComparison.OrdinalIgnoreCase)
@@ -712,38 +722,53 @@ public sealed partial class LegacyWindowsWorkerMigrator(
         }
     }
 
-    private static bool ReferencesLegacyServiceExecutable(string imagePath)
+    private static string ResolveSourceVersion(
+        LegacyWindowsMigrationRequest request,
+        LegacyRuntimePreflightEvidence evidence)
     {
-        if (string.IsNullOrWhiteSpace(imagePath))
+        string actual = evidence.ServiceDefinition.ExecutableVersion;
+        if (actual is not ("3.1.0" or "3.1.1"))
+        {
+            throw Fail("legacy-source-version-unsupported");
+        }
+
+        if (request.ExpectedSourceVersion is not null
+            && !request.ExpectedSourceVersion.Equals(actual, StringComparison.Ordinal))
+        {
+            throw Fail("legacy-source-version-mismatch");
+        }
+
+        return actual;
+    }
+
+    private static bool ExecutablePathMatchesImagePath(string imagePath, string executablePath)
+    {
+        string? parsed = ParseLegacyServiceExecutable(imagePath);
+        if (parsed is null || string.IsNullOrWhiteSpace(executablePath))
         {
             return false;
         }
 
-        ReadOnlySpan<char> command = imagePath.AsSpan().Trim();
-        ReadOnlySpan<char> executable;
-        if (command[0] == '"')
+        try
         {
-            int closingQuote = command[1..].IndexOf('"');
-            if (closingQuote < 0)
-            {
-                return false;
-            }
-
-            closingQuote++;
-            executable = command[1..closingQuote];
-            ReadOnlySpan<char> arguments = command[(closingQuote + 1)..];
-            if (!arguments.IsEmpty && !char.IsWhiteSpace(arguments[0]))
-            {
-                return false;
-            }
+            return Path.GetFullPath(parsed).Equals(
+                Path.GetFullPath(executablePath),
+                StringComparison.OrdinalIgnoreCase);
         }
-        else
+        catch (Exception error) when (error is ArgumentException or NotSupportedException
+            or PathTooLongException)
         {
-            int firstWhitespace = command.IndexOfAny(" \t\r\n");
-            executable = firstWhitespace < 0 ? command : command[..firstWhitespace];
+            return false;
         }
+    }
 
-        string candidate = executable.ToString();
+    private static bool ReferencesLegacyServiceExecutable(string imagePath)
+    {
+        string? candidate = ParseLegacyServiceExecutable(imagePath);
+        if (candidate is null)
+        {
+            return false;
+        }
         try
         {
             return Path.IsPathFullyQualified(candidate)
@@ -757,6 +782,40 @@ public sealed partial class LegacyWindowsWorkerMigrator(
         {
             return false;
         }
+    }
+
+    private static string? ParseLegacyServiceExecutable(string imagePath)
+    {
+        if (string.IsNullOrWhiteSpace(imagePath))
+        {
+            return null;
+        }
+
+        ReadOnlySpan<char> command = imagePath.AsSpan().Trim();
+        ReadOnlySpan<char> executable;
+        if (command[0] == '"')
+        {
+            int closingQuote = command[1..].IndexOf('"');
+            if (closingQuote < 0)
+            {
+                return null;
+            }
+
+            closingQuote++;
+            executable = command[1..closingQuote];
+            ReadOnlySpan<char> arguments = command[(closingQuote + 1)..];
+            if (!arguments.IsEmpty && !char.IsWhiteSpace(arguments[0]))
+            {
+                return null;
+            }
+        }
+        else
+        {
+            int firstWhitespace = command.IndexOfAny(" \t\r\n");
+            executable = firstWhitespace < 0 ? command : command[..firstWhitespace];
+        }
+
+        return executable.ToString();
     }
 
     private static void ValidateAclCoverage(
@@ -830,6 +889,7 @@ public sealed partial class LegacyWindowsWorkerMigrator(
 
     private LegacyWindowsMigrationJournal CreateJournal(
         LegacyWindowsMigrationRequest request,
+        string sourceVersion,
         string sourceRoot,
         string snapshotDigest,
         string backupRelativePath,
@@ -842,12 +902,12 @@ public sealed partial class LegacyWindowsWorkerMigrator(
         string? lastErrorCode) => new(
             SchemaVersion: 1,
             MigrationId: CreateMigrationId(
-                request.SourceVersion,
+                sourceVersion,
                 request.TargetVersion,
                 nodeId,
                 keyId,
                 snapshotDigest),
-            request.SourceVersion,
+            sourceVersion,
             request.TargetVersion,
             phase,
             sourceRoot,
@@ -939,7 +999,8 @@ public sealed partial class LegacyWindowsWorkerMigrator(
         if (!Directory.Exists(sourceRoot)
             || IsSameOrNested(sourceRoot, targetRoot)
             || IsSameOrNested(targetRoot, sourceRoot)
-            || request.SourceVersion != "3.1.0"
+            || (request.ExpectedSourceVersion is not null
+                && request.ExpectedSourceVersion is not ("3.1.0" or "3.1.1"))
             || !TargetVersionPattern().IsMatch(request.TargetVersion)
             || !OwnerSidPattern().IsMatch(request.OwnerSid))
         {

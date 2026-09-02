@@ -1,0 +1,8 @@
+{
+  "schema": "hch.worker-windows-release-compatibility/v1",
+  "version": "4.0.0",
+  "previousSupportedVersion": "3.1.1",
+  "compatibility": "compatible",
+  "contentImpact": "none",
+  "basis": "The Windows 4.0.0 runtime preserves the signed manifest, canonical JSON, assignment, progress, complete/fail and pending-editorial-review contracts. Content-affecting changes remain governed by the signed contentContractHash and cause drain before application."
+}

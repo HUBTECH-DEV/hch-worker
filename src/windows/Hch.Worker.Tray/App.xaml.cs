@@ -10,6 +10,7 @@ public partial class App : System.Windows.Application
     protected override async void OnStartup(System.Windows.StartupEventArgs e)
     {
         base.OnStartup(e);
+        TrayThemeManager.Initialize();
         var sid = WindowsIdentity.GetCurrent().User?.Value ?? Environment.UserName;
         var mutexName = $"Local\\Hch.Worker.Tray.v4-{sid.Replace('\\', '-')}";
         _singleInstance = new Mutex(initiallyOwned: true, mutexName, out var created);
@@ -27,6 +28,7 @@ public partial class App : System.Windows.Application
     {
         _controller?.Dispose();
         _singleInstance?.Dispose();
+        TrayThemeManager.Shutdown();
         base.OnExit(e);
     }
 }

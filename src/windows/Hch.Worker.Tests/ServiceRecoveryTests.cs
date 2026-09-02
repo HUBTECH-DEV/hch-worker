@@ -113,6 +113,14 @@ public sealed class ServiceRecoveryTests
             var pending = new PendingClaimStore(files);
             var client = new RecoveryClient(assignment, now, failFirstClaim: true);
             var control = new WorkerControlState(1, 1);
+            control.MarkReady();
+            control.Start();
+            control.ApplyHeartbeatDecision(
+                grantedCapacity: 1,
+                claimAllowed: true,
+                recommendedClaimCount: 1,
+                claimAuthorizationValidUntil: now.AddMinutes(2),
+                claimReason: "claim-recommended");
             var source = new OrchestratorJobSource(
                 client,
                 control,
@@ -121,11 +129,14 @@ public sealed class ServiceRecoveryTests
                 pending,
                 Applied(assignment));
 
+            Assert.True(control.TryReserveClaimSlot());
             await Assert.ThrowsAsync<OrchestratorRequestException>(
                 () => source.ClaimAsync(1, CancellationToken.None));
             var durable = await pending.ReadAsync();
             Assert.NotNull(durable);
+            control.ReleaseReservation();
 
+            Assert.True(control.TryReserveClaimSlot());
             var jobs = await source.ClaimAsync(1, CancellationToken.None);
 
             Assert.Single(jobs);

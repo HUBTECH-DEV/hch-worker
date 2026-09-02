@@ -12,7 +12,7 @@ public sealed class CoreSchedulerTests
         var control = new WorkerControlState(lastNonZeroMaxConcurrentJobs: 4, claimBatchSize: 4);
         control.MarkReady();
         control.Start();
-        control.SetGrantedCapacity(4);
+        AuthorizeClaims(control, grantedCapacity: 4, recommendedCount: 4);
         var source = new QueueSource(Enumerable.Range(1, 5).Select(Job).ToArray());
         var executor = new GateExecutor();
         var reporter = new RecordingReporter();
@@ -34,13 +34,66 @@ public sealed class CoreSchedulerTests
     }
 
     [Fact]
+    public async Task HeartbeatRecommendationLimitsEachClaimWhileGrantBoundsAndRefillsParallelism()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var control = new WorkerControlState(lastNonZeroMaxConcurrentJobs: 4, claimBatchSize: 4);
+        control.MarkReady();
+        control.Start();
+        AuthorizeClaims(control, grantedCapacity: 4, recommendedCount: 1);
+        var source = new QueueSource(Enumerable.Range(1, 5).Select(Job).ToArray());
+        var executor = new GateExecutor();
+        var reporter = new RecordingReporter();
+        await using var scheduler = new ConcurrentJobScheduler(control, source, executor, reporter);
+        using var service = new CancellationTokenSource();
+        Task run = scheduler.RunAsync(service.Token);
+
+        await executor.WaitForStartedAsync(4, timeout.Token);
+        Assert.Equal(4, control.Snapshot.ActiveJobs);
+        Assert.Equal(4, control.Snapshot.GrantedCapacity);
+        Assert.Equal([1, 1, 1, 1], source.ClaimRequests);
+
+        executor.Release("assignment-1");
+        await executor.WaitForStartedAsync(5, timeout.Token);
+        Assert.Contains("assignment-5", executor.Started);
+        Assert.Equal(4, control.Snapshot.ActiveJobs);
+        Assert.Equal([1, 1, 1, 1, 1], source.ClaimRequests);
+
+        executor.ReleaseAll();
+        await reporter.WaitForCompletedAsync(5, timeout.Token);
+        service.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public void ClaimAuthorizationAcceptsTheSingleRecommendedRefillAtThreeOfFourActiveSlots()
+    {
+        var control = new WorkerControlState(lastNonZeroMaxConcurrentJobs: 4, claimBatchSize: 4);
+        control.MarkReady();
+        control.Start();
+        AuthorizeClaims(control, grantedCapacity: 4, recommendedCount: 1);
+        for (var index = 0; index < 3; index++)
+        {
+            Assert.True(control.TryReserveSlot());
+            control.ActivateReservation();
+        }
+
+        Assert.Equal(3, control.Snapshot.ActiveJobs);
+        Assert.Equal(1, control.CurrentRecommendedClaimCount());
+        Assert.True(control.TryReserveClaimSlot());
+        Assert.True(control.IsClaimRequestAuthorized(1));
+        Assert.Equal(4, control.Snapshot.ActiveJobs + control.Snapshot.ReservedJobs);
+        Assert.False(control.TryReserveClaimSlot());
+    }
+
+    [Fact]
     public async Task PauseLeavesActiveJobRunningAndPreventsReplacement()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var control = new WorkerControlState(lastNonZeroMaxConcurrentJobs: 1);
         control.MarkReady();
         control.Start();
-        control.SetGrantedCapacity(1);
+        AuthorizeClaims(control, grantedCapacity: 1, recommendedCount: 1);
         var source = new QueueSource([Job(1), Job(2)]);
         var executor = new GateExecutor();
         var reporter = new RecordingReporter();
@@ -67,7 +120,7 @@ public sealed class CoreSchedulerTests
         var control = new WorkerControlState(lastNonZeroMaxConcurrentJobs: 1);
         control.MarkReady();
         control.Start();
-        control.SetGrantedCapacity(1);
+        AuthorizeClaims(control, grantedCapacity: 1, recommendedCount: 1);
         var source = new QueueSource([Job(1)]);
         var executor = new GateExecutor();
         var reporter = new RecordingReporter();
@@ -91,7 +144,7 @@ public sealed class CoreSchedulerTests
         var control = new WorkerControlState(lastNonZeroMaxConcurrentJobs: 1);
         control.MarkReady();
         control.Start();
-        control.SetGrantedCapacity(1);
+        AuthorizeClaims(control, grantedCapacity: 1, recommendedCount: 1);
         var source = new QueueSource([Job(1)]);
         var reporter = new RecordingReporter();
         await using var scheduler = new ConcurrentJobScheduler(
@@ -121,7 +174,7 @@ public sealed class CoreSchedulerTests
         var control = new WorkerControlState(lastNonZeroMaxConcurrentJobs: 1);
         control.MarkReady();
         control.Start();
-        control.SetGrantedCapacity(1);
+        AuthorizeClaims(control, grantedCapacity: 1, recommendedCount: 1);
         var source = new QueueSource([Job(1), Job(2)]);
         var executor = new FirstCallThrowsExecutor();
         var reporter = new RecordingReporter();
@@ -152,7 +205,7 @@ public sealed class CoreSchedulerTests
         var control = new WorkerControlState(lastNonZeroMaxConcurrentJobs: 1);
         control.MarkReady();
         control.Start();
-        control.SetGrantedCapacity(1);
+        AuthorizeClaims(control, grantedCapacity: 1, recommendedCount: 1);
         var source = new QueueSource([Job(1), Job(2)]);
         var executor = new CountingImmediateExecutor();
         var reporter = new CompletionThrowsReporter();
@@ -179,7 +232,7 @@ public sealed class CoreSchedulerTests
         var control = new WorkerControlState(lastNonZeroMaxConcurrentJobs: 2, claimBatchSize: 2);
         control.MarkReady();
         control.Start();
-        control.SetGrantedCapacity(2);
+        AuthorizeClaims(control, grantedCapacity: 2, recommendedCount: 2);
         var duplicate = Job(1);
         var source = new QueueSource([duplicate, duplicate]);
         var executor = new CountingImmediateExecutor();
@@ -206,7 +259,7 @@ public sealed class CoreSchedulerTests
         var control = new WorkerControlState(lastNonZeroMaxConcurrentJobs: 1);
         control.MarkReady();
         control.Start();
-        control.SetGrantedCapacity(1);
+        AuthorizeClaims(control, grantedCapacity: 1, recommendedCount: 1);
         var executor = new GateExecutor();
         await using var scheduler = new ConcurrentJobScheduler(
             control,
@@ -234,12 +287,24 @@ public sealed class CoreSchedulerTests
         new string('a', 64),
         new { Number = number });
 
+    private static void AuthorizeClaims(
+        WorkerControlState control,
+        int grantedCapacity,
+        int recommendedCount) => control.ApplyHeartbeatDecision(
+            grantedCapacity,
+            claimAllowed: recommendedCount > 0,
+            recommendedCount,
+            DateTimeOffset.UtcNow.AddMinutes(2),
+            recommendedCount > 0 ? "claim-recommended" : "no-claimable-work");
+
     private sealed class QueueSource(IEnumerable<WorkerJob> jobs) : IWorkerJobSource
     {
         private readonly ConcurrentQueue<WorkerJob> _jobs = new(jobs);
+        public ConcurrentQueue<int> ClaimRequests { get; } = [];
 
         public Task<IReadOnlyList<WorkerJob>> ClaimAsync(int requestedCount, CancellationToken cancellationToken)
         {
+            ClaimRequests.Enqueue(requestedCount);
             var claimed = new List<WorkerJob>();
             while (claimed.Count < requestedCount && _jobs.TryDequeue(out var job))
             {

@@ -14,7 +14,8 @@ depois do canário.
 2. **Canário** — uma VM ou máquina Windows descartável baixa esse artefato pelo
    `run id` e nome exatos. O SHA-256 do MSI deve ser registrado antes de qualquer
    instalação.
-3. **Rollback** — o mesmo canário precisa provar a volta operacional ao 3.1.0.
+3. **Rollback** — o mesmo canário precisa provar a volta operacional ao 3.1.1,
+   já promovido em toda a frota pelo gate de ponte.
    Desinstalar o v4 não substitui essa prova.
 4. **Evidência atestada** — o atestador revisa as amostras reais sanitizadas,
    assina os bytes UTF-8 exatos de
@@ -26,29 +27,27 @@ depois do canário.
    não para o commit posterior que adicionou a evidência.
 6. **Promoção** — o workflow `Promote Windows candidate` baixa o artefato do run
    original, verifica assinaturas, checksums, attestation, a assinatura CMS do
-   canário, as amostras e o rollback, e publica os mesmos bytes. A publicação recebe os inputs obrigatórios
-   de compatibilidade e impacto de conteúdo e usa `--latest=false` para preservar
-   a ponte 3.1.1 descrita em `docs/worker-release-updates.md`.
+   canário, as amostras e o rollback, e publica os mesmos bytes. Compatibilidade
+   e impacto são derivados do `release-compatibility.json` já checksummed e
+   ligado ao provenance do candidato; não são inputs do operador. A release usa
+   `--latest=false` para preservar a ponte 3.1.1 descrita em
+   `docs/worker-release-updates.md`.
 
-Os dois inputs apenas serializam a decisão revisada nas notas da release; eles
-não constituem prova técnica de compatibilidade. O gate real do runtime continua
-sendo o `contentContractHash` do manifesto assinado. Antes de habilitar o
-produtor da ponte e executar uma release oficial, o workflow ainda deve
-correlacionar automaticamente o `sourceCommit` e o candidato com um manifesto
-ou relatório de compatibilidade assinado que sustente o par escolhido. Até essa
-correlação existir, a declaração manual é um bloqueio de release, não uma
-autorização para classificar a versão como compatível.
+O arquivo versionado declara o efeito da troca do runtime. O gate real de cada
+conteúdo continua sendo o `contentContractHash` do manifesto assinado: uma
+alteração que mude esse hash coloca o Worker em drain antes de aplicar a nova
+política, independentemente de o número do executável ter mudado.
 
 ## Gate de exclusividade 3.1/v4
 
-A migração preserva os arquivos, a identidade e a definição do serviço 3.1.0.
+A migração preserva os arquivos, a identidade e a definição do serviço 3.1.1.
 O serviço v4 inicia em `Paused/Drain` e recusa `Start` ou paralelismo positivo
 enquanto o serviço legado não estiver simultaneamente **Stopped** e
 **Disabled**. `Pause`, `Stop` e paralelismo zero continuam disponíveis.
 
 Antes do canário:
 
-1. Drenar o 3.1.0 e confirmar que não há claim, complete ou fail pendente.
+1. Drenar o 3.1.1 e confirmar que não há claim, complete ou fail pendente.
 2. Parar o serviço legado e aguardar o estado `Stopped`.
 3. Registrar a definição atual do serviço e o caminho do backup/receipt criado
    pela migração.
@@ -56,14 +55,15 @@ Antes do canário:
 5. Confirmar que o v4 continua em `Paused/Drain` após instalação e após reboot.
 6. Executar `Start` somente com capacidade solicitada e concedida igual a 1.
 
-Não remover o serviço, os arquivos nem o backup do 3.1.0 durante o canário.
+Não remover o serviço, os arquivos nem o backup do 3.1.1 durante o canário.
 
 ## Gate de descoberta da frota 3.1
 
 Antes de publicar qualquer `windows-v4.0.0`, toda a frota 3.1 suportada precisa
 receber a ponte 3.1.1 descrita em `docs/worker-release-updates.md`. O inventário
-observado em 2026-09-01 era três nós Linux 3.1.0, um macOS 3.1.0 e um Windows
-3.1.0; ele deve ser revalidado no momento da execução.
+observado em 2026-09-01 ainda era três nós Linux 3.1.0, um macOS 3.1.0 e um
+Windows 3.1.0; esse é apenas o inventário histórico anterior à ponte. O canário
+4.0 só pode começar depois que a revalidação comprovar todos esses nós em 3.1.1.
 
 A ponte deve atualizar o dashboard compartilhado sem cancelar trabalho. Quando
 o pacote do host exigir troca de processo, aplicar `Pause`, deixar os trabalhos
@@ -233,7 +233,7 @@ exige:
   formato canônico `D`, como os contratos reais do runtime;
 - ausência de conteúdo secreto e de agregados legados autodeclarados na evidência;
 - `rollbackReceipt` com SHA-256 do backup e das definições anterior/restaurada,
-  igualdade das definições e recibo de heartbeat 3.1.0 para o mesmo `nodeId`.
+  igualdade das definições e recibo de heartbeat 3.1.1 para o mesmo `nodeId`.
 
 Todo `receiptSha256` é recalculado pelo validador. A forma canônica começa com
 `schema=hch.worker-canary-receipt/v1`, seguida por `kind=<tipo>` e pelos campos
@@ -274,10 +274,14 @@ ele.
 O JSON não deve ser montado manualmente. O exportador
 `scripts/windows/Export-HchWorkerCanaryEvidence.ps1` aceita somente um bundle
 congelado de capturas já validadas, probes SCM, estado durável, journals reais e
-receipt real de rollback. Ele recalcula os receipts, vincula os probes de
-instalação e reinício ao `workerVersion`, `sourceCommit` e SHA-256 do MSI, rejeita
-arquivo desconhecido ou alterado durante a leitura e produz bytes determinísticos
-sem assinatura:
+receipt real de rollback. Ele abre o arquivo pelo Windows Installer, rejeitando
+bytes arbitrários apenas renomeados para `.msi`, e exige ProductCode, PackageCode
+e versão do produto. O bundle também deve conter a saída
+`probes/msi-disposable-e2e.json` do lifecycle descartável para os mesmos bytes.
+Os probes v2 correlacionam essa saída com observações independentes de SCM e
+processo, `ImagePath`, hashes de Service/Tray, boot, PID e horário de início. O
+exportador recalcula os receipts, rejeita arquivo desconhecido ou alterado durante
+a leitura e produz bytes determinísticos sem assinatura:
 
 ```powershell
 ./scripts/windows/Export-HchWorkerCanaryEvidence.ps1 `
@@ -290,13 +294,12 @@ sem assinatura:
 
 O runtime C# atual ainda não persiste todo esse bundle: faltam snapshots
 duráveis das respostas aceitas de node heartbeat, assignment heartbeat,
-complete/fail e dos probes operacionais de restart/rollback. O harness também
-deve hashear o MSI antes da instalação e, depois dela, correlacionar ProductCode,
-ImagePath e hashes do serviço/tray com o provenance/SBOM do mesmo candidato; um
-arquivo arbitrário com extensão `.msi` e um probe autodeclarado não provam qual
-binário foi executado. Enquanto um harness de canário ou sink do runtime não
-produzir essas fontes reais e receipts de origem autenticados, o exportador
-falha fechado e a promoção permanece bloqueada; nenhuma amostra é sintetizada.
+complete/fail e dos probes operacionais de restart/rollback. O lifecycle MSI já
+produz ProductCode, PackageCode, `ImagePath`, hashes dos payloads e snapshot
+SCM/processo; o coletor operacional deve materializar os probes v2 a partir das
+APIs do Windows, sem edição manual. Enquanto um harness de canário ou sink do
+runtime não produzir essas fontes reais e receipts do orquestrador com origem
+autenticada, a promoção permanece bloqueada; nenhuma amostra é sintetizada.
 
 O validador executável é `scripts/windows/Test-HchWorkerCanaryEvidence.ps1`.
 Depois da exportação, revisão humana e validação, o operador assina sem exportar
@@ -316,7 +319,7 @@ exportada pelo fluxo, EKU Code Signing e grava a assinatura de forma atômica.
 Não use PFX, senha, PEM ou chave privada na evidência, no repositório ou no
 workflow de promoção.
 
-## Rollback recuperável para 3.1.0
+## Rollback recuperável para 3.1.1
 
 1. Aplicar `Pause` no v4 e aguardar trabalhos ativos/reservados chegarem a zero.
 2. Se o canário exigir interrupção, usar `Stop` e aguardar a reconciliação do
@@ -325,14 +328,15 @@ workflow de promoção.
 4. Restaurar o modo `Automatic (Delayed Start)` do serviço legado a partir da
    definição/receipt preservada e iniciá-lo.
 5. Confirmar identidade/nodeId, readiness, capacidade e um heartbeat aceito pelo
-   orquestrador no 3.1.0, com `serverTime` igual ou posterior ao registro do
+   orquestrador no 3.1.1, com `serverTime` posterior ao registro do
    rollback; tolerância de relógio local não pode inverter essa ordem emitida
    pelo servidor.
 6. Só depois registrar o `rollbackReceipt`, seus hashes, o serviço v4
    desabilitado e o heartbeat legado aceito na evidência.
 
-A ordem comprovada deve ser estrita: último outcome, probe de restart do v4 em
-Paused/Drain, resposta/validação do rollback e, por fim, heartbeat 3.1.0 aceito.
+A ordem comprovada deve ser estrita: último heartbeat/outcome v4, novo boot e
+novo PID SCM do v4 em Paused/Drain, resposta/validação do rollback e, por fim,
+heartbeat 3.1.1 aceito.
 O exportador rejeita restart posterior ao rollback, validação anterior à
 resposta de rollback ou heartbeat legado que não seja posterior à validação.
 
@@ -394,6 +398,29 @@ SHA-256 reais e todas as amostras obtidas da sessão observada.
   "version": "4.0.0",
   "sourceCommit": "0000000000000000000000000000000000000000",
   "msiSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "installationReceipt": {
+    "msiLifecycleEvidenceSha256": "<sha256-real-do-lifecycle-msi>",
+    "productCode": "{00000000-0000-0000-0000-000000000000}",
+    "packageCode": "{00000000-0000-0000-0000-000000000000}",
+    "serviceName": "HchWorker",
+    "serviceImagePath": "C:\\Program Files\\HubTech\\HCH Worker\\4\\Service\\Hch.Worker.Service.exe",
+    "serviceExecutableSha256": "<sha256-real-do-service>",
+    "trayExecutablePath": "C:\\Program Files\\HubTech\\HCH Worker\\4\\Tray\\Hch.Worker.Tray.exe",
+    "trayExecutableSha256": "<sha256-real-do-tray>",
+    "installed": {
+      "bootStartedAtUtc": "2026-09-01T10:00:00.000Z",
+      "processStartedAtUtc": "2026-09-01T11:59:40.000Z",
+      "observedAtUtc": "2026-09-01T11:59:50.000Z",
+      "processId": 4100
+    },
+    "restart": {
+      "bootStartedAtUtc": "2026-09-01T12:50:00.000Z",
+      "processStartedAtUtc": "2026-09-01T12:50:10.000Z",
+      "observedAtUtc": "2026-09-01T12:50:20.000Z",
+      "processId": 4200
+    },
+    "receiptSha256": "<sha256-real-do-recibo-canonico>"
+  },
   "startedAtUtc": "2026-09-01T12:00:00.0000000+00:00",
   "completedAtUtc": "2026-09-01T13:00:00.0000000+00:00",
   "gates": {
@@ -504,14 +531,14 @@ SHA-256 reais e todas as amostras obtidas da sessão observada.
   "rollbackReceipt": {
     "receiptId": "60000000-0000-4000-8000-000000000001",
     "serverTime": "2026-09-01T12:55:00.0000000+00:00",
-    "targetVersion": "3.1.0",
+    "targetVersion": "3.1.1",
     "v4ServiceDisabled": true,
     "legacyServiceStartMode": "AutomaticDelayed",
     "backupSha256": "<sha256-real-do-backup>",
     "previousServiceDefinitionSha256": "<sha256-real-da-definicao>",
     "restoredServiceDefinitionSha256": "<mesmo-sha256-real-da-definicao>",
     "legacyHeartbeat": {
-      "workerVersion": "3.1.0",
+      "workerVersion": "3.1.1",
       "requestId": "50000000-0000-4000-8000-000000000001",
       "nodeId": "windows-canary-node-0001",
       "heartbeatAt": "2026-09-01T12:56:00.0000000+00:00",

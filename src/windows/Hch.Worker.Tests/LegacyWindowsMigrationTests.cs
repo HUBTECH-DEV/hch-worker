@@ -69,6 +69,8 @@ public sealed class LegacyWindowsMigrationTests
         LegacyBackupReceipt backupReceipt = Assert.IsType<LegacyBackupReceipt>(
             await backupStore.ReadJsonAsync<LegacyBackupReceipt>("backup-receipt.json"));
         Assert.Equal(first.MigrationId, backupReceipt.Payload.MigrationId);
+        Assert.Equal("3.1.0", backupReceipt.Payload.SourceVersion);
+        Assert.Equal("3.1.0", backupReceipt.Payload.ServiceDefinition.ExecutableVersion);
         Assert.Equal(fixture.NodeId, backupReceipt.Payload.NodeId);
         Assert.Equal(fixture.WorkerFingerprint, backupReceipt.Payload.KeyId);
         Assert.NotEmpty(backupReceipt.Payload.Files);
@@ -205,6 +207,59 @@ public sealed class LegacyWindowsMigrationTests
     }
 
     [Fact]
+    public async Task Bridge311MigrationUsesVersionProvenByServiceExecutable()
+    {
+        await using var fixture = await LegacyFixture.CreateAsync();
+        var migrator = new LegacyWindowsWorkerMigrator(
+            new TestMachineProtector(),
+            new FixturePreflight(executableVersion: "3.1.1"));
+
+        LegacyWindowsMigrationResult result = await migrator.MigrateAsync(fixture.Request);
+
+        var state = new AtomicFileStore(Path.Combine(fixture.TargetRoot, "state"));
+        LegacyWindowsMigrationJournal journal = Assert.IsType<LegacyWindowsMigrationJournal>(
+            await state.ReadJsonAsync<LegacyWindowsMigrationJournal>(
+                LegacyWindowsWorkerPaths.TargetMigrationJournalRelativePath));
+        Assert.Equal(MigrationPhase.Committed, result.Phase);
+        Assert.Equal("3.1.1", journal.SourceVersion);
+        var backupStore = new AtomicFileStore(result.BackupPath);
+        LegacyBackupReceipt receipt = Assert.IsType<LegacyBackupReceipt>(
+            await backupStore.ReadJsonAsync<LegacyBackupReceipt>("backup-receipt.json"));
+        Assert.Equal("3.1.1", receipt.Payload.SourceVersion);
+        Assert.Equal("3.1.1", receipt.Payload.ServiceDefinition.ExecutableVersion);
+    }
+
+    [Fact]
+    public async Task OperatorExpectedVersionCannotOverrideCapturedServiceVersion()
+    {
+        await using var fixture = await LegacyFixture.CreateAsync();
+        var migrator = new LegacyWindowsWorkerMigrator(
+            new TestMachineProtector(),
+            new FixturePreflight(executableVersion: "3.1.0"));
+
+        LegacyMigrationException error = await Assert.ThrowsAsync<LegacyMigrationException>(
+            () => migrator.MigrateAsync(fixture.Request with { ExpectedSourceVersion = "3.1.1" }));
+
+        Assert.Equal("legacy-source-version-mismatch", error.Code);
+        Assert.False(File.Exists(Path.Combine(fixture.TargetRoot, "config.json")));
+    }
+
+    [Fact]
+    public async Task UnsupportedCapturedServiceVersionFailsClosed()
+    {
+        await using var fixture = await LegacyFixture.CreateAsync();
+        var migrator = new LegacyWindowsWorkerMigrator(
+            new TestMachineProtector(),
+            new FixturePreflight(executableVersion: "3.1.2"));
+
+        LegacyMigrationException error = await Assert.ThrowsAsync<LegacyMigrationException>(
+            () => migrator.MigrateAsync(fixture.Request));
+
+        Assert.Equal("legacy-source-version-unsupported", error.Code);
+        Assert.False(File.Exists(Path.Combine(fixture.TargetRoot, "config.json")));
+    }
+
+    [Fact]
     public async Task FailureRollsBackOnlyCreatedArtifactsAndKeepsImmutableBackup()
     {
         await using var fixture = await LegacyFixture.CreateAsync();
@@ -310,7 +365,8 @@ public sealed class LegacyWindowsMigrationTests
     private sealed class FixturePreflight(
         string serviceState = "Stopped",
         int? processId = null,
-        string imagePath = "\"C:\\Program Files\\HCH\\EditorialWorker\\HchEditorialWorkerService.exe\"")
+        string? imagePath = null,
+        string executableVersion = "3.1.0")
         : ILegacyWorkerRuntimePreflight
     {
         public Task<LegacyRuntimePreflightEvidence> CaptureAsync(
@@ -328,7 +384,15 @@ public sealed class LegacyWindowsMigrationTests
                 .ToArray();
             var definition = new LegacyServiceDefinitionReceipt(
                 source.ServiceName,
-                imagePath,
+                imagePath ??
+                    $"\"C:\\Program Files\\HCH\\EditorialWorker\\versions\\{executableVersion}\\" +
+                    "ops\\windows\\editorial-worker\\service\\bin\\HchEditorialWorkerService.exe\"",
+                (imagePath ??
+                    $"C:\\Program Files\\HCH\\EditorialWorker\\versions\\{executableVersion}\\" +
+                    "ops\\windows\\editorial-worker\\service\\bin\\HchEditorialWorkerService.exe")
+                    .Trim('"'),
+                executableVersion,
+                new string('1', 64),
                 $@"NT SERVICE\{source.ServiceName}",
                 StartMode: 2,
                 ServiceType: 16,

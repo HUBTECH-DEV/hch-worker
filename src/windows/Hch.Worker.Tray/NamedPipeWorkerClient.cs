@@ -7,9 +7,19 @@ namespace Hch.Worker.Tray;
 public sealed class NamedPipeWorkerClient
 {
     private const string WorkerServiceName = "HchWorker";
+    private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromSeconds(5);
+    // The service permits a command to execute for two minutes and then has a
+    // separate five-second response-write deadline. Keep the client beyond
+    // both server deadlines so it never reports a timeout while Stop or the
+    // enrollment activation can still complete normally on the service.
+    private static readonly TimeSpan DefaultLongRunningOperationTimeout = TimeSpan.FromMinutes(2) +
+        TimeSpan.FromSeconds(10);
     private readonly string _pipeName;
+    private readonly TimeSpan _operationTimeout;
+    private readonly TimeSpan _longRunningOperationTimeout;
     private readonly TimeProvider _timeProvider;
     private readonly ILocalPipeServerAuthenticator _serverAuthenticator;
+    private readonly SemaphoreSlim _authenticationGate = new(1, 1);
 
     public NamedPipeWorkerClient(string nodeId, TimeProvider? timeProvider = null)
         : this(
@@ -22,12 +32,25 @@ public sealed class NamedPipeWorkerClient
     internal NamedPipeWorkerClient(
         string nodeId,
         ILocalPipeServerAuthenticator serverAuthenticator,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        TimeSpan? operationTimeout = null,
+        TimeSpan? longRunningOperationTimeout = null)
     {
         _pipeName = IpcProtocol.PipeName(nodeId);
         _serverAuthenticator = serverAuthenticator
             ?? throw new ArgumentNullException(nameof(serverAuthenticator));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _operationTimeout = operationTimeout ?? DefaultOperationTimeout;
+        _longRunningOperationTimeout = longRunningOperationTimeout ?? DefaultLongRunningOperationTimeout;
+        if (_operationTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(operationTimeout));
+        }
+
+        if (_longRunningOperationTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(longRunningOperationTimeout));
+        }
     }
 
     public Task<WorkerSnapshotPayload> GetSnapshotAsync(CancellationToken cancellationToken = default) =>
@@ -106,26 +129,91 @@ public sealed class NamedPipeWorkerClient
         TPayload payload,
         CancellationToken cancellationToken)
     {
+        using var preflightDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        preflightDeadline.CancelAfter(_operationTimeout);
+        CancellationToken preflightToken = preflightDeadline.Token;
         await using NamedPipeClientStream pipe = LocalNamedPipe.CreateClient(_pipeName);
-        await pipe.ConnectAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
-        // The connected handle is bound to one server instance. Authenticate
-        // that process before serializing or transmitting any frame (especially
-        // the one-time enrollment token).
-        _serverAuthenticator.Authenticate(pipe);
-        var request = IpcRequest.Create(command, payload, _timeProvider.GetUtcNow());
-        await IpcFraming.WriteAsync(pipe, request, cancellationToken).ConfigureAwait(false);
-        var response = await IpcFraming.ReadAsync<IpcResponse>(pipe, cancellationToken).ConfigureAwait(false);
-        if (response.Version != IpcProtocol.Version || response.RequestId != request.RequestId)
+        IpcRequest request;
+        try
         {
-            throw new IpcContractException("ipc-response-correlation-invalid");
+            await pipe.ConnectAsync(preflightToken).ConfigureAwait(false);
+            preflightToken.ThrowIfCancellationRequested();
+            // Win32 trust verification is synchronous and has no cancellation
+            // primitive. Run it outside the caller thread, cap the caller-visible
+            // wait with the operation deadline, and keep one authentication in
+            // flight until the native call actually returns. This prevents a stuck
+            // trust provider from accumulating tasks or pipe handles. No request or
+            // enrollment secret is created or transmitted before it succeeds.
+            await AuthenticateAsync(pipe, preflightToken).ConfigureAwait(false);
+            preflightToken.ThrowIfCancellationRequested();
+            request = IpcRequest.Create(command, payload, _timeProvider.GetUtcNow());
+            await IpcFraming.WriteAsync(pipe, request, preflightToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException error)
+            when (preflightDeadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException("ipc-operation-timeout", error);
         }
 
-        if (!response.Success)
+        using var responseDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        responseDeadline.CancelAfter(ResponseTimeout(command));
+        try
         {
-            throw new WorkerControlClientException(response.ErrorCode ?? "ipc-command-failed");
+            var response = await IpcFraming.ReadAsync<IpcResponse>(pipe, responseDeadline.Token)
+                .ConfigureAwait(false);
+            if (response.Version != IpcProtocol.Version || response.RequestId != request.RequestId)
+            {
+                throw new IpcContractException("ipc-response-correlation-invalid");
+            }
+
+            if (!response.Success)
+            {
+                throw new WorkerControlClientException(response.ErrorCode ?? "ipc-command-failed");
+            }
+
+            return IpcValidation.Payload<TResponse>(response.Payload);
+        }
+        catch (OperationCanceledException error)
+            when (responseDeadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException("ipc-operation-timeout", error);
+        }
+    }
+
+    private TimeSpan ResponseTimeout(IpcCommand command) => command is
+        IpcCommand.Stop or IpcCommand.SubmitEnrollmentToken
+            ? _longRunningOperationTimeout
+            : _operationTimeout;
+
+    private async Task AuthenticateAsync(
+        NamedPipeClientStream pipe,
+        CancellationToken cancellationToken)
+    {
+        await _authenticationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        Task authentication;
+        try
+        {
+            authentication = Task.Run(() => _serverAuthenticator.Authenticate(pipe));
+        }
+        catch
+        {
+            _authenticationGate.Release();
+            throw;
         }
 
-        return IpcValidation.Payload<TResponse>(response.Payload);
+        _ = authentication.ContinueWith(
+            static (completed, state) =>
+            {
+                // Observe a late attestation failure after the caller deadline;
+                // there is deliberately no retry until this task has terminated.
+                _ = completed.Exception;
+                ((SemaphoreSlim)state!).Release();
+            },
+            _authenticationGate,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        await authentication.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 }
 

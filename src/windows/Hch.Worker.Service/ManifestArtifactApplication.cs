@@ -381,6 +381,8 @@ public sealed class ManifestArtifactApplier(
     IOllamaManifestProbe ollama,
     TimeProvider? timeProvider = null)
 {
+    internal const string PreviousAppliedStatePath = "previous-applied-manifest.json";
+
     private static readonly IReadOnlyDictionary<string, string> EditorialDestinations =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -460,6 +462,7 @@ public sealed class ManifestArtifactApplier(
             .Concat(EditorialDestinations.Values)
             .Append(Path.Combine("runtime", "config", "engine.json"))
             .Append("applied-manifest.json")
+            .Append(PreviousAppliedStatePath)
             .Append(receiptPath)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
@@ -467,6 +470,19 @@ public sealed class ManifestArtifactApplier(
         var appliedAt = clock.GetUtcNow().ToString("O");
         try
         {
+            // Preserve the last state selected by a valid ready commit before
+            // publishing a newer candidate. Attestation is deliberately outside
+            // this method, so this durable predecessor lets startup recover the
+            // still-attested contract if the process stops between apply and
+            // attestation. Trust state is not rolled back.
+            if (previousApplied is not null)
+            {
+                await files.WriteJsonAsync(
+                    PreviousAppliedStatePath,
+                    previousApplied,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             if (!metadataOnly)
             {
                 foreach (var artifact in verified.Artifacts)

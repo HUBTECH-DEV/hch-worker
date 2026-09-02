@@ -226,7 +226,7 @@ test("the local compiler produces a winexe and preserves Windows arguments with 
   const escapedOutput = outputPath.replaceAll("'", "''");
   const encoded = powershell(String.raw`
     $ProgressPreference = 'SilentlyContinue'
-    [void](& '${buildPath}' -OutputPath '${escapedOutput}')
+    [void](& '${buildPath}' -OutputPath '${escapedOutput}' -Version '3.1.1')
     $assembly = [Reflection.Assembly]::LoadFrom('${escapedOutput}')
     $type = $assembly.GetType('Hch.EditorialWorker.ServiceHost.HchEditorialWorkerService', $true)
     $method = $type.GetMethod('Quote', [Reflection.BindingFlags]'Static,NonPublic')
@@ -235,14 +235,24 @@ test("the local compiler produces a winexe and preserves Windows arguments with 
       $method.Invoke($null, [object[]]@('C:\ending\')),
       $method.Invoke($null, [object[]]@('a"b'))
     )
-    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($values | ConvertTo-Json -Compress)))
+    $version = [Diagnostics.FileVersionInfo]::GetVersionInfo('${escapedOutput}')
+    $result = @{
+      values = $values
+      assemblyVersion = $assembly.GetName().Version.ToString()
+      fileVersion = $version.FileVersion
+      productVersion = $version.ProductVersion
+    }
+    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($result | ConvertTo-Json -Compress)))
   `);
-  const values = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-  assert.deepEqual(values, [
+  const result = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  assert.deepEqual(result.values, [
     '"C:\\Program Files\\HCH\\WorkerConfig.psd1"',
     '"C:\\ending\\\\"',
     '"a\\"b"',
   ]);
+  assert.equal(result.assemblyVersion, "3.1.1.0");
+  assert.equal(result.fileVersion, "3.1.1.0");
+  assert.equal(result.productVersion, "3.1.1");
   assert.ok(existsSync(outputPath));
 });
 
@@ -277,6 +287,7 @@ test("service heartbeat renews readiness without enabling claims", () => {
 test("release artifact gate requires integrity, publisher identity, and timestamp", () => {
   const verifier = readFileSync(join(kitRoot, "Test-HchWorkerReleaseArtifact.ps1"), "utf8");
   const signer = readFileSync(join(kitRoot, "Sign-HchWorkerReleaseArtifact.ps1"), "utf8");
+  const setupBuilder = readFileSync(join(kitRoot, "../installer/Build-HchWorkerSetup.ps1"), "utf8");
   const manifest = readFileSync(join(serviceRoot, "HchEditorialWorkerService.exe.manifest"), "utf8");
   const csharp = readFileSync(join(serviceRoot, "HchEditorialWorkerService.cs"), "utf8");
   assert.match(verifier, /worker-release-artifact-hash-mismatch/);
@@ -285,6 +296,8 @@ test("release artifact gate requires integrity, publisher identity, and timestam
   assert.match(verifier, /worker-release-publisher-mismatch/);
   assert.match(signer, /\/fd SHA256/);
   assert.match(signer, /\/tr \$TimestampUrl \/td SHA256/);
+  assert.match(setupBuilder, /New-HchWorkerReleaseEvidence\.ps1/);
+  assert.match(setupBuilder, /evidence\s*=\s*\$evidencePath/);
   assert.match(manifest, /requestedExecutionLevel level="asInvoker"/);
   assert.match(csharp, /AssemblyCompany\("HUBTECH CONSULTORIA E DESENVOLVIMENTO LTDA"\)/);
   assert.match(csharp, /AssemblyFileVersion\("3\.1\.0\.0"\)/);

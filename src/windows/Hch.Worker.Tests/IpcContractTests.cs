@@ -8,7 +8,7 @@ public sealed class IpcContractTests
     [Fact]
     public void PipeNameRejectsFreeFormPaths()
     {
-        Assert.Equal("Hch.Worker.Control.v1.node-01", IpcProtocol.PipeName("node-01"));
+        Assert.Equal("Hch.Worker.Control.v2.node-01", IpcProtocol.PipeName("node-01"));
         Assert.Throws<ArgumentException>(() => IpcProtocol.PipeName("node/../../pipe"));
         Assert.Throws<ArgumentException>(() => IpcProtocol.PipeName("node with spaces"));
     }
@@ -55,7 +55,7 @@ public sealed class IpcContractTests
         var valid = IpcRequest.Create(IpcCommand.Start, EmptyPayload.Value, now);
         Assert.Same(valid, IpcValidation.Request(valid, now));
 
-        var wrongVersion = valid with { Version = 2 };
+        var wrongVersion = valid with { Version = 1 };
         Assert.Equal(
             "ipc-version-unsupported",
             Assert.Throws<IpcContractException>(() => IpcValidation.Request(wrongVersion, now)).Code);

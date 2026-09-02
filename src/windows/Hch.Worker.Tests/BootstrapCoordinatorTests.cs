@@ -157,6 +157,342 @@ public sealed class BootstrapCoordinatorTests
         }
     }
 
+    [Fact]
+    public async Task CompatibleAttestationFailurePreservesReadyPredecessorAcrossRestartAndRetry()
+    {
+        var rootPath = NewRoot();
+        using var rootIdentity = Ed25519Identity.Generate();
+        using var releaseIdentity = Ed25519Identity.Generate();
+        try
+        {
+            var initialFixture = ManifestApplicationTests.CreateVerifiedManifest();
+            var initial = await SignDeliveryAsync(
+                initialFixture.Verified.Manifest,
+                rootIdentity,
+                releaseIdentity);
+            var files = new AtomicFileStore(rootPath);
+            var initialCoordinator = new BootstrapAttestationCoordinator(
+                files,
+                new FakeBootstrapClient(
+                    initial.Delivery,
+                    initial.ManifestHash,
+                    initial.ContentContractHash),
+                new ManifestArtifactApplier(
+                    files,
+                    new ManifestApplicationTests.FakeArtifactSource(initialFixture.Content),
+                    new ManifestApplicationTests.FakeOllamaProbe(),
+                    new ManifestApplicationTests.FixedTimeProvider(Now)),
+                initial.Pins,
+                rootIdentity,
+                new ManifestApplicationTests.FixedTimeProvider(Now));
+            await initialCoordinator.RunPausedAsync(Request(activeAssignments: 0), CancellationToken.None);
+
+            ManifestPayload compatibleManifest = CreateCompatibleManifest(
+                initialFixture.Verified.Manifest,
+                initial.ManifestHash,
+                initial.ContentContractHash);
+            var compatible = await SignDeliveryAsync(
+                compatibleManifest,
+                rootIdentity,
+                releaseIdentity);
+            Assert.Equal(initial.ContentContractHash, compatible.ContentContractHash);
+
+            BootstrapAttestationCoordinator FailingCoordinator() => new(
+                files,
+                new FakeBootstrapClient(
+                    compatible.Delivery,
+                    compatible.ManifestHash,
+                    compatible.ContentContractHash,
+                    failAttestation: true),
+                new ManifestArtifactApplier(
+                    files,
+                    new ManifestApplicationTests.FakeArtifactSource(
+                        initialFixture.Content,
+                        failIfCalled: true),
+                    new ManifestApplicationTests.FakeOllamaProbe(),
+                    new ManifestApplicationTests.FixedTimeProvider(Now)),
+                compatible.Pins,
+                rootIdentity,
+                new ManifestApplicationTests.FixedTimeProvider(Now));
+
+            OrchestratorRequestException firstFailure = await Assert.ThrowsAsync<OrchestratorRequestException>(
+                () => FailingCoordinator().RunPausedAsync(Request(activeAssignments: 0), CancellationToken.None));
+            Assert.True(firstFailure.Retryable);
+
+            var current = await files.ReadJsonAsync<AppliedManifestState>("applied-manifest.json");
+            var predecessor = await files.ReadJsonAsync<AppliedManifestState>(
+                ManifestArtifactApplier.PreviousAppliedStatePath);
+            var ready = await files.ReadJsonAsync<WorkerReadyStateRecord>("ready.json");
+            var trust = await files.ReadJsonAsync<ManifestTrustStateRecord>("trust-state.json");
+            Assert.NotNull(current);
+            Assert.NotNull(predecessor);
+            Assert.NotNull(ready);
+            Assert.NotNull(trust);
+            Assert.Equal(compatible.ManifestHash, current.ManifestHash);
+            Assert.Equal(initial.ManifestHash, predecessor.ManifestHash);
+            Assert.Equal(initial.ManifestHash, ready.ManifestHash);
+            Assert.Equal(compatible.ManifestHash, trust.ManifestHash);
+
+            WorkerConfiguration configuration = WorkerConfigurationStore.CreatePausedDefault(
+                "windows-test",
+                "worker-key:test");
+            AppliedManifestState? restartSelection = WorkerRuntimeFactory.SelectReadyAppliedState(
+                current,
+                predecessor,
+                ready,
+                trust,
+                configuration,
+                compatible.Pins,
+                Now);
+            Assert.Same(predecessor, restartSelection);
+
+            OrchestratorRequestException retryFailure = await Assert.ThrowsAsync<OrchestratorRequestException>(
+                () => FailingCoordinator().RunPausedAsync(Request(activeAssignments: 0), CancellationToken.None));
+            Assert.True(retryFailure.Retryable);
+            var predecessorAfterRetry = await files.ReadJsonAsync<AppliedManifestState>(
+                ManifestArtifactApplier.PreviousAppliedStatePath);
+            Assert.NotNull(predecessorAfterRetry);
+            Assert.Equal(initial.ManifestHash, predecessorAfterRetry.ManifestHash);
+        }
+        finally
+        {
+            Directory.Delete(rootPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task NewerTrustedManifestRefusesRollbackAfterPreApplyFailureAndRestart()
+    {
+        var rootPath = NewRoot();
+        using var rootIdentity = Ed25519Identity.Generate();
+        using var releaseIdentity = Ed25519Identity.Generate();
+        try
+        {
+            var fixture = ManifestApplicationTests.CreateVerifiedManifest();
+            var initial = await SignDeliveryAsync(
+                fixture.Verified.Manifest,
+                rootIdentity,
+                releaseIdentity);
+            var files = new AtomicFileStore(rootPath);
+            await CreateCoordinator(
+                    files,
+                    initial,
+                    fixture.Content,
+                    rootIdentity)
+                .RunPausedAsync(Request(activeAssignments: 0), CancellationToken.None);
+
+            ManifestPayload compatibleManifest = CreateCompatibleManifest(
+                fixture.Verified.Manifest,
+                initial.ManifestHash,
+                initial.ContentContractHash);
+            var compatible = await SignDeliveryAsync(
+                compatibleManifest,
+                rootIdentity,
+                releaseIdentity);
+            var interrupted = CreateCoordinator(
+                files,
+                compatible,
+                fixture.Content,
+                rootIdentity,
+                failBootstrap: true,
+                failIfArtifactsRequested: true);
+
+            OrchestratorRequestException interruption =
+                await Assert.ThrowsAsync<OrchestratorRequestException>(() => interrupted.RunPausedAsync(
+                    Request(activeAssignments: 0),
+                    CancellationToken.None));
+            Assert.True(interruption.Retryable);
+            Assert.Equal(
+                initial.ManifestHash,
+                (await files.ReadJsonAsync<AppliedManifestState>("applied-manifest.json"))!.ManifestHash);
+            Assert.Equal(
+                compatible.ManifestHash,
+                (await files.ReadJsonAsync<ManifestTrustStateRecord>("trust-state.json"))!.ManifestHash);
+
+            var restarted = CreateCoordinator(
+                files,
+                initial,
+                fixture.Content,
+                rootIdentity,
+                failIfArtifactsRequested: true);
+            ProtocolValidationException rollback =
+                await Assert.ThrowsAsync<ProtocolValidationException>(() => restarted.RunPausedAsync(
+                    Request(activeAssignments: 0),
+                    CancellationToken.None));
+
+            Assert.Equal("manifest-rollback-refused", rollback.Code);
+            Assert.Equal(0, restarted.Client.BootstrapCalls);
+            Assert.Equal(
+                compatible.ManifestHash,
+                (await files.ReadJsonAsync<ManifestTrustStateRecord>("trust-state.json"))!.ManifestHash);
+        }
+        finally
+        {
+            Directory.Delete(rootPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task NewerTrustedManifestRefusesSameSequenceEquivocationAfterPreApplyFailure()
+    {
+        var rootPath = NewRoot();
+        using var rootIdentity = Ed25519Identity.Generate();
+        using var releaseIdentity = Ed25519Identity.Generate();
+        try
+        {
+            var fixture = ManifestApplicationTests.CreateVerifiedManifest();
+            var initial = await SignDeliveryAsync(
+                fixture.Verified.Manifest,
+                rootIdentity,
+                releaseIdentity);
+            var files = new AtomicFileStore(rootPath);
+            await CreateCoordinator(
+                    files,
+                    initial,
+                    fixture.Content,
+                    rootIdentity)
+                .RunPausedAsync(Request(activeAssignments: 0), CancellationToken.None);
+
+            ManifestPayload compatiblePayload = CreateCompatibleManifest(
+                fixture.Verified.Manifest,
+                initial.ManifestHash,
+                initial.ContentContractHash);
+            var compatible = await SignDeliveryAsync(
+                compatiblePayload,
+                rootIdentity,
+                releaseIdentity);
+            await Assert.ThrowsAsync<OrchestratorRequestException>(() => CreateCoordinator(
+                    files,
+                    compatible,
+                    fixture.Content,
+                    rootIdentity,
+                    failBootstrap: true,
+                    failIfArtifactsRequested: true)
+                .RunPausedAsync(Request(activeAssignments: 0), CancellationToken.None));
+
+            ManifestPayload equivocatedPayload = CreateCompatibleManifest(
+                fixture.Verified.Manifest,
+                initial.ManifestHash,
+                initial.ContentContractHash,
+                releaseId: "hch-editorial-equivocated.2");
+            var equivocated = await SignDeliveryAsync(
+                equivocatedPayload,
+                rootIdentity,
+                releaseIdentity);
+            Assert.Equal(compatiblePayload.Sequence, equivocatedPayload.Sequence);
+            Assert.NotEqual(compatible.ManifestHash, equivocated.ManifestHash);
+            var restarted = CreateCoordinator(
+                files,
+                equivocated,
+                fixture.Content,
+                rootIdentity,
+                failIfArtifactsRequested: true);
+
+            ProtocolValidationException equivocation =
+                await Assert.ThrowsAsync<ProtocolValidationException>(() => restarted.RunPausedAsync(
+                    Request(activeAssignments: 0),
+                    CancellationToken.None));
+
+            Assert.Equal("manifest-equivocation-refused", equivocation.Code);
+            Assert.Equal(0, restarted.Client.BootstrapCalls);
+            Assert.Equal(
+                compatible.ManifestHash,
+                (await files.ReadJsonAsync<ManifestTrustStateRecord>("trust-state.json"))!.ManifestHash);
+        }
+        finally
+        {
+            Directory.Delete(rootPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PermanentCompatibleAttestationRejectionSurvivesRestartAndOfflineBootstrap()
+    {
+        var rootPath = NewRoot();
+        using var rootIdentity = Ed25519Identity.Generate();
+        using var releaseIdentity = Ed25519Identity.Generate();
+        try
+        {
+            var fixture = ManifestApplicationTests.CreateVerifiedManifest();
+            var initial = await SignDeliveryAsync(
+                fixture.Verified.Manifest,
+                rootIdentity,
+                releaseIdentity);
+            var files = new AtomicFileStore(rootPath);
+            await CreateCoordinator(
+                    files,
+                    initial,
+                    fixture.Content,
+                    rootIdentity)
+                .RunPausedAsync(Request(activeAssignments: 0), CancellationToken.None);
+
+            var compatible = await SignDeliveryAsync(
+                CreateCompatibleManifest(
+                    fixture.Verified.Manifest,
+                    initial.ManifestHash,
+                    initial.ContentContractHash),
+                rootIdentity,
+                releaseIdentity);
+            WorkerServiceException rejection = await Assert.ThrowsAsync<WorkerServiceException>(() =>
+                CreateCoordinator(
+                        files,
+                        compatible,
+                        fixture.Content,
+                        rootIdentity,
+                        rejectAttestation: true,
+                        failIfArtifactsRequested: true)
+                    .RunPausedAsync(Request(activeAssignments: 0), CancellationToken.None));
+            Assert.Equal("attestation-response-invalid", rejection.Code);
+
+            using (var durableReady = JsonDocument.Parse(
+                       await File.ReadAllBytesAsync(files.Resolve("ready.json"))))
+            {
+                Assert.False(durableReady.RootElement.GetProperty("ready").GetBoolean());
+                Assert.Equal(
+                    "attestation-permanent-failure",
+                    durableReady.RootElement.GetProperty("reason").GetString());
+            }
+
+            var current = await files.ReadJsonAsync<AppliedManifestState>("applied-manifest.json");
+            var predecessor = await files.ReadJsonAsync<AppliedManifestState>(
+                ManifestArtifactApplier.PreviousAppliedStatePath);
+            var trust = await files.ReadJsonAsync<ManifestTrustStateRecord>("trust-state.json");
+            Assert.NotNull(current);
+            Assert.NotNull(predecessor);
+            Assert.NotNull(trust);
+            Assert.Equal(compatible.ManifestHash, current.ManifestHash);
+            Assert.Equal(initial.ManifestHash, predecessor.ManifestHash);
+            Assert.Null(WorkerRuntimeFactory.SelectReadyAppliedState(
+                current,
+                predecessor,
+                null,
+                trust,
+                WorkerConfigurationStore.CreatePausedDefault("windows-test", "worker-key:test"),
+                compatible.Pins,
+                Now));
+
+            var offlineRestart = CreateCoordinator(
+                files,
+                compatible,
+                fixture.Content,
+                rootIdentity,
+                failFetch: true,
+                failIfArtifactsRequested: true);
+            OrchestratorRequestException offline =
+                await Assert.ThrowsAsync<OrchestratorRequestException>(() => offlineRestart.RunPausedAsync(
+                    Request(activeAssignments: 0),
+                    CancellationToken.None));
+            Assert.True(offline.Retryable);
+            using var readyAfterRestart = JsonDocument.Parse(
+                await File.ReadAllBytesAsync(files.Resolve("ready.json")));
+            Assert.False(readyAfterRestart.RootElement.GetProperty("ready").GetBoolean());
+        }
+        finally
+        {
+            Directory.Delete(rootPath, recursive: true);
+        }
+    }
+
     private static BootstrapCoordinatorRequest Request(int activeAssignments) => new(
         "windows-test",
         "worker-key:test",
@@ -166,6 +502,79 @@ public sealed class BootstrapCoordinatorTests
         Guid.NewGuid().ToString("D"),
         Guid.NewGuid().ToString("D"),
         activeAssignments);
+
+    private static CoordinatorHarness CreateCoordinator(
+        AtomicFileStore files,
+        SignedFixture signed,
+        IReadOnlyDictionary<string, byte[]> content,
+        IEd25519SignatureProvider verifier,
+        bool failBootstrap = false,
+        bool failAttestation = false,
+        bool rejectAttestation = false,
+        bool failFetch = false,
+        bool failIfArtifactsRequested = false)
+    {
+        var client = new FakeBootstrapClient(
+            signed.Delivery,
+            signed.ManifestHash,
+            signed.ContentContractHash,
+            failAttestation,
+            failBootstrap,
+            rejectAttestation,
+            failFetch);
+        var coordinator = new BootstrapAttestationCoordinator(
+            files,
+            client,
+            new ManifestArtifactApplier(
+                files,
+                new ManifestApplicationTests.FakeArtifactSource(content, failIfArtifactsRequested),
+                new ManifestApplicationTests.FakeOllamaProbe(),
+                new ManifestApplicationTests.FixedTimeProvider(Now)),
+            signed.Pins,
+            verifier,
+            new ManifestApplicationTests.FixedTimeProvider(Now));
+        return new CoordinatorHarness(coordinator, client);
+    }
+
+    private static ManifestPayload CreateCompatibleManifest(
+        ManifestPayload previous,
+        string previousManifestHash,
+        string contentContractHash,
+        string releaseId = "hch-editorial-test.2") => new()
+        {
+            SchemaVersion = previous.SchemaVersion,
+            BootstrapVersion = previous.BootstrapVersion,
+            Sequence = previous.Sequence + 1,
+            ReleaseId = releaseId,
+            IssuedAt = previous.IssuedAt,
+            ExpiresAt = previous.ExpiresAt,
+            MinimumAcceptedSequence = previous.MinimumAcceptedSequence,
+            PreviousManifestHash = previousManifestHash,
+            Runtime = previous.Runtime,
+            Compatibility = new ManifestCompatibility
+            {
+                Classification = "compatible",
+                ContentContractHash = contentContractHash,
+                PreviousContentContractHash = contentContractHash,
+                MinimumWorkerVersion = "3.1.0",
+                TestedThroughWorkerVersion = "4.0.0",
+                ContentImpact = "none",
+            },
+            Engine = previous.Engine,
+            Generation = previous.Generation,
+            CapacityPolicy = previous.CapacityPolicy,
+            AdaptiveWorkPolicy = previous.AdaptiveWorkPolicy,
+            Editorial = previous.Editorial,
+            Actions = previous.Actions,
+            RootActionCapabilities = previous.RootActionCapabilities,
+            Artifacts = previous.Artifacts,
+            Endpoints = previous.Endpoints,
+            Security = previous.Security,
+            Safety = previous.Safety,
+            HashAlgorithm = previous.HashAlgorithm,
+            Hash = new string('a', 64),
+            AdditionalProperties = previous.AdditionalProperties,
+        };
 
     private static async Task<SignedFixture> SignDeliveryAsync(
         ManifestPayload manifest,
@@ -262,11 +671,23 @@ public sealed class BootstrapCoordinatorTests
         return path;
     }
 
+    private sealed record CoordinatorHarness(
+        BootstrapAttestationCoordinator Coordinator,
+        FakeBootstrapClient Client)
+    {
+        public Task<BootstrapCoordinatorResult> RunPausedAsync(
+            BootstrapCoordinatorRequest request,
+            CancellationToken cancellationToken) => Coordinator.RunPausedAsync(request, cancellationToken);
+    }
+
     private sealed class FakeBootstrapClient(
         ManifestDelivery delivery,
         string manifestHash,
         string contentContractHash,
-        bool failAttestation = false) : IWorkerBootstrapClient
+        bool failAttestation = false,
+        bool failBootstrap = false,
+        bool rejectAttestation = false,
+        bool failFetch = false) : IWorkerBootstrapClient
     {
         private readonly string sessionId = Guid.NewGuid().ToString("D");
         private ManifestPayload? parsedManifest;
@@ -278,6 +699,16 @@ public sealed class BootstrapCoordinatorTests
         public Task<ManifestDelivery> FetchManifestAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (failFetch)
+            {
+                return Task.FromException<ManifestDelivery>(
+                    new OrchestratorRequestException(
+                        "network-request-failed",
+                        null,
+                        retryable: true,
+                        outcomeUnknown: false));
+            }
+
             return Task.FromResult(delivery);
         }
 
@@ -291,6 +722,16 @@ public sealed class BootstrapCoordinatorTests
             Assert.Equal(0, request.RequestedCapacity);
             Assert.Equal("windows", request.Platform);
             Assert.True(Guid.TryParseExact(requestId, "D", out _));
+            if (failBootstrap)
+            {
+                return Task.FromException<BootstrapResponseContract>(
+                    new OrchestratorRequestException(
+                        "network-request-failed",
+                        null,
+                        retryable: true,
+                        outcomeUnknown: true));
+            }
+
             parsedManifest ??= ParseManifestEcho();
             return Task.FromResult(new BootstrapResponseContract
             {
@@ -298,7 +739,7 @@ public sealed class BootstrapCoordinatorTests
                 State = "awaiting-attestation",
                 ExpiresAt = Now.AddMinutes(15).ToString("O"),
                 Challenge = "bootstrap-challenge-00000001",
-                ManifestSequence = 1,
+                ManifestSequence = parsedManifest.Sequence,
                 ManifestHash = manifestHash,
                 Manifest = delivery,
                 RequestedCapacity = 0,
@@ -338,7 +779,7 @@ public sealed class BootstrapCoordinatorTests
             {
                 NodeId = request.NodeId,
                 WorkerKeyId = request.WorkerKeyId,
-                Compatible = true,
+                Compatible = !rejectAttestation,
                 State = "draining",
                 ManifestSequence = request.ManifestSequence,
                 ManifestHash = request.ManifestHash,

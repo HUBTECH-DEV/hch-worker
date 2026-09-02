@@ -239,7 +239,7 @@ function Import-PolicySigner {
                 }
                 $candidates = @($imported | Where-Object {
                     $_.HasPrivateKey -and
-                    ($_.EnhancedKeyUsageList.ObjectId.Value -contains '1.3.6.1.5.5.7.3.3')
+                    ($_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.3')
                 })
                 if ($candidates.Count -ne 1) {
                     throw 'PFX must contain exactly one private code-signing certificate.'

@@ -1,73 +1,103 @@
 <Window x:Class="Hch.Worker.Tray.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="HCH Worker — Central de Controle"
-        Width="1180" Height="760" MinWidth="980" MinHeight="640"
+        Title="HCH Worker 4.0 — Central de Controle"
+        Width="1120" Height="740" MinWidth="680" MinHeight="520"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource CanvasBrush}"
         Foreground="{DynamicResource PrimaryTextBrush}"
-        AutomationProperties.Name="Central de Controle do HCH Worker">
+        FontFamily="Segoe UI" FontSize="13"
+        UseLayoutRounding="True" SnapsToDevicePixels="True"
+        KeyboardNavigation.TabNavigation="Continue"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        AutomationProperties.Name="Central de Controle do HCH Worker 4.0"
+        AutomationProperties.HelpText="Fechar esta janela não interrompe o serviço Windows.">
     <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="76" />
+            <RowDefinition Height="Auto" MinHeight="76" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="34" />
+            <RowDefinition Height="Auto" MinHeight="34" />
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+        <Border Grid.Row="0"
+                Background="{DynamicResource SurfaceBrush}"
+                BorderBrush="{DynamicResource BorderBrush}"
+                BorderThickness="0,0,0,1">
             <Grid Margin="20,10">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" MinWidth="250" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                     <Border Width="42" Height="42" CornerRadius="9" Background="{DynamicResource BrandBrush}">
-                        <TextBlock Text="H" Foreground="White" FontSize="24" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        <TextBlock Text="H" Foreground="{DynamicResource BrandTextBrush}"
+                                   FontSize="24" FontWeight="Bold"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   AutomationProperties.Name="HubTech" />
                     </Border>
                     <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="{Binding WorkerTitle}" FontSize="18" FontWeight="SemiBold" />
                             <TextBlock Text="  •  " Foreground="{DynamicResource SecondaryTextBrush}" />
-                            <TextBlock Text="{Binding StateText}" FontWeight="SemiBold" />
+                            <TextBlock Text="{Binding StateText}" FontWeight="SemiBold"
+                                       AutomationProperties.LiveSetting="Polite" />
                         </StackPanel>
                         <TextBlock Text="{Binding VersionText}" Foreground="{DynamicResource SecondaryTextBrush}" FontSize="12" />
                     </StackPanel>
                 </StackPanel>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button Content="Start" IsEnabled="{Binding CanStart}" Style="{StaticResource PrimaryButton}" Click="Start_Click" AutomationProperties.Name="Iniciar novos trabalhos" />
-                    <Button Content="Pause" IsEnabled="{Binding CanPause}" Click="Pause_Click" AutomationProperties.Name="Pausar novos trabalhos sem cancelar os atuais" />
-                    <Button Content="Stop" IsEnabled="{Binding CanStop}" Foreground="{DynamicResource DangerBrush}" Click="Stop_Click" AutomationProperties.Name="Parar e cancelar os trabalhos atuais" />
-                </StackPanel>
+                <WrapPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
+                    <Button Content="_Start" IsEnabled="{Binding CanStart}"
+                            Style="{StaticResource PrimaryButton}" Click="Start_Click"
+                            AutomationProperties.Name="Iniciar novos trabalhos" />
+                    <Button Content="_Pause" IsEnabled="{Binding CanPause}" Click="Pause_Click"
+                            AutomationProperties.Name="Pausar novos trabalhos sem cancelar os atuais" />
+                    <Button Content="S_top" IsEnabled="{Binding CanStop}"
+                            Style="{StaticResource DangerButton}" Click="Stop_Click"
+                            AutomationProperties.Name="Parar e cancelar os trabalhos atuais" />
+                </WrapPanel>
             </Grid>
         </Border>
 
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="205" />
-                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="190" />
+                <ColumnDefinition Width="*" MinWidth="430" />
             </Grid.ColumnDefinitions>
-            <Border Background="#0F1B33" Padding="10,16">
-                <ListBox x:Name="Navigation" SelectedIndex="0" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="14"
+            <Border Background="{DynamicResource SidebarBrush}" Padding="10,16">
+                <ListBox x:Name="Navigation" SelectedIndex="0"
+                         Background="Transparent" BorderThickness="0"
+                         Foreground="{DynamicResource SidebarTextBrush}" FontSize="14"
+                         SelectionChanged="Navigation_SelectionChanged"
                          AutomationProperties.Name="Seções da Central de Controle">
                     <ListBox.Resources>
                         <Style TargetType="ListBoxItem">
                             <Setter Property="Padding" Value="12,10" />
                             <Setter Property="Margin" Value="0,2" />
                             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="Foreground" Value="{DynamicResource SidebarTextBrush}" />
+                            <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusVisual}" />
+                            <Style.Triggers>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter Property="Background" Value="{DynamicResource SidebarSelectionBrush}" />
+                                    <Setter Property="Foreground" Value="{DynamicResource SidebarSelectionTextBrush}" />
+                                </Trigger>
+                            </Style.Triggers>
                         </Style>
                     </ListBox.Resources>
-                    <ListBoxItem Content="Visão geral" />
-                    <ListBoxItem Content="Trabalhos" />
-                    <ListBoxItem Content="Desempenho" />
-                    <ListBoxItem Content="Conexão" />
-                    <ListBoxItem Content="Identidade" />
-                    <ListBoxItem Content="Logs" />
-                    <ListBoxItem Content="Atualizações" />
-                    <ListBoxItem Content="Preferências" />
+                    <ListBoxItem Content="Visão geral" AutomationProperties.Name="Visão geral" />
+                    <ListBoxItem Content="Trabalhos" AutomationProperties.Name="Trabalhos" />
+                    <ListBoxItem Content="Desempenho" AutomationProperties.Name="Desempenho" />
+                    <ListBoxItem Content="Conexão" AutomationProperties.Name="Conexão" />
+                    <ListBoxItem Content="Identidade" AutomationProperties.Name="Identidade" />
+                    <ListBoxItem Content="Logs" AutomationProperties.Name="Logs" />
+                    <ListBoxItem Content="Atualizações" AutomationProperties.Name="Atualizações" />
+                    <ListBoxItem Content="Preferências" AutomationProperties.Name="Preferências" />
                 </ListBox>
             </Border>
 
-            <TabControl x:Name="Pages" Grid.Column="1" SelectedIndex="{Binding ElementName=Navigation, Path=SelectedIndex}" Background="Transparent" BorderThickness="0" Padding="0">
+            <TabControl x:Name="Pages" Grid.Column="1"
+                        SelectedIndex="{Binding ElementName=Navigation, Path=SelectedIndex}"
+                        Background="Transparent" BorderThickness="0" Padding="0" IsTabStop="False">
                 <TabControl.Resources>
                     <Style TargetType="TabItem">
                         <Setter Property="Visibility" Value="Collapsed" />
@@ -75,22 +105,23 @@
                 </TabControl.Resources>
 
                 <TabItem>
-                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                         <StackPanel Margin="20">
-                            <TextBlock Text="Visão geral" FontSize="24" FontWeight="SemiBold" />
-                            <TextBlock Text="Operação diária, capacidade e saúde do Worker." Foreground="{DynamicResource SecondaryTextBrush}" Margin="0,4,0,14" />
-                            <UniformGrid Columns="4">
+                            <TextBlock Text="Visão geral" Style="{StaticResource SectionTitle}" />
+                            <TextBlock Text="Operação diária, capacidade e saúde do Worker."
+                                       Style="{StaticResource PageDescription}" />
+                            <WrapPanel ItemWidth="220">
                                 <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="CPU do Worker" Foreground="{DynamicResource SecondaryTextBrush}" /><TextBlock Text="{Binding WorkerCpuText}" FontSize="21" FontWeight="SemiBold" /></StackPanel></Border>
                                 <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Memória atual" Foreground="{DynamicResource SecondaryTextBrush}" /><TextBlock Text="{Binding MemoryText}" FontSize="21" FontWeight="SemiBold" /></StackPanel></Border>
-                                <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="GPU" Foreground="{DynamicResource SecondaryTextBrush}" /><TextBlock Text="{Binding GpuText}" FontSize="21" FontWeight="SemiBold" /></StackPanel></Border>
+                                <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="GPU" Foreground="{DynamicResource SecondaryTextBrush}" /><TextBlock Text="{Binding GpuText}" FontSize="17" FontWeight="SemiBold" TextWrapping="Wrap" /></StackPanel></Border>
                                 <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Rede" Foreground="{DynamicResource SecondaryTextBrush}" /><TextBlock Text="{Binding NetworkText}" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" /></StackPanel></Border>
-                            </UniformGrid>
-                            <UniformGrid Columns="4">
+                            </WrapPanel>
+                            <WrapPanel ItemWidth="220">
                                 <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Trabalhos ativos" Foreground="{DynamicResource SecondaryTextBrush}" /><TextBlock Text="{Binding CapacityText}" FontSize="21" FontWeight="SemiBold" /><TextBlock Text="{Binding CapacityDetail}" FontSize="11" Foreground="{DynamicResource SecondaryTextBrush}" TextWrapping="Wrap" /></StackPanel></Border>
                                 <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Fila central" Foreground="{DynamicResource SecondaryTextBrush}" /><TextBlock Text="{Binding QueueText}" FontSize="21" FontWeight="SemiBold" /></StackPanel></Border>
-                                <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Concluídos" Foreground="{DynamicResource SecondaryTextBrush}" /><TextBlock Text="{Binding CompletedText}" FontSize="21" FontWeight="SemiBold" /></StackPanel></Border>
+                                <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Concluídos" Foreground="{DynamicResource SecondaryTextBrush}" /><TextBlock Text="{Binding CompletedText}" FontSize="21" FontWeight="SemiBold" /><TextBlock Text="{Binding AverageDurationText}" FontSize="11" Foreground="{DynamicResource SecondaryTextBrush}" /></StackPanel></Border>
                                 <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Falhas / retry" Foreground="{DynamicResource SecondaryTextBrush}" /><StackPanel Orientation="Horizontal"><TextBlock Text="{Binding FailedText}" FontSize="21" FontWeight="SemiBold" /><TextBlock Text="  /  " /><TextBlock Text="{Binding RetryText}" FontSize="21" FontWeight="SemiBold" /></StackPanel></StackPanel></Border>
-                            </UniformGrid>
+                            </WrapPanel>
 
                             <Border Style="{StaticResource MetricCard}" Margin="5,12,5,5">
                                 <StackPanel>
@@ -101,31 +132,43 @@
                                                 <Border BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,4">
                                                     <StackPanel>
                                                         <DockPanel>
-                                                            <TextBlock Text="{Binding AssignmentId}" FontWeight="SemiBold" />
+                                                            <TextBlock Text="{Binding AssignmentId}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                                             <TextBlock DockPanel.Dock="Right" Text="{Binding ItemPercentText}" FontWeight="SemiBold" />
                                                         </DockPanel>
-                                                        <ProgressBar Height="12" Minimum="0" Maximum="100" Value="{Binding ItemPercent}" Margin="0,6,0,3" AutomationProperties.Name="Progresso estimado do item atual" />
+                                                        <ProgressBar Height="14" Minimum="0" Maximum="100" Value="{Binding ItemPercent}" Margin="0,6,0,3"
+                                                                     AutomationProperties.Name="Progresso estimado do item atual"
+                                                                     AutomationProperties.HelpText="{Binding ItemPercentText}" />
                                                         <DockPanel Margin="0,8,0,0">
                                                             <TextBlock Text="Itens do lote em processamento" Foreground="{DynamicResource SecondaryTextBrush}" />
                                                             <TextBlock DockPanel.Dock="Right" Text="{Binding BatchText}" FontWeight="SemiBold" />
                                                         </DockPanel>
-                                                        <ProgressBar Height="9" Minimum="0" Maximum="100" Value="{Binding BatchPercent}" Margin="0,4,0,0" AutomationProperties.Name="Quantidade de itens processados no lote" />
+                                                        <ProgressBar Height="11" Minimum="0" Maximum="100" Value="{Binding BatchPercent}" Margin="0,4,0,0"
+                                                                     AutomationProperties.Name="Quantidade de itens processados no lote"
+                                                                     AutomationProperties.HelpText="{Binding BatchText}" />
+                                                        <TextBlock Text="{Binding ObservedText}" Margin="0,5,0,0" FontSize="11" Foreground="{DynamicResource SecondaryTextBrush}" />
                                                     </StackPanel>
                                                 </Border>
                                             </DataTemplate>
                                         </ItemsControl.ItemTemplate>
                                     </ItemsControl>
                                     <TextBlock Text="Nenhum item ativo." Margin="0,10,0,0" Foreground="{DynamicResource SecondaryTextBrush}">
-                                        <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed" /><Style.Triggers><DataTrigger Binding="{Binding ActiveWork.Count}" Value="0"><Setter Property="Visibility" Value="Visible" /></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding ActiveWork.Count}" Value="0"><Setter Property="Visibility" Value="Visible" /></DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
                                     </TextBlock>
                                 </StackPanel>
                             </Border>
 
-                            <UniformGrid Columns="3">
+                            <WrapPanel ItemWidth="290">
                                 <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Saúde" FontWeight="SemiBold" /><TextBlock Text="{Binding TrustText}" /><TextBlock Text="{Binding ManifestText}" Foreground="{DynamicResource SecondaryTextBrush}" TextWrapping="Wrap" /></StackPanel></Border>
                                 <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Orquestrador" FontWeight="SemiBold" /><TextBlock Text="{Binding HeartbeatText}" /><TextBlock Text="{Binding LatencyText}" Foreground="{DynamicResource SecondaryTextBrush}" /></StackPanel></Border>
                                 <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Atualização" FontWeight="SemiBold" /><TextBlock Text="{Binding UpdateText}" TextWrapping="Wrap" /></StackPanel></Border>
-                            </UniformGrid>
+                            </WrapPanel>
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
@@ -133,50 +176,239 @@
                 <TabItem>
                     <Grid Margin="20">
                         <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-                        <StackPanel><TextBlock Text="Trabalhos" FontSize="24" FontWeight="SemiBold" /><TextBlock Text="Progresso e estado dos trabalhos ativos." Foreground="{DynamicResource SecondaryTextBrush}" Margin="0,4,0,14" /></StackPanel>
-                        <DataGrid Grid.Row="1" ItemsSource="{Binding ActiveWork}" IsReadOnly="True" AutoGenerateColumns="False" CanUserAddRows="False" HeadersVisibility="Column" GridLinesVisibility="Horizontal">
+                        <StackPanel>
+                            <TextBlock Text="Trabalhos" Style="{StaticResource SectionTitle}" />
+                            <TextBlock Text="Progresso e estado dos trabalhos ativos." Style="{StaticResource PageDescription}" />
+                        </StackPanel>
+                        <DataGrid Grid.Row="1" ItemsSource="{Binding ActiveWork}" IsReadOnly="True"
+                                  AutoGenerateColumns="False" CanUserAddRows="False" AlternationCount="2"
+                                  HeadersVisibility="Column" GridLinesVisibility="Horizontal"
+                                  AutomationProperties.Name="Trabalhos ativos">
                             <DataGrid.Columns>
-                                <DataGridTextColumn Header="Assignment" Binding="{Binding AssignmentId}" Width="2*" />
-                                <DataGridTextColumn Header="Etapa" Binding="{Binding Phase}" Width="*" />
-                                <DataGridTextColumn Header="Tentativa" Binding="{Binding Attempt}" Width="90" />
-                                <DataGridTextColumn Header="Progresso" Binding="{Binding ItemPercentText}" Width="100" />
-                                <DataGridTextColumn Header="Item/lote" Binding="{Binding BatchText}" Width="100" />
-                                <DataGridTextColumn Header="Bytes" Binding="{Binding ContentBytes}" Width="120" />
+                                <DataGridTextColumn Header="Assignment" Binding="{Binding AssignmentId}" Width="2*" MinWidth="150" />
+                                <DataGridTextColumn Header="Etapa" Binding="{Binding Phase}" Width="*" MinWidth="100" />
+                                <DataGridTextColumn Header="Tentativa" Binding="{Binding Attempt}" Width="85" />
+                                <DataGridTextColumn Header="Progresso" Binding="{Binding ItemPercentText}" Width="95" />
+                                <DataGridTextColumn Header="Item/lote" Binding="{Binding BatchText}" Width="95" />
+                                <DataGridTextColumn Header="Conteúdo" Binding="{Binding ContentBytesText}" Width="110" />
+                                <DataGridTextColumn Header="Atualização" Binding="{Binding ObservedText}" Width="130" />
                             </DataGrid.Columns>
                         </DataGrid>
                     </Grid>
                 </TabItem>
 
                 <TabItem>
-                    <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="20"><TextBlock Text="Desempenho" FontSize="24" FontWeight="SemiBold" /><TextBlock Text="Métricas indisponíveis são exibidas como Não disponível, nunca como zero." Foreground="{DynamicResource SecondaryTextBrush}" Margin="0,4,0,14" /><UniformGrid Columns="3"><Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="CPU Worker / sistema" /><TextBlock Text="{Binding WorkerCpuText}" FontSize="20" /><TextBlock Text="{Binding SystemCpuText}" Foreground="{DynamicResource SecondaryTextBrush}" /></StackPanel></Border><Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Memória atual / média / pico" /><TextBlock Text="{Binding MemoryText}" FontSize="20" /><TextBlock Text="{Binding AverageMemoryText}" /><TextBlock Text="{Binding PeakMemoryText}" /></StackPanel></Border><Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="GPU / VRAM" /><TextBlock Text="{Binding GpuText}" FontSize="20" /><TextBlock Text="{Binding VramText}" /></StackPanel></Border><Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Disco" /><TextBlock Text="{Binding DiskText}" /></StackPanel></Border><Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Rede" /><TextBlock Text="{Binding NetworkText}" /></StackPanel></Border><Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Uptime" /><TextBlock Text="{Binding UptimeText}" FontSize="20" /></StackPanel></Border></UniformGrid><Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Processos e serviço" FontWeight="SemiBold" /><TextBlock Text="{Binding ServicesText}" /><TextBlock Text="{Binding ProcessesText}" /><TextBlock Text="{Binding JobsText}" /></StackPanel></Border></StackPanel></ScrollViewer>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel Margin="20">
+                            <TextBlock Text="Desempenho" Style="{StaticResource SectionTitle}" />
+                            <TextBlock Text="Métricas indisponíveis são exibidas como Não disponível, nunca como zero."
+                                       Style="{StaticResource PageDescription}" />
+                            <WrapPanel ItemWidth="260">
+                                <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="CPU Worker / sistema" /><TextBlock Text="{Binding WorkerCpuText}" FontSize="20" /><TextBlock Text="{Binding SystemCpuText}" Foreground="{DynamicResource SecondaryTextBrush}" /></StackPanel></Border>
+                                <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Memória atual / média / pico" /><TextBlock Text="{Binding MemoryText}" FontSize="20" /><TextBlock Text="{Binding AverageMemoryText}" /><TextBlock Text="{Binding PeakMemoryText}" /></StackPanel></Border>
+                                <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="GPU / VRAM" /><TextBlock Text="{Binding GpuText}" FontSize="17" TextWrapping="Wrap" /><TextBlock Text="{Binding VramText}" /></StackPanel></Border>
+                                <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Disco" /><TextBlock Text="{Binding DiskText}" TextWrapping="Wrap" /></StackPanel></Border>
+                                <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Rede" /><TextBlock Text="{Binding NetworkText}" TextWrapping="Wrap" /></StackPanel></Border>
+                                <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Uptime" /><TextBlock Text="{Binding UptimeText}" FontSize="20" /></StackPanel></Border>
+                                <Border Style="{StaticResource MetricCard}"><StackPanel><TextBlock Text="Throughput observado" /><TextBlock Text="{Binding ThroughputText}" FontSize="20" /><TextBlock Text="{Binding AverageDurationText}" Foreground="{DynamicResource SecondaryTextBrush}" /></StackPanel></Border>
+                            </WrapPanel>
+                            <Border Style="{StaticResource MetricCard}">
+                                <StackPanel>
+                                    <TextBlock Text="Processos e serviço" FontWeight="SemiBold" />
+                                    <TextBlock Text="{Binding ServicesText}" />
+                                    <TextBlock Text="{Binding ProcessesText}" />
+                                    <TextBlock Text="{Binding JobsText}" />
+                                </StackPanel>
+                            </Border>
+                            <TextBlock Text="Histórico operacional recente" FontSize="17" FontWeight="SemiBold" Margin="5,14,5,7" />
+                            <DataGrid ItemsSource="{Binding OperationalHistory}" IsReadOnly="True" AutoGenerateColumns="False"
+                                      CanUserAddRows="False" AlternationCount="2" HeadersVisibility="Column"
+                                      MaxHeight="280" AutomationProperties.Name="Histórico operacional recente">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Horário" Binding="{Binding ObservedText}" Width="130" />
+                                    <DataGridTextColumn Header="Ativos" Binding="{Binding ActiveJobs}" Width="75" />
+                                    <DataGridTextColumn Header="Fila" Binding="{Binding QueueText}" Width="75" />
+                                    <DataGridTextColumn Header="Concluídos" Binding="{Binding CompletedJobs}" Width="95" />
+                                    <DataGridTextColumn Header="Falhas" Binding="{Binding FailedJobs}" Width="75" />
+                                    <DataGridTextColumn Header="Retry" Binding="{Binding RetryJobs}" Width="75" />
+                                    <DataGridTextColumn Header="Throughput" Binding="{Binding ThroughputText}" Width="110" />
+                                    <DataGridTextColumn Header="Duração média" Binding="{Binding AverageDurationText}" Width="120" />
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </StackPanel>
+                    </ScrollViewer>
                 </TabItem>
 
                 <TabItem>
-                    <StackPanel Margin="20"><TextBlock Text="Conexão" FontSize="24" FontWeight="SemiBold" /><Border Style="{StaticResource MetricCard}" Margin="0,14,0,0"><StackPanel><TextBlock Text="Serviço Windows" FontWeight="SemiBold" /><TextBlock Text="{Binding ServiceText}" /><TextBlock Text="Último heartbeat" FontWeight="SemiBold" Margin="0,12,0,0" /><TextBlock Text="{Binding HeartbeatText}" /><TextBlock Text="Latência" FontWeight="SemiBold" Margin="0,12,0,0" /><TextBlock Text="{Binding LatencyText}" /><TextBlock Text="Ollama" FontWeight="SemiBold" Margin="0,12,0,0" /><TextBlock Text="{Binding OllamaText}" /></StackPanel></Border></StackPanel>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel Margin="20">
+                            <TextBlock Text="Conexão" Style="{StaticResource SectionTitle}" />
+                            <TextBlock Text="Serviço local, orquestrador e dependências de execução."
+                                       Style="{StaticResource PageDescription}" />
+                            <Border Style="{StaticResource MetricCard}" Margin="0,0,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="Serviço Windows" FontWeight="SemiBold" /><TextBlock Text="{Binding ServiceText}" />
+                                    <TextBlock Text="Último heartbeat" FontWeight="SemiBold" Margin="0,12,0,0" /><TextBlock Text="{Binding HeartbeatText}" />
+                                    <TextBlock Text="Latência" FontWeight="SemiBold" Margin="0,12,0,0" /><TextBlock Text="{Binding LatencyText}" />
+                                    <TextBlock Text="Ollama" FontWeight="SemiBold" Margin="0,12,0,0" /><TextBlock Text="{Binding OllamaText}" />
+                                    <TextBlock Text="Readiness válido até" FontWeight="SemiBold" Margin="0,12,0,0" /><TextBlock Text="{Binding ReadyUntilText}" />
+                                    <TextBlock Text="Contrato de conteúdo" FontWeight="SemiBold" Margin="0,12,0,0" /><TextBlock Text="{Binding ContentContractText}" TextWrapping="Wrap" />
+                                    <TextBlock Text="Último erro sanitizado" FontWeight="SemiBold" Margin="0,12,0,0" /><TextBlock Text="{Binding LastErrorText}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
                 </TabItem>
 
                 <TabItem>
-                    <StackPanel Margin="20"><TextBlock Text="Identidade" FontSize="24" FontWeight="SemiBold" /><Border Style="{StaticResource MetricCard}" Margin="0,14,0,0"><StackPanel><TextBlock Text="Estado de confiança" FontWeight="SemiBold" /><TextBlock Text="{Binding TrustText}" /><TextBlock Text="A chave privada do usuário e a identidade operacional do Worker nunca são exibidas nesta tela." Foreground="{DynamicResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,10,0,0" /><Button Content="Abrir assistente de configuração" HorizontalAlignment="Left" Margin="0,14,0,0" Click="Onboarding_Click" /></StackPanel></Border></StackPanel>
+                    <StackPanel Margin="20">
+                        <TextBlock Text="Identidade" Style="{StaticResource SectionTitle}" />
+                        <TextBlock Text="Confiança e vínculo do proprietário sem expor material secreto."
+                                   Style="{StaticResource PageDescription}" />
+                        <Border Style="{StaticResource MetricCard}" Margin="0,0,0,0">
+                            <StackPanel>
+                                <TextBlock Text="Estado de confiança" FontWeight="SemiBold" />
+                                <TextBlock Text="{Binding TrustText}" AutomationProperties.LiveSetting="Polite" />
+                                <TextBlock Text="A chave privada do usuário e a identidade operacional do Worker nunca são exibidas nesta tela."
+                                           Foreground="{DynamicResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,10,0,0" />
+                                <Button Content="Abrir _assistente de configuração" HorizontalAlignment="Left" Margin="0,14,0,0"
+                                        Click="Onboarding_Click" AutomationProperties.Name="Abrir assistente de configuração" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
                 </TabItem>
 
                 <TabItem>
-                    <Grid Margin="20"><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions><StackPanel><TextBlock Text="Logs" FontSize="24" FontWeight="SemiBold" /><TextBlock Text="Logs sanitizados: sem senha, token, chave privada, lease ou conteúdo editorial." Foreground="{DynamicResource SecondaryTextBrush}" Margin="0,4,0,14" /></StackPanel><ListBox Grid.Row="1" x:Name="LogsList" /><StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="Atualizar" Click="Refresh_Click" /><Button Content="Copiar seleção" Click="CopyLog_Click" /><Button Content="Exportar diagnóstico" Click="ExportLog_Click" /></StackPanel></Grid>
+                    <Grid Margin="20">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="Logs" Style="{StaticResource SectionTitle}" />
+                            <TextBlock Text="Logs sanitizados: sem senha, token, chave privada, lease ou conteúdo editorial."
+                                       Style="{StaticResource PageDescription}" />
+                        </StackPanel>
+                        <Grid Grid.Row="1" Margin="0,0,0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*" MinWidth="180" />
+                                <ColumnDefinition Width="*" MinWidth="150" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Margin="0,0,8,0">
+                                <TextBlock x:Name="LogSearchLabel" Text="Pesquisar" Margin="0,0,0,3" />
+                                <TextBox x:Name="LogSearchInput"
+                                         TextChanged="LogFilter_Changed"
+                                         AutomationProperties.Name="Pesquisar logs"
+                                         AutomationProperties.LabeledBy="{Binding ElementName=LogSearchLabel}"
+                                         AutomationProperties.HelpText="Pesquisa por horário, nível, código, mensagem e campos sanitizados" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Margin="0,0,8,0">
+                                <TextBlock x:Name="LogLevelLabel" Text="Nível" Margin="0,0,0,3" />
+                                <ComboBox x:Name="LogLevelFilter"
+                                          SelectionChanged="LogFilter_Changed"
+                                          AutomationProperties.Name="Filtrar logs por nível"
+                                          AutomationProperties.LabeledBy="{Binding ElementName=LogLevelLabel}">
+                                    <ComboBoxItem Content="Todos os níveis" Tag="" />
+                                </ComboBox>
+                            </StackPanel>
+                            <TextBlock x:Name="LogCountText" Grid.Column="2" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource SecondaryTextBrush}"
+                                       AutomationProperties.LiveSetting="Polite" />
+                        </Grid>
+                        <ListBox Grid.Row="2" x:Name="LogsList" SelectionMode="Extended"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                 AutomationProperties.Name="Resultados dos logs sanitizados" />
+                        <WrapPanel Grid.Row="3" HorizontalAlignment="Right" Margin="0,8,0,0">
+                            <Button Content="_Atualizar" Click="Refresh_Click" />
+                            <Button Content="_Copiar seleção" Click="CopyLog_Click" />
+                            <Button Content="Exportar _visíveis" Click="ExportLog_Click" />
+                        </WrapPanel>
+                    </Grid>
                 </TabItem>
 
                 <TabItem>
-                    <StackPanel Margin="20"><TextBlock Text="Atualizações" FontSize="24" FontWeight="SemiBold" /><Border Style="{StaticResource MetricCard}" Margin="0,14,0,0"><StackPanel><TextBlock Text="Versão instalada" FontWeight="SemiBold" /><TextBlock Text="{Binding VersionText}" /><TextBlock Text="Versão disponível" FontWeight="SemiBold" Margin="0,12,0,0" /><TextBlock Text="{Binding UpdateText}" /><TextBlock Text="Uma atualização compatível não interrompe trabalhos nem fecha claims. Só uma mudança que afete o contrato ou o resultado editorial exige bloqueio." Foreground="{DynamicResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,12,0,0" /></StackPanel></Border></StackPanel>
+                    <StackPanel Margin="20">
+                        <TextBlock Text="Atualizações" Style="{StaticResource SectionTitle}" />
+                        <TextBlock Text="Compatibilidade e disponibilidade da versão instalada."
+                                   Style="{StaticResource PageDescription}" />
+                        <Border Style="{StaticResource MetricCard}" Margin="0,0,0,0">
+                            <StackPanel>
+                                <TextBlock Text="Versão instalada" FontWeight="SemiBold" /><TextBlock Text="{Binding VersionText}" />
+                                <TextBlock Text="Versão disponível" FontWeight="SemiBold" Margin="0,12,0,0" /><TextBlock Text="{Binding UpdateText}" />
+                                <TextBlock Text="Uma atualização compatível não interrompe trabalhos nem fecha claims. Só uma mudança que afete o contrato ou o resultado editorial exige bloqueio."
+                                           Foreground="{DynamicResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,12,0,0" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
                 </TabItem>
 
                 <TabItem>
-                    <StackPanel Margin="20"><TextBlock Text="Preferências" FontSize="24" FontWeight="SemiBold" /><Border Style="{StaticResource MetricCard}" Margin="0,14,0,0"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="260" /><ColumnDefinition Width="160" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions><TextBlock Text="Trabalhos paralelos (0–64)" VerticalAlignment="Center" /><TextBox x:Name="ParallelismInput" Grid.Column="1" Text="{Binding Snapshot.MaxConcurrentJobs, Mode=OneWay}" Margin="4" MinHeight="34" AutomationProperties.Name="Quantidade máxima de trabalhos paralelos" /><Button Grid.Column="2" Content="Aplicar" HorizontalAlignment="Left" Click="ApplyParallelism_Click" /><TextBlock Grid.Row="1" Text="Itens máximos por claim (1–64)" VerticalAlignment="Center" /><TextBox x:Name="BatchInput" Grid.Row="1" Grid.Column="1" Text="{Binding Snapshot.ClaimBatchSize, Mode=OneWay}" Margin="4" MinHeight="34" AutomationProperties.Name="Quantidade máxima solicitada por claim" /><Button Grid.Row="1" Grid.Column="2" Content="Aplicar" HorizontalAlignment="Left" Click="ApplyBatch_Click" /><TextBlock Grid.Row="2" Grid.ColumnSpan="3" Text="Paralelismo zero equivale a Pause: bloqueia novos claims e não cancela o que já está executando." Foreground="{DynamicResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,10,0,0" /></Grid></Border></StackPanel>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <StackPanel Margin="20">
+                            <TextBlock Text="Preferências" Style="{StaticResource SectionTitle}" />
+                            <TextBlock Text="Capacidade local e aparência da interface."
+                                       Style="{StaticResource PageDescription}" />
+                            <Border Style="{StaticResource MetricCard}" Margin="0,0,0,8">
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="105" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                    <TextBlock x:Name="ParallelismLabel" Text="Trabalhos paralelos (0–64)" VerticalAlignment="Center" />
+                                    <TextBox x:Name="ParallelismInput" Grid.Column="1" Text="{Binding Snapshot.MaxConcurrentJobs, Mode=OneWay}" Margin="4"
+                                             AutomationProperties.Name="Quantidade máxima de trabalhos paralelos"
+                                             AutomationProperties.LabeledBy="{Binding ElementName=ParallelismLabel}" />
+                                    <Button Grid.Column="2" Content="_Aplicar" HorizontalAlignment="Left" Click="ApplyParallelism_Click"
+                                            AutomationProperties.Name="Aplicar quantidade de trabalhos paralelos" />
+                                    <TextBlock x:Name="BatchLabel" Grid.Row="1" Text="Itens máximos por claim (1–64)" VerticalAlignment="Center" />
+                                    <TextBox x:Name="BatchInput" Grid.Row="1" Grid.Column="1" Text="{Binding Snapshot.ClaimBatchSize, Mode=OneWay}" Margin="4"
+                                             AutomationProperties.Name="Quantidade máxima solicitada por claim"
+                                             AutomationProperties.LabeledBy="{Binding ElementName=BatchLabel}" />
+                                    <Button Grid.Row="1" Grid.Column="2" Content="A_plicar" HorizontalAlignment="Left" Click="ApplyBatch_Click"
+                                            AutomationProperties.Name="Aplicar itens máximos por claim" />
+                                    <TextBlock Grid.Row="2" Grid.ColumnSpan="3"
+                                               Text="Paralelismo zero equivale a Pause: bloqueia novos claims e não cancela o que já está executando."
+                                               Foreground="{DynamicResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,10,0,0" />
+                                </Grid>
+                            </Border>
+                            <Border Style="{StaticResource MetricCard}" Margin="0,8,0,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="180" /><ColumnDefinition Width="130" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                                    <TextBlock x:Name="ThemeLabel" Text="Tema da interface" VerticalAlignment="Center" />
+                                    <ComboBox x:Name="ThemeSelector" Grid.Column="1" Margin="4"
+                                              SelectionChanged="ThemeSelector_SelectionChanged"
+                                              AutomationProperties.Name="Tema da interface"
+                                              AutomationProperties.LabeledBy="{Binding ElementName=ThemeLabel}">
+                                        <ComboBoxItem Content="Sistema" Tag="System" />
+                                        <ComboBoxItem Content="Claro" Tag="Light" />
+                                        <ComboBoxItem Content="Escuro" Tag="Dark" />
+                                    </ComboBox>
+                                    <TextBlock x:Name="ThemeStatusText" Grid.Column="2" VerticalAlignment="Center" Margin="8,0,0,0"
+                                               Foreground="{DynamicResource SecondaryTextBrush}" TextWrapping="Wrap"
+                                               AutomationProperties.LiveSetting="Polite" />
+                                    <TextBlock Grid.Row="1" Grid.ColumnSpan="3" Margin="0,10,0,0"
+                                               Text="O alto contraste do Windows sempre tem prioridade sobre a seleção acima."
+                                               Foreground="{DynamicResource SecondaryTextBrush}" TextWrapping="Wrap" />
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
                 </TabItem>
             </TabControl>
         </Grid>
 
-        <Border Grid.Row="2" Background="{DynamicResource SurfaceBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
-            <DockPanel Margin="16,0">
-                <TextBlock Text="{Binding StatusMessage}" VerticalAlignment="Center" Foreground="{DynamicResource SecondaryTextBrush}" />
-                <TextBlock DockPanel.Dock="Right" Text="Fechar esta janela não interrompe o serviço." VerticalAlignment="Center" Foreground="{DynamicResource SecondaryTextBrush}" />
+        <Border Grid.Row="2" Background="{DynamicResource SurfaceBrush}"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0">
+            <DockPanel Margin="16,6">
+                <TextBlock Text="{Binding StatusMessage}" VerticalAlignment="Center"
+                           Foreground="{DynamicResource SecondaryTextBrush}"
+                           TextTrimming="CharacterEllipsis"
+                           AutomationProperties.LiveSetting="Polite" />
+                <TextBlock DockPanel.Dock="Right" Text="Fechar esta janela não interrompe o serviço."
+                           Margin="14,0,0,0" VerticalAlignment="Center"
+                           Foreground="{DynamicResource SecondaryTextBrush}" />
             </DockPanel>
         </Border>
     </Grid>

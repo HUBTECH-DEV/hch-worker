@@ -15,6 +15,7 @@ param(
   [string]$LatestReleaseJsonPath,
   [string]$TaggedReleaseJsonPath,
   [string]$AssetDirectory,
+  [switch]$CandidateMode,
   [ValidateSet('tag', 'commit')]
   [string]$OfflineTagObjectType = 'tag',
   [string]$OfflineTagCommit,
@@ -31,6 +32,45 @@ $ErrorActionPreference = 'Stop'
 function Stop-BridgeReleaseGate {
   param([Parameter(Mandatory = $true)][string]$Code)
   throw $Code
+}
+
+$script:maximumBridgeRegularFileBytes = 256MB
+$script:maximumBridgeExpandedBytes = 768MB
+$script:maximumBridgePaxMetadataBytes = 16MB
+$script:maximumBridgeTarHeaderCount = 8192
+$script:maximumBridgeLogicalTarBytes = 800MB
+if ($TestMode) {
+  $fileLimitRaw = [string]$env:HCH_BRIDGE_TEST_MAX_FILE_BYTES
+  $totalLimitRaw = [string]$env:HCH_BRIDGE_TEST_MAX_TOTAL_BYTES
+  if ([string]::IsNullOrEmpty($fileLimitRaw) -xor [string]::IsNullOrEmpty($totalLimitRaw)) {
+    Stop-BridgeReleaseGate 'bridge-release-test-size-limits-invalid'
+  }
+  if (-not [string]::IsNullOrEmpty($fileLimitRaw)) {
+    $fileLimit = 0L
+    $totalLimit = 0L
+    if ($fileLimitRaw -cnotmatch '^[1-9][0-9]{0,9}$' -or
+        $totalLimitRaw -cnotmatch '^[1-9][0-9]{0,9}$' -or
+        -not [Int64]::TryParse($fileLimitRaw, [ref]$fileLimit) -or
+        -not [Int64]::TryParse($totalLimitRaw, [ref]$totalLimit) -or
+        $fileLimit -gt $totalLimit) {
+      Stop-BridgeReleaseGate 'bridge-release-test-size-limits-invalid'
+    }
+    $script:maximumBridgeRegularFileBytes = $fileLimit
+    $script:maximumBridgeExpandedBytes = $totalLimit
+  }
+  foreach ($setting in @(
+      @{ Name = 'HCH_BRIDGE_TEST_MAX_PAX_BYTES'; Target = 'maximumBridgePaxMetadataBytes' },
+      @{ Name = 'HCH_BRIDGE_TEST_MAX_HEADER_COUNT'; Target = 'maximumBridgeTarHeaderCount' },
+      @{ Name = 'HCH_BRIDGE_TEST_MAX_LOGICAL_TAR_BYTES'; Target = 'maximumBridgeLogicalTarBytes' })) {
+    $raw = [string][Environment]::GetEnvironmentVariable($setting.Name)
+    if (-not [string]::IsNullOrEmpty($raw)) {
+      $parsed = 0L
+      if ($raw -cnotmatch '^[1-9][0-9]{0,9}$' -or -not [Int64]::TryParse($raw, [ref]$parsed)) {
+        Stop-BridgeReleaseGate 'bridge-release-test-size-limits-invalid'
+      }
+      Set-Variable -Scope Script -Name $setting.Target -Value $parsed
+    }
+  }
 }
 
 function Assert-RegularFile {
@@ -403,6 +443,7 @@ function Assert-GzipTarPackage {
   }
 
   $archiveHashBefore = Get-Sha256Hex $archiveItem.FullName
+  Assert-BoundedTarPayload $archiveItem.FullName
   $names = @(Convert-ArchiveListingToLines (
       Invoke-CheckedNative $TarCommand @('-tzf', $archiveItem.FullName)))
   if ($names.Count -eq 0) {
@@ -493,6 +534,200 @@ function Assert-GzipTarPackage {
   }
   if ((Get-Sha256Hex $archiveItem.FullName) -cne $archiveHashBefore) {
     Stop-BridgeReleaseGate 'bridge-release-archive-mutated-during-validation'
+  }
+}
+
+function Assert-BoundedTarPayload {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $maximumExtendedHeaderBytes = 1MB
+  $totalRegularFileBytes = 0L
+  $totalPaxMetadataBytes = 0L
+  $logicalTarBytes = 0L
+  $headerCount = 0L
+  $zeroBlocks = 0
+  $file = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+  try {
+    $gzip = [IO.Compression.GzipStream]::new($file, [IO.Compression.CompressionMode]::Decompress, $false)
+    try {
+      while ($true) {
+        $header = Read-TarBytes $gzip 512
+        if ($header.Length -eq 0) { break }
+        if ($header.Length -ne 512) { Stop-BridgeReleaseGate 'bridge-release-archive-header-truncated' }
+        $allZero = $true
+        foreach ($byte in $header) {
+          if ($byte -ne 0) { $allZero = $false; break }
+        }
+        if ($allZero) {
+          $zeroBlocks++
+          $logicalTarBytes = Add-BoundedTarBytes $logicalTarBytes 512
+          if ($zeroBlocks -eq 2) { break }
+          continue
+        }
+        if ($zeroBlocks -ne 0) { Stop-BridgeReleaseGate 'bridge-release-archive-format-ambiguous' }
+
+        $headerCount++
+        if ($headerCount -gt $script:maximumBridgeTarHeaderCount) {
+          Stop-BridgeReleaseGate 'bridge-release-archive-header-count-limit-exceeded'
+        }
+
+        Assert-TarHeaderChecksum $header
+        $size = Read-StrictTarOctal $header 124 12 'bridge-release-archive-size-ambiguous'
+        $padding = (512 - ($size % 512)) % 512
+        $logicalTarBytes = Add-BoundedTarBytes $logicalTarBytes 512
+        $logicalTarBytes = Add-BoundedTarBytes $logicalTarBytes $size
+        $logicalTarBytes = Add-BoundedTarBytes $logicalTarBytes $padding
+        if ($logicalTarBytes -gt $script:maximumBridgeLogicalTarBytes) {
+          Stop-BridgeReleaseGate 'bridge-release-archive-logical-size-limit-exceeded'
+        }
+        $type = [char]$header[156]
+        if ($type -eq [char]0) { $type = '0' }
+        switch ($type) {
+          '0' {
+            if ($size -gt $script:maximumBridgeRegularFileBytes) {
+              Stop-BridgeReleaseGate 'bridge-release-archive-file-size-limit-exceeded'
+            }
+            if ($totalRegularFileBytes -gt ([Int64]::MaxValue - $size)) {
+              Stop-BridgeReleaseGate 'bridge-release-archive-expanded-size-overflow'
+            }
+            $totalRegularFileBytes += $size
+            if ($totalRegularFileBytes -gt $script:maximumBridgeExpandedBytes) {
+              Stop-BridgeReleaseGate 'bridge-release-archive-expanded-size-limit-exceeded'
+            }
+          }
+          '5' {
+            if ($size -ne 0) { Stop-BridgeReleaseGate 'bridge-release-archive-directory-size-invalid' }
+          }
+          { $_ -in 'x', 'g' } {
+            if ($size -gt $maximumExtendedHeaderBytes) {
+              Stop-BridgeReleaseGate 'bridge-release-archive-extended-header-size-limit-exceeded'
+            }
+            if ($totalPaxMetadataBytes -gt ([Int64]::MaxValue - $size)) {
+              Stop-BridgeReleaseGate 'bridge-release-archive-expanded-size-overflow'
+            }
+            $totalPaxMetadataBytes += $size
+            if ($totalPaxMetadataBytes -gt $script:maximumBridgePaxMetadataBytes) {
+              Stop-BridgeReleaseGate 'bridge-release-archive-pax-metadata-limit-exceeded'
+            }
+          }
+          default { Stop-BridgeReleaseGate 'bridge-release-archive-link-or-special-entry' }
+        }
+
+        $remaining = $size
+        $extended = if ($type -in 'x', 'g') { [IO.MemoryStream]::new() } else { $null }
+        try {
+          while ($remaining -gt 0) {
+            $chunk = [int][Math]::Min(8192L, $remaining)
+            $payload = Read-TarBytes $gzip $chunk
+            if ($payload.Length -ne $chunk) { Stop-BridgeReleaseGate 'bridge-release-archive-payload-truncated' }
+            if ($null -ne $extended) { $extended.Write($payload, 0, $payload.Length) }
+            $remaining -= $payload.Length
+          }
+          if ($null -ne $extended) {
+            Assert-SafePaxMetadata -Bytes ($extended.ToArray())
+          }
+        } finally {
+          if ($null -ne $extended) { $extended.Dispose() }
+        }
+
+        if ($padding -gt 0) {
+          $paddingBuffer = Read-TarBytes $gzip ([int]$padding)
+          if ($paddingBuffer.Length -ne $padding) {
+            Stop-BridgeReleaseGate 'bridge-release-archive-padding-truncated'
+          }
+        }
+      }
+      if ($zeroBlocks -ne 2) { Stop-BridgeReleaseGate 'bridge-release-archive-end-marker-invalid' }
+    } catch [IO.InvalidDataException] {
+      Stop-BridgeReleaseGate 'bridge-release-archive-gzip-invalid'
+    } finally {
+      $gzip.Dispose()
+    }
+  } finally {
+    $file.Dispose()
+  }
+}
+
+function Add-BoundedTarBytes {
+  param([Int64]$Current, [Int64]$Additional)
+  if ($Additional -lt 0 -or $Current -gt ([Int64]::MaxValue - $Additional)) {
+    Stop-BridgeReleaseGate 'bridge-release-archive-expanded-size-overflow'
+  }
+  return $Current + $Additional
+}
+
+function Read-TarBytes {
+  param([Parameter(Mandatory = $true)][IO.Stream]$Stream,
+        [Parameter(Mandatory = $true)][int]$Count)
+  $buffer = [byte[]]::new($Count)
+  $offset = 0
+  while ($offset -lt $Count) {
+    $read = $Stream.Read($buffer, $offset, $Count - $offset)
+    if ($read -eq 0) { break }
+    $offset += $read
+  }
+  if ($offset -eq $Count) { return ,$buffer }
+  $partial = [byte[]]::new($offset)
+  if ($offset -gt 0) { [Array]::Copy($buffer, $partial, $offset) }
+  return ,$partial
+}
+
+function Read-StrictTarOctal {
+  param([byte[]]$Header, [int]$Offset, [int]$Length, [string]$ErrorCode)
+  if (($Header[$Offset] -band 0x80) -ne 0) { Stop-BridgeReleaseGate $ErrorCode }
+  $text = [Text.Encoding]::ASCII.GetString($Header, $Offset, $Length)
+  if ($text -cnotmatch '^[ 0-7]*\x00?[ ]*$') { Stop-BridgeReleaseGate $ErrorCode }
+  $digits = $text.Trim([char]0, [char]' ')
+  if ($digits.Length -eq 0) { return 0L }
+  try { return [Convert]::ToInt64($digits, 8) } catch { Stop-BridgeReleaseGate $ErrorCode }
+}
+
+function Assert-TarHeaderChecksum {
+  param([byte[]]$Header)
+  $expected = Read-StrictTarOctal $Header 148 8 'bridge-release-archive-checksum-ambiguous'
+  $actual = 0L
+  for ($index = 0; $index -lt 512; $index++) {
+    $actual += if ($index -ge 148 -and $index -lt 156) { 32 } else { $Header[$index] }
+  }
+  if ($actual -ne $expected) { Stop-BridgeReleaseGate 'bridge-release-archive-header-checksum-invalid' }
+}
+
+function Assert-SafePaxMetadata {
+  param([byte[]]$Bytes)
+  try { $null = [Text.UTF8Encoding]::new($false, $true).GetString($Bytes) }
+  catch { Stop-BridgeReleaseGate 'bridge-release-archive-extended-header-utf8-invalid' }
+  $offset = 0
+  while ($offset -lt $Bytes.Length) {
+    $space = -1
+    for ($index = $offset; $index -lt $Bytes.Length; $index++) {
+      if ($Bytes[$index] -eq 0x20) { $space = $index; break }
+      if ($Bytes[$index] -lt 0x30 -or $Bytes[$index] -gt 0x39) {
+        Stop-BridgeReleaseGate 'bridge-release-archive-extended-header-length-prefix-invalid'
+      }
+    }
+    if ($space -le $offset) { Stop-BridgeReleaseGate 'bridge-release-archive-extended-header-length-prefix-invalid' }
+    $lengthText = [Text.Encoding]::ASCII.GetString($Bytes, $offset, $space - $offset)
+    $recordLength = 0
+    if ($lengthText -cnotmatch '^[1-9][0-9]{0,9}$' -or
+        -not [Int32]::TryParse($lengthText, [ref]$recordLength) -or
+        $recordLength -le 0 -or $offset + $recordLength -gt $Bytes.Length) {
+      Stop-BridgeReleaseGate 'bridge-release-archive-extended-header-length-invalid'
+    }
+    $recordEnd = $offset + $recordLength
+    if ($Bytes[$recordEnd - 1] -ne 0x0a) {
+      Stop-BridgeReleaseGate 'bridge-release-archive-extended-header-newline-invalid'
+    }
+    $equals = -1
+    for ($index = $space + 1; $index -lt $recordEnd - 1; $index++) {
+      if ($Bytes[$index] -eq 0x3d) { $equals = $index; break }
+    }
+    if ($equals -le $space + 1) { Stop-BridgeReleaseGate 'bridge-release-archive-extended-header-key-invalid' }
+    $key = [Text.Encoding]::ASCII.GetString($Bytes, $space + 1, $equals - $space - 1)
+    if ($key -ceq 'size' -or $key.StartsWith('GNU.sparse.', [StringComparison]::Ordinal) -or
+        $key -ceq 'SCHILY.realsize') {
+      Stop-BridgeReleaseGate 'bridge-release-archive-sparse-or-extended-header-invalid'
+    }
+    $offset += $recordLength
   }
 }
 
@@ -644,6 +879,47 @@ $packageNames = @(
   "HCH-Worker-$Version-macos-universal.tar.gz"
 )
 $assetNames = @($packageNames + @('SHA256SUMS.txt', 'SHA256SUMS.p7s'))
+
+if ($CandidateMode) {
+  if ($TestMode -or $LatestReleaseJsonPath -or $TaggedReleaseJsonPath -or
+      $SkipAuthenticodeVerification -or $SkipCmsVerification -or
+      $SkipAttestationVerification -or $OfflineTagCommit) {
+    Stop-BridgeReleaseGate 'bridge-release-candidate-input-invalid'
+  }
+  if (-not $AssetDirectory) { Stop-BridgeReleaseGate 'bridge-release-candidate-directory-required' }
+  $downloadDirectory = (Resolve-Path -LiteralPath $AssetDirectory).Path
+  $head = (Invoke-CheckedNative 'git' @('-C', $PSScriptRoot, 'rev-parse', 'HEAD')).Trim().ToLowerInvariant()
+  if ($head -cne $BridgeSourceCommit) { Stop-BridgeReleaseGate 'bridge-release-candidate-source-mismatch' }
+  if ([string]$env:GITHUB_ACTIONS -ieq 'true') {
+    if ([string]$env:GITHUB_SHA -cne $BridgeSourceCommit -or
+        [string]$env:GITHUB_REF -cne 'refs/heads/main') {
+      Stop-BridgeReleaseGate 'bridge-release-candidate-actions-source-invalid'
+    }
+  }
+  $assetMap = @{}
+  foreach ($name in $assetNames) {
+    $path = Join-Path $downloadDirectory $name
+    $item = Assert-RegularFile $path
+    $assetMap[$name] = [pscustomobject]@{ id = "candidate:$name"; name = $name; size = [Int64]$item.Length }
+  }
+  $assetTotalBytes = Assert-AssetMetadataLimits $assetMap $packageNames
+  Assert-DownloadedAssets $downloadDirectory $assetMap $assetNames
+  Assert-Checksums $downloadDirectory $packageNames
+  $tarCommand = Get-TarCommand
+  Assert-GzipTarPackage (Join-Path $downloadDirectory $packageNames[1]) 'linux' $Version $tarCommand
+  Assert-GzipTarPackage (Join-Path $downloadDirectory $packageNames[2]) 'macos' $Version $tarCommand
+  Assert-WindowsPackageAuthenticode (Join-Path $downloadDirectory $packageNames[0])
+  Assert-CmsSignature $downloadDirectory
+  [pscustomobject]@{
+    schema = 'hch.worker-bridge-candidate-verification/v1'
+    status = 'verified'
+    version = $Version
+    sourceCommit = $BridgeSourceCommit
+    assetCount = $assetNames.Count
+    assetTotalBytes = $assetTotalBytes
+  } | ConvertTo-Json -Compress
+  return
+}
 
 if ($TestMode) {
   if ([string]$env:GITHUB_ACTIONS -ieq 'true') { Stop-BridgeReleaseGate 'bridge-release-test-mode-forbidden-in-actions' }

@@ -71,6 +71,12 @@ public sealed class ManifestTrustStateRecord
         RootFingerprint,
         DelegationSequence,
         DelegationHash);
+
+    public AppliedManifestAnchor ToManifestAnchor() => new(
+        SchemaVersion,
+        ManifestSequence,
+        ManifestHash,
+        ContentContractHash);
 }
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
@@ -223,23 +229,37 @@ public sealed class BootstrapAttestationCoordinator(
         CancellationToken cancellationToken)
     {
         ValidateRequest(request);
-        var previousApplied = await files.ReadJsonAsync<AppliedManifestState>(
+        var currentApplied = await files.ReadJsonAsync<AppliedManifestState>(
             "applied-manifest.json",
             cancellationToken).ConfigureAwait(false);
         AppliedManifestAnchor? appliedAnchor = null;
-        if (previousApplied is not null)
+        if (currentApplied is not null)
         {
-            _ = AppliedRuntimeContract.FromAppliedState(previousApplied);
+            _ = AppliedRuntimeContract.FromAppliedState(currentApplied);
             appliedAnchor = new AppliedManifestAnchor(
-                previousApplied.SchemaVersion,
-                previousApplied.ManifestSequence,
-                previousApplied.ManifestHash,
-                previousApplied.ContentContractHash);
+                currentApplied.SchemaVersion,
+                currentApplied.ManifestSequence,
+                currentApplied.ManifestHash,
+                currentApplied.ContentContractHash);
         }
 
         var persistedTrust = await files.ReadJsonAsync<ManifestTrustStateRecord>(
             "trust-state.json",
             cancellationToken).ConfigureAwait(false);
+        appliedAnchor = SelectManifestAnchor(appliedAnchor, persistedTrust?.ToManifestAnchor());
+        var priorApplied = await ReadOptionalAppliedStateAsync(
+            files,
+            ManifestArtifactApplier.PreviousAppliedStatePath,
+            cancellationToken).ConfigureAwait(false);
+        var durableReady = await ReadOptionalReadyStateAsync(files, cancellationToken).ConfigureAwait(false);
+        var previousApplied = WorkerRuntimeFactory.SelectReadyAppliedState(
+            currentApplied,
+            priorApplied,
+            durableReady,
+            persistedTrust,
+            request,
+            pins,
+            clock.GetUtcNow());
         var publishedDelivery = await client.FetchManifestAsync(cancellationToken).ConfigureAwait(false);
         var published = await SignedManifestVerifier.VerifyAsync(
             publishedDelivery,
@@ -329,7 +349,7 @@ public sealed class BootstrapAttestationCoordinator(
             bootstrap.Manifest,
             pins,
             verifier,
-            appliedAnchor,
+            SelectManifestAnchor(appliedAnchor, trustState.ToManifestAnchor()),
             trustState.ToAnchor(),
             clock.GetUtcNow(),
             "windows",
@@ -362,41 +382,62 @@ public sealed class BootstrapAttestationCoordinator(
                 request.WorkerRuntimeVersion),
             cancellationToken).ConfigureAwait(false);
         var manifest = sessionManifest.Manifest;
-        var attestation = await client.AttestAsync(
-            bootstrap.BootstrapSessionId,
-            new AttestationRequestContract
-            {
-                NodeId = request.NodeId,
-                WorkerKeyId = request.WorkerKeyId,
-                ManifestSequence = manifest.Sequence,
-                ManifestHash = manifest.Hash,
-                ContentContractHash = sessionManifest.ContentContractHash,
-                Challenge = bootstrap.Challenge,
-                WorkerRuntimeVersion = request.WorkerRuntimeVersion,
-                PolicyHash = manifest.Editorial.PolicyHash,
-                AdaptiveWorkPolicyHash = ManifestPolicyValidator.AdaptiveWorkPolicyHash(
-                    manifest.AdaptiveWorkPolicy!.Value),
-                RootKeyId = sessionManifest.RootKeyId,
-                ReleaseKeyId = sessionManifest.ReleaseKeyId,
-                TrustVerifiedAt = trustVerifiedAt,
-                PromptConfigHash = manifest.Editorial.PromptConfigHash,
-                PipelineVersion = manifest.Editorial.PipelineVersion,
-                Provider = manifest.Engine.Provider,
-                EngineAdapter = manifest.Engine.Adapter,
-                EngineAdapterVersion = manifest.Engine.AdapterVersion,
-                Model = manifest.Engine.Model,
-                ModelDigest = NormalizeDigest(manifest.Engine.ModelDigest),
-                Protocol = manifest.Engine.Protocol,
-                Checks = applied.Checks,
-                UpdateReceipt = applied.UpdateReceipt,
-            },
-            request.AttestationRequestId,
-            cancellationToken).ConfigureAwait(false);
-        ValidateAttestationResponse(
-            attestation,
-            request,
-            sessionManifest,
-            clock.GetUtcNow());
+        AttestationResponseContract attestation;
+        try
+        {
+            attestation = await client.AttestAsync(
+                bootstrap.BootstrapSessionId,
+                new AttestationRequestContract
+                {
+                    NodeId = request.NodeId,
+                    WorkerKeyId = request.WorkerKeyId,
+                    ManifestSequence = manifest.Sequence,
+                    ManifestHash = manifest.Hash,
+                    ContentContractHash = sessionManifest.ContentContractHash,
+                    Challenge = bootstrap.Challenge,
+                    WorkerRuntimeVersion = request.WorkerRuntimeVersion,
+                    PolicyHash = manifest.Editorial.PolicyHash,
+                    AdaptiveWorkPolicyHash = ManifestPolicyValidator.AdaptiveWorkPolicyHash(
+                        manifest.AdaptiveWorkPolicy!.Value),
+                    RootKeyId = sessionManifest.RootKeyId,
+                    ReleaseKeyId = sessionManifest.ReleaseKeyId,
+                    TrustVerifiedAt = trustVerifiedAt,
+                    PromptConfigHash = manifest.Editorial.PromptConfigHash,
+                    PipelineVersion = manifest.Editorial.PipelineVersion,
+                    Provider = manifest.Engine.Provider,
+                    EngineAdapter = manifest.Engine.Adapter,
+                    EngineAdapterVersion = manifest.Engine.AdapterVersion,
+                    Model = manifest.Engine.Model,
+                    ModelDigest = NormalizeDigest(manifest.Engine.ModelDigest),
+                    Protocol = manifest.Engine.Protocol,
+                    Checks = applied.Checks,
+                    UpdateReceipt = applied.UpdateReceipt,
+                },
+                request.AttestationRequestId,
+                cancellationToken).ConfigureAwait(false);
+            ValidateAttestationResponse(
+                attestation,
+                request,
+                sessionManifest,
+                clock.GetUtcNow());
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception error) when (!WorkerRuntimeFactory.IsTransientBootstrapFailure(error))
+        {
+            // A permanent rejection must revoke the predecessor before the
+            // failure escapes. Otherwise a restart followed by an offline
+            // bootstrap could mistake the old ready commit for a transiently
+            // deferred compatible refresh.
+            await InvalidateReadyAsync(
+                request,
+                sessionManifest,
+                "attestation-permanent-failure",
+                CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
 
         var capacityPolicyHash = ManifestPolicyValidator.CapacityPolicyHash(manifest.CapacityPolicy);
         var adaptivePolicyHash = ManifestPolicyValidator.AdaptiveWorkPolicyHash(
@@ -464,6 +505,85 @@ public sealed class BootstrapAttestationCoordinator(
             readyUntil,
             WorkStarted: false,
             applied.MetadataOnly);
+    }
+
+    private static async Task<AppliedManifestState?> ReadOptionalAppliedStateAsync(
+        AtomicFileStore files,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var state = await files.ReadJsonAsync<AppliedManifestState>(path, cancellationToken)
+                .ConfigureAwait(false);
+            if (state is not null)
+            {
+                _ = AppliedRuntimeContract.FromAppliedState(state);
+            }
+
+            return state;
+        }
+        catch (Exception error) when (
+            error is JsonException or ProtocolValidationException or WorkerServiceException or IOException)
+        {
+            return null;
+        }
+    }
+
+    private static AppliedManifestAnchor? SelectManifestAnchor(
+        AppliedManifestAnchor? applied,
+        AppliedManifestAnchor? trusted)
+    {
+        if (applied is null)
+        {
+            return trusted;
+        }
+
+        if (trusted is null)
+        {
+            return applied;
+        }
+
+        if (applied.ManifestSequence == trusted.ManifestSequence)
+        {
+            if (!string.Equals(applied.ManifestHash, trusted.ManifestHash, StringComparison.Ordinal))
+            {
+                throw Error(
+                    "manifest-equivocation-refused",
+                    "The applied and trusted manifest anchors disagree at the same sequence.");
+            }
+
+            if (applied.ContentContractHash is not null
+                && trusted.ContentContractHash is not null
+                && !string.Equals(
+                    applied.ContentContractHash,
+                    trusted.ContentContractHash,
+                    StringComparison.Ordinal))
+            {
+                throw Error(
+                    "manifest-trust-state-invalid",
+                    "The applied and trusted manifest anchors disagree on the content contract.");
+            }
+
+            return trusted;
+        }
+
+        return trusted.ManifestSequence > applied.ManifestSequence ? trusted : applied;
+    }
+
+    private static async Task<WorkerReadyStateRecord?> ReadOptionalReadyStateAsync(
+        AtomicFileStore files,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await files.ReadJsonAsync<WorkerReadyStateRecord>("ready.json", cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is JsonException or ProtocolValidationException or IOException)
+        {
+            return null;
+        }
     }
 
     private Task InvalidateReadyAsync(

@@ -134,15 +134,52 @@ function Assert-VersionConsistency {
     }
 }
 
-function Assert-PublishedVersions {
+function Read-ReleaseCompatibility {
     param([Parameter(Mandatory)][string]$ExpectedVersion)
+
+    $path = Join-Path $windowsRoot 'release-compatibility.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'Windows release compatibility declaration is missing.'
+    }
+    $item = Get-Item -LiteralPath $path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -le 0 -or $item.Length -gt 16KB) {
+        throw 'Windows release compatibility declaration is not a bounded regular file.'
+    }
+    $bytes = [IO.File]::ReadAllBytes($path)
+    $value = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) | ConvertFrom-Json
+    $expectedProperties = @('basis', 'compatibility', 'contentImpact', 'previousSupportedVersion', 'schema', 'version')
+    $actualProperties = @($value.PSObject.Properties.Name | Sort-Object)
+    if (($actualProperties -join "`n") -cne (($expectedProperties | Sort-Object) -join "`n") `
+        -or $value.schema -cne 'hch.worker-windows-release-compatibility/v1' `
+        -or $value.version -cne $ExpectedVersion `
+        -or $value.previousSupportedVersion -cne '3.1.1' `
+        -or (($value.compatibility -cne 'compatible' -or $value.contentImpact -cne 'none') `
+            -and ($value.compatibility -cne 'incompatible' -or $value.contentImpact -cne 'generated-content')) `
+        -or $value.basis -isnot [string] -or $value.basis.Length -lt 32 -or $value.basis.Length -gt 1000 `
+        -or $value.basis -match '(?i)password|private.?key|authorization\s*:|bearer\s+') {
+        throw 'Windows release compatibility declaration is invalid.'
+    }
+    return [pscustomobject]@{
+        Path = $path
+        Sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+        Value = $value
+    }
+}
+
+function Assert-PublishedVersions {
+    param(
+        [Parameter(Mandatory)][string]$ExpectedVersion,
+        [Parameter(Mandatory)][string]$ExpectedInformationalVersion
+    )
 
     foreach ($path in @(
         (Join-Path $servicePublish 'Hch.Worker.Service.exe'),
         (Join-Path $trayPublish 'Hch.Worker.Tray.exe'),
         (Join-Path $bootstrapPublish 'Hch.Worker.Installer.exe'))) {
         $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($path)
-        if ($version.ProductVersion -notlike "$ExpectedVersion*" -or $version.FileVersion -ne "$ExpectedVersion.0") {
+        if ($version.ProductVersion -cne $ExpectedInformationalVersion `
+            -or $version.FileVersion -cne "$ExpectedVersion.0") {
             throw "Published binary version mismatch: $path"
         }
     }
@@ -199,6 +236,7 @@ try {
     }
 
     Assert-VersionConsistency -ExpectedVersion $Version
+    $releaseCompatibility = Read-ReleaseCompatibility -ExpectedVersion $Version
     $sourceState = Get-SourceState -Version $Version -DeclaredRef $SourceRef
     & (Join-Path $PSScriptRoot 'Test-HchWorkerInstallerSource.ps1')
 
@@ -267,6 +305,7 @@ try {
         '--self-contained', 'true',
         '--no-restore',
         '-p:ContinuousIntegrationBuild=true',
+        '-p:IncludeSourceRevisionInInformationalVersion=false',
         '-p:PublishSingleFile=false',
         '-p:PublishTrimmed=false',
         '-p:PublishReadyToRun=true',
@@ -286,6 +325,7 @@ try {
         '--self-contained', 'true',
         '--no-restore',
         '-p:ContinuousIntegrationBuild=true',
+        '-p:IncludeSourceRevisionInInformationalVersion=false',
         '-p:PublishSingleFile=true',
         '-p:PublishTrimmed=false',
         '-p:DebugType=None',
@@ -301,7 +341,9 @@ try {
     # no loose DLL. Execute the managed assembly produced by the same publish
     # build for this non-mutating gate so CI does not display a UAC prompt.
     Invoke-Checked -FilePath dotnet -ArgumentList @($bootstrapSelfTestAssembly, 'self-test')
-    Assert-PublishedVersions -ExpectedVersion $Version
+    Assert-PublishedVersions `
+        -ExpectedVersion $Version `
+        -ExpectedInformationalVersion $informationalVersion
 
     $signablePayloads = Get-ChildItem -Path $servicePublish, $trayPublish, $bootstrapPublish -File -Recurse |
         Where-Object { $_.Extension -in '.exe', '.dll' -and $_.Name -like 'Hch.Worker.*' } |
@@ -340,6 +382,12 @@ try {
         rootKeyId = if ($hasRootTrustPayload) { $RootKeyId } else { $null }
         rootPublicKeyFingerprint = if ($hasRootTrustPayload) { $RootPublicKeyFingerprint } else { $null }
         expectedMsi = $msiName
+        releaseCompatibilitySha256 = $releaseCompatibility.Sha256
+        releaseCompatibility = [ordered]@{
+            previousSupportedVersion = $releaseCompatibility.Value.previousSupportedVersion
+            compatibility = $releaseCompatibility.Value.compatibility
+            contentImpact = $releaseCompatibility.Value.contentImpact
+        }
         preparedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         files = @($preparedFiles)
     }
@@ -405,6 +453,8 @@ try {
         rootTrustPinned = $hasRootTrustPayload
         rootKeyId = if ($hasRootTrustPayload) { $RootKeyId } else { $null }
         rootPublicKeyFingerprint = if ($hasRootTrustPayload) { $RootPublicKeyFingerprint } else { $null }
+        releaseCompatibilitySha256 = $releaseCompatibility.Sha256
+        releaseCompatibility = $preparation.releaseCompatibility
         generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
         msi = $msiName
     }

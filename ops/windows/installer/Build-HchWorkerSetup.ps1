@@ -4,6 +4,7 @@ param(
   [string]$RootPublicKeyPath = 'C:\ProgramData\HCH\EditorialWorker\trust\orchestrator-root.pem',
   [string]$OutputDirectory = (Join-Path $PSScriptRoot 'artifacts'),
   [string]$ReleaseBaseUrl = 'https://github.com/HUBTECH-DEV/hch-worker/releases/download',
+  [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
   [string]$SigningThumbprint = $env:HCH_WINDOWS_PUBLISHER_THUMBPRINT,
   [string]$TimestampUrl = 'http://timestamp.digicert.com'
 )
@@ -13,7 +14,11 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
 $kitRoot = Join-Path $repositoryRoot 'ops\windows\editorial-worker'
 $dashboardRoot = Join-Path $repositoryRoot 'ops\worker-dashboard'
-$version = (Get-Content -Raw -LiteralPath (Join-Path $kitRoot 'VERSION')).Trim()
+$version = if ([string]::IsNullOrWhiteSpace($Version)) {
+  (Get-Content -Raw -LiteralPath (Join-Path $kitRoot 'VERSION')).Trim()
+} else {
+  $Version
+}
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'hch-setup-version-invalid' }
 foreach ($required in @($NodePath, $RootPublicKeyPath, (Join-Path $kitRoot 'service\bin\HchEditorialWorkerService.exe'))) {
   if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw 'hch-setup-build-input-missing' }
@@ -41,6 +46,7 @@ try {
   Get-ChildItem -LiteralPath $kitRoot -Force | Where-Object {
     $_.Name -notin @('WorkerConfig.psd1', 'tests')
   } | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $stageKit -Recurse -Force }
+  [IO.File]::WriteAllText((Join-Path $stageKit 'VERSION'), "$version`n", [Text.ASCIIEncoding]::new())
   Get-ChildItem -LiteralPath $dashboardRoot -Force | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $stageDashboard -Recurse -Force
   }
@@ -54,13 +60,34 @@ try {
   $payloadZip = Join-Path $buildRoot 'payload.zip'
   Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $payloadZip -CompressionLevel Optimal
   New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
+  $versionedSetupSource = Join-Path $buildRoot 'HchWorkerSetup.cs'
+  $versionedSetupManifest = Join-Path $buildRoot 'HchWorkerSetup.exe.manifest'
+  $assemblyVersion = "$version.0"
+  $setupSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'HchWorkerSetup.cs')
+  $setupSource = [Regex]::Replace($setupSource, '(?m)^\[assembly: AssemblyVersion\("[^"]+"\)\]\r?$', "[assembly: AssemblyVersion(`"$assemblyVersion`")]", 1)
+  $setupSource = [Regex]::Replace($setupSource, '(?m)^\[assembly: AssemblyFileVersion\("[^"]+"\)\]\r?$', "[assembly: AssemblyFileVersion(`"$assemblyVersion`")]", 1)
+  if ($setupSource -notmatch [Regex]::Escape("[assembly: AssemblyVersion(`"$assemblyVersion`")]" ) -or
+      $setupSource -notmatch [Regex]::Escape("[assembly: AssemblyFileVersion(`"$assemblyVersion`")]")) {
+    throw 'hch-setup-version-stamp-failed'
+  }
+  [IO.File]::WriteAllText($versionedSetupSource, $setupSource, [Text.UTF8Encoding]::new($false))
+  $setupManifest = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'HchWorkerSetup.exe.manifest')
+  $setupManifest = [Regex]::Replace(
+    $setupManifest,
+    '(<assemblyIdentity\s+version=")[^"]+("\s+name="Hubtech\.HchWorker\.Setup")',
+    "`${1}$assemblyVersion`${2}",
+    1)
+  if ($setupManifest -notmatch ('assemblyIdentity\s+version="' + [Regex]::Escape($assemblyVersion) + '"')) {
+    throw 'hch-setup-manifest-version-stamp-failed'
+  }
+  [IO.File]::WriteAllText($versionedSetupManifest, $setupManifest, [Text.UTF8Encoding]::new($false))
   $compilerArguments = @(
     '/nologo', '/target:winexe', '/platform:x64', '/optimize+', ('/out:' + $outputPath),
-    ('/win32manifest:' + (Join-Path $PSScriptRoot 'HchWorkerSetup.exe.manifest')),
+    ('/win32manifest:' + $versionedSetupManifest),
     ('/resource:' + $payloadZip + ',HchWorkerPayload'),
     '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll',
     '/reference:System.Web.Extensions.dll', '/reference:System.IO.Compression.dll',
-    '/reference:System.IO.Compression.FileSystem.dll', (Join-Path $PSScriptRoot 'HchWorkerSetup.cs')
+    '/reference:System.IO.Compression.FileSystem.dll', $versionedSetupSource
   )
   $compilerOutput = @(& $csc @compilerArguments 2>&1)
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
@@ -73,6 +100,9 @@ try {
     & (Join-Path $kitRoot 'Sign-HchWorkerReleaseArtifact.ps1') -BinaryPath $outputPath `
       -CertificateThumbprint $SigningThumbprint -TimestampUrl $TimestampUrl | Out-Null
   }
+  $evidencePath = $outputPath + '.release.json'
+  [void](& (Join-Path $kitRoot 'New-HchWorkerReleaseEvidence.ps1') `
+    -BinaryPath $outputPath -OutputPath $evidencePath)
   $sha256 = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToUpperInvariant()
   $wingetRoot = Join-Path $outputRoot 'winget'
   New-Item -ItemType Directory -Path $wingetRoot -Force | Out-Null
@@ -125,7 +155,13 @@ ManifestVersion: 1.10.0
     [Text.UTF8Encoding]::new($false))
   [IO.File]::WriteAllText((Join-Path $wingetRoot 'Hubtech.HCHWorker.locale.pt-BR.yaml'), $localeManifest,
     [Text.UTF8Encoding]::new($false))
-  [pscustomobject]@{ artifact = $outputPath; version = $version; sha256 = $sha256; winget = $wingetRoot }
+  [pscustomobject]@{
+    artifact = $outputPath
+    evidence = $evidencePath
+    version = $version
+    sha256 = $sha256
+    winget = $wingetRoot
+  }
 } finally {
   Remove-Item -LiteralPath $buildRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

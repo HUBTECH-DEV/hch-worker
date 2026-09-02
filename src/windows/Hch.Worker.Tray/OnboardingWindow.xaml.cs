@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Mail;
 using System.Windows;
+using System.Windows.Input;
 using Hch.Worker.IPC.Contracts;
 using Microsoft.Win32;
 
@@ -8,6 +9,7 @@ namespace Hch.Worker.Tray;
 
 public partial class OnboardingWindow : Window
 {
+    private static readonly string[] StepNames = ["Serviço", "Conta", "Chave", "Enrollment", "Validação"];
     private readonly NamedPipeWorkerClient client;
     private UserSshPublicKey? userKey;
     private string? authorizationCorrelationId;
@@ -15,11 +17,14 @@ public partial class OnboardingWindow : Window
     private string? registeredUserSshKeyFingerprint;
     private string? selfEnrollmentRequestId;
     private OperationalEnrollmentContextPayload? operationalEnrollmentContext;
+    private bool enrollmentCompleted;
+    private bool finalValidationPassed;
 
     public OnboardingWindow(NamedPipeWorkerClient client)
     {
         this.client = client;
         InitializeComponent();
+        UpdateNavigation();
         Loaded += OnboardingWindow_Loaded;
     }
 
@@ -41,7 +46,8 @@ public partial class OnboardingWindow : Window
         {
             _ = await client.PauseAsync().ConfigureAwait(true);
         }
-        catch (Exception error) when (error is IOException or TimeoutException or WorkerControlClientException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or TimeoutException or IpcContractException or WorkerControlClientException)
         {
             // A fresh service is already Paused/Drain and may reject a redundant
             // pause while bootstrap is incomplete. Verification below is decisive.
@@ -67,7 +73,8 @@ public partial class OnboardingWindow : Window
                 ? "Atenção: bloqueando novos claims durante o onboarding."
                 : "Serviço acessível e sem novos claims.";
         }
-        catch (Exception error) when (error is IOException or TimeoutException or WorkerControlClientException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or TimeoutException or IpcContractException or WorkerControlClientException)
         {
             ServiceStatus.Text = "Não disponível";
             ConnectionStatus.Text = "Não disponível";
@@ -310,6 +317,8 @@ public partial class OnboardingWindow : Window
             EnrollmentRequestStatus.Text =
                 $"Enrollment concluído · chave operacional ativa · proprietário {result.OwnerEmail}.";
             WizardStatus.Text = "Identidade operacional vinculada. O Worker permanece em Paused/Drain.";
+            enrollmentCompleted = true;
+            InvalidateFinalValidation();
             if (authorizationCorrelationId is string correlationId)
             {
                 await HihDesktopClient.RevokeAsync(correlationId).ConfigureAwait(true);
@@ -336,23 +345,43 @@ public partial class OnboardingWindow : Window
 
     private async Task ValidateFinalAsync()
     {
+        finalValidationPassed = false;
+        FinishButton.IsEnabled = false;
         try
         {
             var snapshot = await client.GetSnapshotAsync().ConfigureAwait(true);
-            FinalTrustStatus.Text = snapshot.TrustStatus;
-            FinalManifestStatus.Text = snapshot.ManifestStatus;
-            FinalReadyStatus.Text = snapshot.Ready ? "Pronto e pausado" : "Ainda não pronto";
-            WizardStatus.Text = snapshot.Ready
+            OnboardingCompletionState validation = OnboardingCompletionPolicy.Evaluate(
+                snapshot,
+                enrollmentCompleted,
+                DateTimeOffset.UtcNow);
+            FinalEnrollmentStatus.Text = validation.EnrollmentValid
+                ? "Concluído nesta sessão"
+                : "Pendente — conclua o enrollment nesta sessão";
+            FinalTrustStatus.Text = validation.TrustValid
+                ? snapshot.TrustStatus
+                : $"{snapshot.TrustStatus} — confiança ainda não válida";
+            FinalManifestStatus.Text = validation.ManifestValid
+                ? snapshot.ManifestStatus
+                : $"{snapshot.ManifestStatus} — manifesto ainda não válido";
+            FinalReadyStatus.Text = validation.ReadinessValid
+                ? validation.Paused ? "Pronto e pausado" : "Pronto, mas ainda não pausado"
+                : "Ainda não pronto ou readiness expirado";
+            finalValidationPassed = validation.CanComplete;
+            FinishButton.IsEnabled = finalValidationPassed;
+            WizardStatus.Text = validation.CanComplete
                 ? "Onboarding validado. Concluir manterá o Worker pausado."
-                : "A validação ainda não foi concluída pelo serviço.";
+                : "Concluir permanece bloqueado até enrollment, trust, manifesto, readiness e Paused/Drain estarem válidos.";
         }
         catch (Exception error) when (error is IOException or TimeoutException or WorkerControlClientException)
         {
+            FinalEnrollmentStatus.Text = enrollmentCompleted ? "Concluído; aguardando validação do serviço" : "Pendente";
             FinalTrustStatus.Text = "Não disponível";
             FinalManifestStatus.Text = "Não disponível";
             FinalReadyStatus.Text = "Não disponível";
             WizardStatus.Text = "O serviço não respondeu à validação.";
         }
+
+        UpdateNavigation();
     }
 
     private async void Next_Click(object sender, RoutedEventArgs e)
@@ -378,14 +407,25 @@ public partial class OnboardingWindow : Window
         }
     }
 
-    private void Finish_Click(object sender, RoutedEventArgs e)
+    private async void Finish_Click(object sender, RoutedEventArgs e)
     {
+        await ValidateFinalAsync().ConfigureAwait(true);
+        if (!finalValidationPassed)
+        {
+            return;
+        }
+
         PasswordInput.Clear();
         VisiblePasswordInput.Clear();
         DialogResult = true;
     }
 
     private async void Cancel_Click(object sender, RoutedEventArgs e)
+    {
+        await CancelAsync().ConfigureAwait(true);
+    }
+
+    private async Task CancelAsync()
     {
         PasswordInput.Clear();
         VisiblePasswordInput.Clear();
@@ -403,6 +443,8 @@ public partial class OnboardingWindow : Window
         bool last = Steps.SelectedIndex == Steps.Items.Count - 1;
         NextButton.Visibility = last ? Visibility.Collapsed : Visibility.Visible;
         FinishButton.Visibility = last ? Visibility.Visible : Visibility.Collapsed;
+        FinishButton.IsEnabled = last && finalValidationPassed;
+        StepProgressText.Text = $"Etapa {Steps.SelectedIndex + 1} de {Steps.Items.Count} · {StepNames[Steps.SelectedIndex]}";
     }
 
     private void ShowUserKey(UserSshPublicKey value)
@@ -410,11 +452,72 @@ public partial class OnboardingWindow : Window
         registeredUserSshKeyId = null;
         registeredUserSshKeyFingerprint = null;
         selfEnrollmentRequestId = null;
+        enrollmentCompleted = false;
+        InvalidateFinalValidation();
         KeyAlgorithm.Text = value.Algorithm;
         KeyPath.Text = value.PrivateKeyPath;
         KeyFingerprint.Text = value.Fingerprint;
         PublicKey.Text = value.PublicKey;
         EnrollmentKeyStatus.Text = $"Validada localmente · {value.Fingerprint} · registro no HIH pendente";
+    }
+
+    private void InvalidateFinalValidation()
+    {
+        finalValidationPassed = false;
+        if (FinishButton is not null)
+        {
+            FinishButton.IsEnabled = false;
+        }
+    }
+
+    private async void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            await CancelAsync().ConfigureAwait(true);
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.F5)
+        {
+            if (Steps.SelectedIndex == Steps.Items.Count - 1)
+            {
+                await ValidateFinalAsync().ConfigureAwait(true);
+            }
+            else if (Steps.SelectedIndex == 0)
+            {
+                await VerifyServiceAsync().ConfigureAwait(true);
+            }
+
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.Enter && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+        {
+            if (Steps.SelectedIndex == Steps.Items.Count - 1)
+            {
+                await ValidateFinalAsync().ConfigureAwait(true);
+                if (finalValidationPassed)
+                {
+                    PasswordInput.Clear();
+                    VisiblePasswordInput.Clear();
+                    DialogResult = true;
+                }
+            }
+            else
+            {
+                Steps.SelectedIndex++;
+                UpdateNavigation();
+                if (Steps.SelectedIndex == Steps.Items.Count - 1)
+                {
+                    await ValidateFinalAsync().ConfigureAwait(true);
+                }
+            }
+
+            e.Handled = true;
+        }
     }
 
     private static bool IsValidEmail(string value)

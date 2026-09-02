@@ -46,7 +46,7 @@ function splitTarName(name) {
 }
 
 function tarEntry({ name, content = "", mode = 0o644, type = "0", linkName = "" }) {
-  const payload = type === "0" ? Buffer.from(content) : Buffer.alloc(0);
+  const payload = ["0", "x", "g"].includes(type) ? Buffer.from(content) : Buffer.alloc(0);
   const header = Buffer.alloc(512);
   const splitName = splitTarName(name);
   writeTarString(header, 0, 100, splitName.name);
@@ -67,6 +67,17 @@ function tarEntry({ name, content = "", mode = 0o644, type = "0", linkName = "" 
   writeTarString(header, 148, 8, `${checksum.toString(8).padStart(6, "0")}\0 `);
   const padding = Buffer.alloc((512 - (payload.length % 512)) % 512);
   return Buffer.concat([header, payload, padding]);
+}
+
+function paxRecord(key, value) {
+  const body = `${key}=${value}\n`;
+  let length = Buffer.byteLength(body) + 2;
+  while (true) {
+    const record = `${length} ${body}`;
+    const actual = Buffer.byteLength(record);
+    if (actual === length) return record;
+    length = actual;
+  }
 }
 
 function writeTarGz(path, entries) {
@@ -241,6 +252,22 @@ test("bridge release gate accepts an exact mature stable offline fixture", () =>
   }
 });
 
+test("bridge release gate accepts bounded ordinary PAX path metadata", () => {
+  const state = fixture((candidate) => {
+    replaceArchive(candidate, "linux", [
+      ...archiveEntries("linux"),
+      { name: "PaxHeaders.0/note", type: "x", content: paxRecord("path", "hch-worker/metadata-note.txt") },
+      { name: "hch-worker/pax-placeholder", content: "bounded pax metadata\n" },
+    ]);
+  });
+  try {
+    const result = runGate(state);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  } finally {
+    rmSync(state.root, { recursive: true, force: true });
+  }
+});
+
 test("bridge release gate rejects release identity and stability drift", () => {
   expectRejected((state) => { state.latest.id = "RE_other"; }, "latest-tag-identity-mismatch");
   expectRejected((state) => { state.tagged.isDraft = true; }, "not-stable");
@@ -347,7 +374,75 @@ test("bridge release gate rejects empty and malformed gzip tar packages", () => 
   expectRejected((state) => {
     writeFileSync(join(state.assets, packages[1]), gzipSync(Buffer.from("not-a-tar")));
     refreshIntegrity(state);
-  }, "native-command-failed");
+  }, "archive-header-truncated");
+});
+
+test("bridge release gate rejects an expanded regular file above the per-file limit before extraction", () => {
+  expectRejected((state) => {
+    replaceArchive(state, "linux", [
+      ...archiveEntries("linux"),
+      { name: "hch-worker/oversized.bin", content: "x".repeat(1025) },
+    ]);
+  }, "archive-file-size-limit-exceeded", [], {
+    HCH_BRIDGE_TEST_MAX_FILE_BYTES: "1024",
+    HCH_BRIDGE_TEST_MAX_TOTAL_BYTES: "4096",
+  });
+});
+
+test("bridge release gate rejects aggregate expanded regular files above the total limit before extraction", () => {
+  expectRejected((state) => {
+    replaceArchive(state, "linux", [
+      ...archiveEntries("linux"),
+      { name: "hch-worker/aggregate-a.bin", content: "a".repeat(700) },
+      { name: "hch-worker/aggregate-b.bin", content: "b".repeat(700) },
+    ]);
+  }, "archive-expanded-size-limit-exceeded", [], {
+    HCH_BRIDGE_TEST_MAX_FILE_BYTES: "1024",
+    HCH_BRIDGE_TEST_MAX_TOTAL_BYTES: "1400",
+  });
+});
+
+test("bridge release gate rejects cumulative PAX metadata and header-count floods", () => {
+  expectRejected((state) => {
+    replaceArchive(state, "linux", [
+      ...archiveEntries("linux"),
+      { name: "PaxHeaders.0/a", type: "x", content: paxRecord("comment", "a".repeat(180)) },
+      { name: "PaxHeaders.0/b", type: "x", content: paxRecord("comment", "b".repeat(180)) },
+    ]);
+  }, "archive-pax-metadata-limit-exceeded", [], {
+    HCH_BRIDGE_TEST_MAX_PAX_BYTES: "256",
+  });
+  expectRejected((state) => {
+    replaceArchive(state, "linux", [
+      ...archiveEntries("linux"),
+      { name: "hch-worker/header-a", content: "a" },
+      { name: "hch-worker/header-b", content: "b" },
+    ]);
+  }, "archive-header-count-limit-exceeded", [], {
+    HCH_BRIDGE_TEST_MAX_HEADER_COUNT: "6",
+  });
+});
+
+test("bridge release gate rejects a logical TAR byte budget overflow", () => {
+  expectRejected(() => {}, "archive-logical-size-limit-exceeded", [], {
+    HCH_BRIDGE_TEST_MAX_LOGICAL_TAR_BYTES: "4096",
+  });
+});
+
+test("bridge release gate rejects PAX size and sparse overrides", () => {
+  for (const [key, value] of [
+    ["size", "999999999"],
+    ["GNU.sparse.size", "999999999"],
+    ["SCHILY.realsize", "999999999"],
+  ]) {
+    expectRejected((state) => {
+      replaceArchive(state, "linux", [
+        ...archiveEntries("linux"),
+        { name: `PaxHeaders.0/${key.replaceAll(".", "-")}`, type: "x", content: paxRecord(key, value) },
+        { name: "hch-worker/override-target", content: "target\n" },
+      ]);
+    }, "archive-sparse-or-extended-header-invalid");
+  }
 });
 
 test("bridge release gate rejects traversal, absolute, duplicate, and linked entries", () => {

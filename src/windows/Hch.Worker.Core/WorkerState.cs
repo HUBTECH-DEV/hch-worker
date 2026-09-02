@@ -20,6 +20,10 @@ public sealed record WorkerControlSnapshot(
     int LastNonZeroMaxConcurrentJobs,
     int ClaimBatchSize,
     int GrantedCapacity,
+    bool ClaimAllowed,
+    int RecommendedClaimCount,
+    DateTimeOffset? ClaimAuthorizationValidUntil,
+    string ClaimReason,
     int ReservedJobs,
     int ActiveJobs,
     DateTimeOffset UpdatedAt,
@@ -57,6 +61,10 @@ public sealed class WorkerControlState
             LastNonZeroMaxConcurrentJobs: lastNonZeroMaxConcurrentJobs,
             ClaimBatchSize: claimBatchSize,
             GrantedCapacity: 0,
+            ClaimAllowed: false,
+            RecommendedClaimCount: 0,
+            ClaimAuthorizationValidUntil: null,
+            ClaimReason: "heartbeat-unavailable",
             ReservedJobs: 0,
             ActiveJobs: 0,
             UpdatedAt: _timeProvider.GetUtcNow(),
@@ -86,6 +94,10 @@ public sealed class WorkerControlState
             AcceptingClaims = false,
             MaxConcurrentJobs = 0,
             GrantedCapacity = 0,
+            ClaimAllowed = false,
+            RecommendedClaimCount = 0,
+            ClaimAuthorizationValidUntil = null,
+            ClaimReason = "worker-not-ready",
             UpdatedBy = updatedBy,
         });
 
@@ -97,6 +109,10 @@ public sealed class WorkerControlState
             AcceptingClaims = false,
             MaxConcurrentJobs = 0,
             GrantedCapacity = 0,
+            ClaimAllowed = false,
+            RecommendedClaimCount = 0,
+            ClaimAuthorizationValidUntil = null,
+            ClaimReason = "worker-not-ready",
             UpdatedBy = updatedBy,
         });
 
@@ -118,6 +134,10 @@ public sealed class WorkerControlState
                 State = WorkerOperationalState.Running,
                 AcceptingClaims = true,
                 MaxConcurrentJobs = current.LastNonZeroMaxConcurrentJobs,
+                ClaimAllowed = false,
+                RecommendedClaimCount = 0,
+                ClaimAuthorizationValidUntil = null,
+                ClaimReason = "heartbeat-required-after-start",
                 UpdatedBy = updatedBy,
             };
         });
@@ -129,6 +149,10 @@ public sealed class WorkerControlState
             AcceptingClaims = false,
             MaxConcurrentJobs = 0,
             GrantedCapacity = 0,
+            ClaimAllowed = false,
+            RecommendedClaimCount = 0,
+            ClaimAuthorizationValidUntil = null,
+            ClaimReason = "operator-paused",
             UpdatedBy = updatedBy,
         });
 
@@ -139,6 +163,10 @@ public sealed class WorkerControlState
             AcceptingClaims = false,
             MaxConcurrentJobs = 0,
             GrantedCapacity = 0,
+            ClaimAllowed = false,
+            RecommendedClaimCount = 0,
+            ClaimAuthorizationValidUntil = null,
+            ClaimReason = "operator-stop",
             UpdatedBy = updatedBy,
         });
 
@@ -158,6 +186,10 @@ public sealed class WorkerControlState
                 AcceptingClaims = false,
                 MaxConcurrentJobs = 0,
                 GrantedCapacity = 0,
+                ClaimAllowed = false,
+                RecommendedClaimCount = 0,
+                ClaimAuthorizationValidUntil = null,
+                ClaimReason = "operator-stopped",
                 UpdatedBy = updatedBy,
             };
         });
@@ -188,6 +220,10 @@ public sealed class WorkerControlState
                 AcceptingClaims = true,
                 MaxConcurrentJobs = value,
                 LastNonZeroMaxConcurrentJobs = value,
+                ClaimAllowed = false,
+                RecommendedClaimCount = 0,
+                ClaimAuthorizationValidUntil = null,
+                ClaimReason = "heartbeat-required-after-capacity-change",
                 UpdatedBy = updatedBy,
             };
         });
@@ -205,12 +241,97 @@ public sealed class WorkerControlState
         return Mutate(current => current with { GrantedCapacity = value, UpdatedBy = updatedBy });
     }
 
+    public WorkerControlSnapshot ApplyHeartbeatDecision(
+        int grantedCapacity,
+        bool claimAllowed,
+        int recommendedClaimCount,
+        DateTimeOffset claimAuthorizationValidUntil,
+        string claimReason,
+        string updatedBy = "orchestrator-node-heartbeat")
+    {
+        ValidateParallelism(grantedCapacity, nameof(grantedCapacity));
+        ValidateClaimAuthorization(
+            grantedCapacity,
+            claimAllowed,
+            recommendedClaimCount,
+            claimAuthorizationValidUntil,
+            claimReason);
+        return Mutate(current => current with
+        {
+            GrantedCapacity = grantedCapacity,
+            ClaimAllowed = claimAllowed,
+            RecommendedClaimCount = recommendedClaimCount,
+            ClaimAuthorizationValidUntil = claimAuthorizationValidUntil,
+            ClaimReason = claimReason,
+            UpdatedBy = updatedBy,
+        });
+    }
+
+    public WorkerControlSnapshot ClearClaimAuthorization(
+        string claimReason = "heartbeat-unavailable",
+        string updatedBy = "orchestrator-node-heartbeat-failed")
+    {
+        ValidateClaimReason(claimReason);
+        return Mutate(current => current with
+        {
+            ClaimAllowed = false,
+            RecommendedClaimCount = 0,
+            ClaimAuthorizationValidUntil = null,
+            ClaimReason = claimReason,
+            UpdatedBy = updatedBy,
+        });
+    }
+
+    public int CurrentRecommendedClaimCount()
+    {
+        lock (_sync)
+        {
+            return CurrentRecommendedClaimCount(_snapshot, _timeProvider.GetUtcNow());
+        }
+    }
+
+    public bool IsClaimRequestAuthorized(int requestedCount)
+    {
+        if (requestedCount < 1)
+        {
+            return false;
+        }
+
+        lock (_sync)
+        {
+            DateTimeOffset now = _timeProvider.GetUtcNow();
+            return ClaimAuthorizationIsCurrent(_snapshot, now)
+                && requestedCount <= _snapshot.ReservedJobs
+                && requestedCount <= _snapshot.RecommendedClaimCount
+                && _snapshot.ActiveJobs + _snapshot.ReservedJobs <= _snapshot.EffectiveCapacity;
+        }
+    }
+
     public bool TryReserveSlot()
     {
         WorkerControlSnapshot? changed = null;
         lock (_sync)
         {
             if (_snapshot.AvailableSlots < 1)
+            {
+                return false;
+            }
+
+            _snapshot = Stamp(_snapshot with { ReservedJobs = _snapshot.ReservedJobs + 1 }, "scheduler-reserve");
+            changed = _snapshot;
+        }
+
+        RaiseChanged(changed);
+        return true;
+    }
+
+    public bool TryReserveClaimSlot()
+    {
+        WorkerControlSnapshot? changed = null;
+        lock (_sync)
+        {
+            if (_snapshot.AvailableSlots < 1
+                || CurrentRecommendedClaimCount(_snapshot, _timeProvider.GetUtcNow()) < 1)
             {
                 return false;
             }
@@ -287,6 +408,15 @@ public sealed class WorkerControlState
         ValidatePositiveParallelism(value.LastNonZeroMaxConcurrentJobs, nameof(value.LastNonZeroMaxConcurrentJobs));
         ValidatePositiveParallelism(value.ClaimBatchSize, nameof(value.ClaimBatchSize));
         ValidateParallelism(value.GrantedCapacity, nameof(value.GrantedCapacity));
+        if (value.RecommendedClaimCount is < 0 or > 32
+            || value.ClaimAllowed != (value.RecommendedClaimCount > 0)
+            || (value.ClaimAllowed && value.ClaimAuthorizationValidUntil is null)
+            || string.IsNullOrWhiteSpace(value.ClaimReason)
+            || value.ClaimReason.Length > 160)
+        {
+            throw new WorkerControlException("worker-claim-authorization-invalid", "Worker claim authorization is invalid.");
+        }
+
         if (value.ActiveJobs < 0 || value.ReservedJobs < 0 ||
             value.ActiveJobs + value.ReservedJobs > MaximumParallelism)
         {
@@ -309,6 +439,50 @@ public sealed class WorkerControlState
             throw new ArgumentOutOfRangeException(parameterName, value, "The value must be between 1 and 64.");
         }
     }
+
+    private void ValidateClaimAuthorization(
+        int grantedCapacity,
+        bool allowed,
+        int recommendedCount,
+        DateTimeOffset validUntil,
+        string reason)
+    {
+        if (recommendedCount is < 0 or > 32
+            || recommendedCount > grantedCapacity
+            || allowed != (recommendedCount > 0))
+        {
+            throw new ArgumentOutOfRangeException(nameof(recommendedCount));
+        }
+
+        if (validUntil <= _timeProvider.GetUtcNow())
+        {
+            throw new ArgumentOutOfRangeException(nameof(validUntil));
+        }
+
+        ValidateClaimReason(reason);
+    }
+
+    private static void ValidateClaimReason(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 160
+            || value.Any(static character => character is < ' ' or '\x7f'))
+        {
+            throw new ArgumentException("worker-claim-reason-invalid", nameof(value));
+        }
+    }
+
+    private static int CurrentRecommendedClaimCount(
+        WorkerControlSnapshot snapshot,
+        DateTimeOffset now) => ClaimAuthorizationIsCurrent(snapshot, now)
+        ? Math.Min(snapshot.AvailableSlots, snapshot.RecommendedClaimCount)
+        : 0;
+
+    private static bool ClaimAuthorizationIsCurrent(
+        WorkerControlSnapshot snapshot,
+        DateTimeOffset now) => snapshot.AcceptingClaims
+            && snapshot.ClaimAllowed
+            && snapshot.ClaimAuthorizationValidUntil is { } validUntil
+            && now <= validUntil;
 }
 
 public sealed class WorkerControlException(string code, string message) : InvalidOperationException(message)

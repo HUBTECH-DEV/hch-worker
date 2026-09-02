@@ -8,8 +8,10 @@ runtime .NET 10 autocontido. O produto registra exatamente um serviço SCM,
 `HchWorker`; o tray é iniciado no logon e não cria outro serviço nem abre um
 terminal.
 
-Esta entrega não torna a versão 3.1.0 histórica. Essa promoção depende do
-canário operacional completo da versão 4 e é uma decisão posterior.
+Esta entrega não torna a versão 3.1.1 histórica. Essa promoção depende do
+canário operacional completo da versão 4 e é uma decisão posterior; 3.1.0 é a
+versão anterior à ponte e também não recebe classificação histórica antes da
+promoção comprovada.
 
 ## Layout instalado
 
@@ -164,7 +166,7 @@ harness antes de `Complete-HchWorkerReleaseEvidence.ps1`; em seguida assina
 `Test-HchWorkerReleaseEvidence.ps1 -RequireCandidate`.
 
 Esse conjunto ainda não é oficial. O canário instala exatamente o MSI pelo
-hash, prova reboot em `Paused/Drain` e rollback ao 3.1.0, e registra a evidência
+hash, prova reboot em `Paused/Drain` e rollback ao 3.1.1, e registra a evidência
 sanitizada na `main`. Somente depois é criada a tag anotada e protegida apontando
 para o commit do candidato. O workflow `Promote Windows candidate` baixa o
 artefato do run original e publica os mesmos bytes, sem build, repack ou nova
@@ -198,7 +200,14 @@ O pipeline:
 - assina e valida o MSI contra thumbprint e hash do certificado;
 - executa SCA, Defender e o lifecycle MSI em runner descartável;
 - gera provenance com signer, SBOM SPDX 2.2, hashes, assinatura CMS destacada e
-  attestation do GitHub para o candidato imutável.
+  attestation do GitHub para o candidato imutável;
+- inclui `release-compatibility.json` versionado no conjunto assinado. A
+  promoção deriva dele os marcadores de compatibilidade/impacto, sem aceitar
+  uma declaração manual no dispatch;
+- achata o inventário público final: MSI, compatibilidade, provenance, SBOM,
+  scans e evidência do lifecycle recebem nomes únicos, entram no
+  `SHA256SUMS.txt` e são todos anexados à release. O checksum nunca referencia
+  um arquivo privado ou ausente da release.
 
 O check `native-windows-v4` restaura e testa a solução C# em todo pull request e
 em cada push na `main`, mesmo
@@ -263,18 +272,20 @@ Após um upgrade já concluído, o rollback controlado é:
 5. confirmar que `config.json`, identidade, journals e trust permaneceram;
 6. iniciar canário com paralelismo 1.
 
-Na primeira troca 3.1.0 → 4.x, o receipt em
+Na troca 3.1.1 → 4.x, o receipt em
 `%ProgramData%\HubTech\HCH Worker\state\migration-backups` e o journal em
 `state\migration\legacy-windows-v3.json` são a fonte do rollback seletivo. Uma
 divergência de hash exige intervenção; o instalador nunca apaga um arquivo
 alterado para forçar o retorno.
 
-O MSI não desativa nem remove automaticamente o Worker 3.1.0 legado. O v4
+O MSI não desativa nem remove automaticamente o Worker 3.1.1 legado. O v4
 recusa `Start` e paralelismo positivo enquanto o serviço derivado do mesmo
 `nodeId` não estiver `Stopped + Disabled`, inclusive se o diretório legado tiver
 sido removido mas o serviço ainda estiver registrado. A troca do serviço antigo
-e a classificação 3.1.0 como histórica pertencem ao rollout canário, não ao
-build do pacote.
+e a classificação 3.1.1 como histórica pertencem ao rollout canário, não ao
+build do pacote. O 3.1.0 só será descrito como a versão histórica anterior à
+ponte 3.1.1 depois que a promoção for comprovada; nesta fase ainda é uma linha
+legada recuperável.
 
 ## Gates externos
 
