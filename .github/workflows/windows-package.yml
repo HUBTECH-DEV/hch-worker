@@ -82,11 +82,9 @@ jobs:
             src/windows/**/packages.wix.lock.json
 
       - name: Build unsigned, non-releasable candidate
+        if: env.WIX_EULA_ACCEPTED == 'wix7'
         shell: pwsh
         run: |
-          if ($env:WIX_EULA_ACCEPTED -ne 'wix7') {
-            throw 'Set WIX_EULA_ACCEPTED=wix7 only after organizational review of the WiX 7 terms.'
-          }
           $version = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { $env:REQUESTED_WINDOWS_VERSION } else { $env:WINDOWS_VERSION_DEFAULT }
           ./scripts/windows/Build-HchWorkerPackage.ps1 `
             -Version $version `
@@ -96,7 +94,21 @@ jobs:
             -AllowUnsigned `
             -AllowUnpinnedCandidate
 
+      - name: Report unsigned package as unavailable without organizational WiX acceptance
+        if: env.WIX_EULA_ACCEPTED != 'wix7'
+        shell: pwsh
+        run: |
+          @'
+          ### Windows package not produced
+
+          Source and native Windows tests continue in the separate `native-windows-v4` CI job.
+          This packaging job does not attest that repository branch protection requires that job.
+          This optional unsigned package is unavailable because `WIX_EULA_ACCEPTED` is not `wix7`.
+          Signed workflow dispatch remains fail-closed until the reviewed variable and signing gates exist.
+          '@ >> $env:GITHUB_STEP_SUMMARY
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: env.WIX_EULA_ACCEPTED == 'wix7'
         with:
           name: hch-worker-windows-unsigned-${{ github.sha }}-${{ github.run_attempt }}
           path: artifacts/windows-v4/release

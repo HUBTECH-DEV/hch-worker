@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "version": 6,
+  "timestamp": "2026-09-02T00:08:24-03:00",
+  "source": "user",
+  "action": "project-configuration-updated",
+  "summary": "Canary promotion now requires schema v2 sanitized samples authenticated by a pinned code-signing CMS attester; aggregate declarations alone cannot promote Windows 4.0.0.",
+  "previousVersion": 5,
+  "newVersion": 6,
+  "rollback": null
+}

@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0",
   "projectName": "HCH Worker",
-  "currentVersion": 4,
+  "currentVersion": 7,
   "versions": [
     {
       "version": 1,
@@ -45,6 +45,39 @@
       "previousVersion": 3,
       "newVersion": 4,
       "snapshotFile": "history/v0004.json",
+      "rollback": null
+    },
+    {
+      "version": 5,
+      "timestamp": "2026-09-01T23:35:00-03:00",
+      "changedBy": "user",
+      "reason": "Autorizar a promoção do Worker Windows e exigir gates que preservem os Workers 3.1 durante a transição.",
+      "summary": "Separa CI nativo do gate jurídico do WiX, exige canário sustentado com complete/fail reconciliados, adota tags por sistema com marcadores de compatibilidade e define a ponte multiplataforma v3.1.1 antes da release Windows 4.0.0.",
+      "previousVersion": 4,
+      "newVersion": 5,
+      "snapshotFile": "history/v0005.json",
+      "rollback": null
+    },
+    {
+      "version": 6,
+      "timestamp": "2026-09-02T00:08:24-03:00",
+      "changedBy": "user",
+      "reason": "Impedir promoção com evidência de canário autodeclarada e exigir atestação criptográfica das amostras observadas.",
+      "summary": "Eleva a evidência do canário Windows para schema v2, exige CMS detached com certificado pinado e deriva heartbeats, progresso, outcomes e rollback de amostras reais sanitizadas.",
+      "previousVersion": 5,
+      "newVersion": 6,
+      "snapshotFile": "history/v0006.json",
+      "rollback": null
+    },
+    {
+      "version": 7,
+      "timestamp": "2026-09-02T01:12:15-03:00",
+      "changedBy": "user",
+      "reason": "Autorizar deploy e promoção a main preservando como gate a transição comprovada da versão Windows atual para histórica.",
+      "summary": "Torna executável e fail-closed a verificação da ponte v3.1.1 e exige evidência CMS independente da migração integral da frota antes da promoção Windows 4.0.0.",
+      "previousVersion": 6,
+      "newVersion": 7,
+      "snapshotFile": "history/v0007.json",
       "rollback": null
     }
   ]
