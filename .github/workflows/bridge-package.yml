@@ -365,7 +365,6 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      HCH_RELEASE_ADMIN_READ_TOKEN: ${{ secrets.HCH_RELEASE_ADMIN_READ_TOKEN }}
       HCH_SIGNER_THUMBPRINT: ${{ vars.HCH_SIGNER_THUMBPRINT }}
       HCH_SIGNER_CERTIFICATE_SHA256: ${{ vars.HCH_SIGNER_CERTIFICATE_SHA256 }}
       RELEASE_IMMUTABILITY_ENFORCED: ${{ vars.RELEASE_IMMUTABILITY_ENFORCED }}
@@ -382,6 +381,8 @@ jobs:
 
       - name: Re-prove immutable controls and exact attested packages
         shell: pwsh
+        env:
+          HCH_RELEASE_ADMIN_READ_TOKEN: ${{ secrets.HCH_RELEASE_ADMIN_READ_TOKEN }}
         run: |
           if ($env:RELEASE_IMMUTABILITY_ENFORCED -cne 'true') {
             throw 'Repository release immutability must be administratively enabled and reviewed.'
