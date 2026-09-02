@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "version": 5,
+  "timestamp": "2026-09-01T23:35:00-03:00",
+  "source": "user",
+  "action": "project-configuration-updated",
+  "summary": "Promotion gates now separate native CI from WiX acceptance, require sustained complete/fail canary evidence, use OS-specific releases with compatibility markers, and require the explicit v3.1.1 cross-platform discovery bridge before Windows 4.0.0.",
+  "previousVersion": 4,
+  "newVersion": 5,
+  "rollback": null
+}

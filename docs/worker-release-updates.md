@@ -2,10 +2,129 @@
 
 ## Modelo implementado
 
-O dashboard consulta automaticamente, a cada 15 minutos, a última release
-estável de `HUBTECH-DEV/hch-worker`. A comparação usa SemVer estrito e ignora
-drafts e pré-releases. Quando `latestVersion > worker.version`, o painel mostra
-o botão **Atualizar**.
+O dashboard consulta automaticamente, a cada 15 minutos, a lista de releases
+estáveis de `HUBTECH-DEV/hch-worker`. Ele seleciona a maior tag do sistema
+operacional corrente (`windows-vX.Y.Z`, `linux-vX.Y.Z` ou `macos-vX.Y.Z`) e
+aceita `vX.Y.Z` apenas como fallback legado até a ponte 3.1.1. Tags genéricas
+posteriores são ignoradas. Releases de outro sistema são
+ignoradas. A comparação usa SemVer estrito e ignora drafts e pré-releases.
+Quando `latestVersion > worker.version`, o painel mostra o botão **Atualizar**.
+
+A ponte 3.1.1 e toda release posterior precisam conter nas notas exatamente um
+par coerente:
+
+```text
+HCH-Worker-Compatibility: compatible
+HCH-Worker-Content-Impact: none
+```
+
+ou:
+
+```text
+HCH-Worker-Compatibility: incompatible
+HCH-Worker-Content-Impact: generated-content
+```
+
+Ausência, valor desconhecido ou combinação cruzada falha de forma fechada e
+não oferece atualização.
+
+## Ponte explícita para clientes 3.1
+
+O dashboard 3.1 instalado consulta `/releases/latest` e só entende tags
+genéricas `vX.Y.Z`. Portanto, publicar diretamente `windows-v4.0.0` não faz o
+3.1 reconhecer a atualização; se essa release virar `latest`, o 3.1 registra
+`release-version-invalid`. Alterar apenas o parser da `main` não corrige os
+binários já instalados.
+
+A transição deve usar uma última ponte genérica **3.1.1**, compatível e sem
+impacto de conteúdo, construída e testada para Windows, Linux e macOS:
+
+1. publicar `v3.1.1` com os artefatos exatos
+   `HCH-Worker-Setup-3.1.1-x64.exe`,
+   `HCH-Worker-3.1.1-linux-x64.tar.gz`,
+   `HCH-Worker-3.1.1-macos-universal.tar.gz`, `SHA256SUMS.txt` e
+   `SHA256SUMS.p7s`; os três pacotes precisam estar cobertos pelos checksums,
+   pela assinatura CMS e por attestations do commit protegido que os produziu;
+   o EXE também precisa de Authenticode válido, timestamp e dos mesmos pins
+   públicos do signer aprovado;
+2. manter `v3.1.1` explicitamente como a release `Latest` durante a janela de
+   migração, para que todo cliente 3.1 ainda descubra uma tag que consegue
+   interpretar;
+3. comprovar por telemetria/heartbeat que os Workers suportados instalaram a
+   ponte e consultam a lista por plataforma;
+4. publicar releases `windows-v*`, `linux-v*` e `macos-v*` com
+   `--latest=false`; o dashboard novo as encontra pela lista sem mover o
+   ponteiro legado;
+5. encerrar o ponteiro legado somente por decisão de compatibilidade auditada,
+   depois que não houver Worker 3.1 suportado dependente de `/releases/latest`.
+
+O workflow de promoção consulta `/releases/latest` e
+`/releases/tags/v3.1.1` diretamente, exige o mesmo release id, tag anotada,
+commit fonte, release imutável, marcadores exatos, idade mínima de sete dias e
+o conjunto de assets acima sem executáveis extras. Falha de API, hash, CMS,
+attestation ou ambiguidade bloqueia a promoção; não existe input para ignorar
+esse gate.
+
+Antes de baixar qualquer asset, o gate rejeita tamanho zero, limita o EXE e
+cada `.tar.gz` a 512 MiB, `SHA256SUMS.txt` a 64 KiB,
+`SHA256SUMS.p7s` a 2 MiB e o conjunto completo a 1.280 MiB. Depois de conferir
+o inventário, os tamanhos baixados e os hashes, ele abre os dois `.tar.gz` com
+`tar`/`bsdtar` em modo fail-closed. Cada archive admite no máximo 4.096
+entradas, somente arquivos regulares e diretórios sob uma única raiz
+`hch-worker/`; caminho absoluto, traversal, barra invertida, segmento inseguro,
+duplicata, symlink, hardlink ou entrada especial bloqueia a promoção.
+
+Os dois archives contêm `hch-worker/VERSION` com os bytes ASCII exatos
+`3.1.1` seguidos por um único LF, além de
+`ops/linux/editorial-worker/worker.mjs` e
+`ops/worker-dashboard/server.mjs`. O pacote Linux também contém
+`scripts/hch-editorial-workerctl` e
+`ops/systemd/hch-editorial-worker.service`. O pacote macOS também contém
+`ops/macos/editorial-worker/hch-editorial-workerctl`,
+`ops/macos/editorial-worker/install-launch-agents.sh` e o template
+`launchd/online.hubtech.hch.editorial-worker.cycle.plist.in`. O gate confere no
+header tar o bit executável do proprietário para `worker.mjs` e para os scripts
+de controle/instalação. O produtor futuro ainda deve executar smoke tests em
+Linux e macOS reais: a inspeção do header prova o modo empacotado, não o
+funcionamento do entrypoint no sistema-alvo.
+
+Não se deve editar silenciosamente uma release histórica, criar um alias
+`v4.0.0` apenas para Windows nem transformar `windows-v4.0.0` em `Latest`
+durante a janela. O fallback genérico existe para a ponte multiplataforma, não
+para voltar a misturar os canais por sistema.
+
+### Estado atual da ponte: bloqueada para produção
+
+O contrato acima é o alvo de promoção, não uma declaração de que a ponte já
+pode ser publicada. No estado atual:
+
+- `.github/workflows/bridge-package.yml` ainda não existe; o workflow de
+  promoção verifica essa ausência e falha fechado antes de confiar em uma
+  attestation;
+- a imutabilidade de releases ainda não está registrada como política
+  administrativa do repositório; proteger apenas a tag não torna imutáveis os
+  assets da ponte;
+- o contrato da ponte usa o EXE que o produtor Windows legado suporta; o MSI
+  nativo existente pertence à linha 4.x e não pode ser renomeado como ponte
+  3.1;
+- Linux e macOS não possuem produtores versionados dos arquivos `.tar.gz`;
+- os limites atuais validam o tamanho comprimido publicado, mas o produtor
+  futuro ainda precisa impor limite de tamanho descomprimido e tempo máximo de
+  inspeção, além dos smoke tests nos sistemas reais;
+- as instalações 3.1 não configuram o backend administrativo chamado por
+  `hch-worker-update.mjs`, portanto a release isolada mostra o aviso, mas não
+  aplica a atualização;
+- o runtime/orquestrador ainda não persiste uma prova auditável de
+  `releaseDiscoveryProtocol=platform-release-list/v1` associada aos heartbeats;
+- os marcadores da release Windows ainda são inputs humanos. O runtime valida
+  compatibilidade de conteúdo pelo `contentContractHash` do manifesto assinado,
+  mas o workflow de release ainda não correlaciona esse manifesto, ou um
+  relatório assinado equivalente, ao `source_commit` e ao MSI candidato.
+
+Essas lacunas precisam ser implementadas e testadas antes da criação de
+`v3.1.1`. Não se deve criar assets manuais para contornar o produtor, alterar o
+inventário do gate, tratar input humano como prova de compatibilidade ou declarar
+migração de frota sem a telemetria derivável.
 
 A consulta ao GitHub é somente descoberta. Ela não autoriza a execução do
 conteúdo publicado. O clique usa o mesmo endpoint local protegido por loopback,

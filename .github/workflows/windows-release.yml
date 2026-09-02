@@ -19,6 +19,20 @@ on:
         description: 'Exact immutable signed candidate artifact name'
         required: true
         type: string
+      compatibility:
+        description: 'Runtime/protocol compatibility declared in the release notes'
+        required: true
+        type: choice
+        options:
+          - compatible
+          - incompatible
+      content_impact:
+        description: 'Whether incompatibility changes generated content'
+        required: true
+        type: choice
+        options:
+          - none
+          - generated-content
 
 permissions:
   contents: read
@@ -39,11 +53,17 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       HCH_SIGNER_THUMBPRINT: ${{ vars.HCH_SIGNER_THUMBPRINT }}
       HCH_SIGNER_CERTIFICATE_SHA256: ${{ vars.HCH_SIGNER_CERTIFICATE_SHA256 }}
+      HCH_CANARY_ATTESTER_THUMBPRINT: ${{ vars.HCH_CANARY_ATTESTER_THUMBPRINT }}
+      HCH_CANARY_ATTESTER_CERTIFICATE_SHA256: ${{ vars.HCH_CANARY_ATTESTER_CERTIFICATE_SHA256 }}
+      HCH_FLEET_ATTESTER_THUMBPRINT: ${{ vars.HCH_FLEET_ATTESTER_THUMBPRINT }}
+      HCH_FLEET_ATTESTER_CERTIFICATE_SHA256: ${{ vars.HCH_FLEET_ATTESTER_CERTIFICATE_SHA256 }}
       WINDOWS_RELEASE_TAG_RULESET_ENFORCED: ${{ vars.WINDOWS_RELEASE_TAG_RULESET_ENFORCED }}
       RELEASE_VERSION: ${{ inputs.version }}
       RELEASE_SOURCE_COMMIT: ${{ inputs.source_commit }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       CANDIDATE_ARTIFACT_NAME: ${{ inputs.candidate_artifact_name }}
+      RELEASE_COMPATIBILITY: ${{ inputs.compatibility }}
+      RELEASE_CONTENT_IMPACT: ${{ inputs.content_impact }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -57,12 +77,18 @@ jobs:
           $sourceCommit = $env:RELEASE_SOURCE_COMMIT
           $runId = $env:CANDIDATE_RUN_ID
           $artifactName = $env:CANDIDATE_ARTIFACT_NAME
+          $compatibility = $env:RELEASE_COMPATIBILITY
+          $contentImpact = $env:RELEASE_CONTENT_IMPACT
           $tag = "windows-v$version"
           if ($version -notmatch '^\d+\.\d+\.\d+$' `
               -or $sourceCommit -notmatch '^[0-9a-f]{40}$' `
               -or $runId -notmatch '^[1-9][0-9]*$' `
               -or $artifactName -notmatch "^hch-worker-windows-signed-$([regex]::Escape($version))-$sourceCommit-[1-9][0-9]*$") {
             throw 'Promotion inputs are not exact candidate identifiers.'
+          }
+          if (($compatibility -cne 'compatible' -or $contentImpact -cne 'none') `
+              -and ($compatibility -cne 'incompatible' -or $contentImpact -cne 'generated-content')) {
+            throw 'Compatibility and content-impact declarations are not an allowed exact pair.'
           }
           if ($env:GITHUB_REF -cne 'refs/heads/main' `
               -or '${{ github.ref_protected }}' -cne 'true' `
@@ -77,20 +103,32 @@ jobs:
             ConvertFrom-Json -Depth 50)
           if ($LASTEXITCODE -ne 0) { throw 'Could not read repository tag rulesets.' }
           $protectedTagRuleset = $null
+          $protectedBridgeRuleset = $null
           foreach ($summary in @($rulesets | Where-Object { $_.target -eq 'tag' -and $_.enforcement -eq 'active' })) {
             $detail = gh api "repos/$env:GITHUB_REPOSITORY/rulesets/$($summary.id)" |
               ConvertFrom-Json -Depth 50
             if ($LASTEXITCODE -ne 0) { throw 'Could not inspect an active repository tag ruleset.' }
-            if (@($detail.conditions.ref_name.include) -contains 'refs/tags/windows-v*' `
-                -and @($detail.rules.type) -contains 'creation' `
-                -and @($detail.rules.type) -contains 'update' `
-                -and @($detail.rules.type) -contains 'deletion') {
+            $ruleTypes = @($detail.rules.type)
+            $hasRefExclusions = @($detail.conditions.ref_name.exclude).Count -ne 0
+            $hasBypassActors = @($detail.bypass_actors).Count -ne 0
+            $protectsMutation = $ruleTypes -ccontains 'update' `
+                -and $ruleTypes -ccontains 'deletion' `
+                -and -not $hasRefExclusions `
+                -and -not $hasBypassActors
+            if ($protectsMutation `
+                -and @($detail.conditions.ref_name.include) -ccontains 'refs/tags/windows-v*') {
               $protectedTagRuleset = $detail
-              break
+            }
+            if ($protectsMutation `
+                -and @($detail.conditions.ref_name.include) -ccontains 'refs/tags/v3.1.1') {
+              $protectedBridgeRuleset = $detail
             }
           }
           if ($null -eq $protectedTagRuleset) {
             throw 'No active immutable ruleset protects refs/tags/windows-v*.'
+          }
+          if ($null -eq $protectedBridgeRuleset) {
+            throw 'No active immutable ruleset protects the compatibility bridge refs/tags/v3.1.1.'
           }
 
           git fetch origin main --tags --force
@@ -120,6 +158,87 @@ jobs:
           $probeText = if (Test-Path -LiteralPath $probeError) { Get-Content -LiteralPath $probeError -Raw } else { '' }
           if ($probeExit -eq 0) { throw 'This Windows version already has an official GitHub release.' }
           if ($probeText -notmatch 'HTTP 404') { throw "Could not prove that the release tag is unused: $probeText" }
+
+      - name: Verify immutable 3.1.1 bridge and independently attested fleet transition
+        shell: pwsh
+        run: |
+          $bridgeTag = 'v3.1.1'
+          $bridgeProducerWorkflow = '.github/workflows/bridge-package.yml'
+          $fleetEvidencePath = 'release-evidence/fleet/3.1.1/fleet-transition-evidence.json'
+          $fleetSignaturePath = 'release-evidence/fleet/3.1.1/fleet-transition-evidence.p7s'
+          if (-not (Test-Path -LiteralPath $bridgeProducerWorkflow -PathType Leaf)) {
+            throw 'The reviewed 3.1.1 bridge producer workflow is not implemented on protected main.'
+          }
+          foreach ($pin in @(
+              $env:HCH_SIGNER_THUMBPRINT,
+              $env:HCH_SIGNER_CERTIFICATE_SHA256,
+              $env:HCH_CANARY_ATTESTER_THUMBPRINT,
+              $env:HCH_CANARY_ATTESTER_CERTIFICATE_SHA256,
+              $env:HCH_FLEET_ATTESTER_THUMBPRINT,
+              $env:HCH_FLEET_ATTESTER_CERTIFICATE_SHA256)) {
+            if ([string]::IsNullOrWhiteSpace($pin)) {
+              throw 'Bridge, canary and fleet public certificate pins must all be configured.'
+            }
+          }
+          $artifactThumbprint = $env:HCH_SIGNER_THUMBPRINT.Replace(' ', '').ToUpperInvariant()
+          $canaryThumbprint = $env:HCH_CANARY_ATTESTER_THUMBPRINT.Replace(' ', '').ToUpperInvariant()
+          $fleetThumbprint = $env:HCH_FLEET_ATTESTER_THUMBPRINT.Replace(' ', '').ToUpperInvariant()
+          $artifactCertificateSha256 = $env:HCH_SIGNER_CERTIFICATE_SHA256.Replace(' ', '').ToUpperInvariant()
+          $canaryCertificateSha256 = $env:HCH_CANARY_ATTESTER_CERTIFICATE_SHA256.Replace(' ', '').ToUpperInvariant()
+          $fleetCertificateSha256 = $env:HCH_FLEET_ATTESTER_CERTIFICATE_SHA256.Replace(' ', '').ToUpperInvariant()
+          if ($fleetThumbprint -ceq $artifactThumbprint `
+              -or $fleetThumbprint -ceq $canaryThumbprint `
+              -or $fleetCertificateSha256 -ceq $artifactCertificateSha256 `
+              -or $fleetCertificateSha256 -ceq $canaryCertificateSha256) {
+            throw 'Fleet telemetry authority must be distinct from artifact and canary signers.'
+          }
+          if ((git cat-file -t "refs/tags/$bridgeTag") -cne 'tag') {
+            throw 'Compatibility bridge must use the protected annotated v3.1.1 tag.'
+          }
+          $bridgeSourceCommit = git rev-parse "refs/tags/$bridgeTag^{commit}"
+          if ($LASTEXITCODE -ne 0 -or $bridgeSourceCommit -notmatch '^[0-9a-f]{40}$') {
+            throw 'Could not resolve the immutable v3.1.1 bridge source commit.'
+          }
+          git merge-base --is-ancestor $bridgeSourceCommit origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Compatibility bridge source is not an ancestor of protected main.'
+          }
+
+          ./scripts/windows/Test-HchWorkerBridgeRelease.ps1 `
+            -Repository $env:GITHUB_REPOSITORY `
+            -Version 3.1.1 `
+            -BridgeSourceCommit $bridgeSourceCommit `
+            -CmsSignerSha1 $env:HCH_SIGNER_THUMBPRINT `
+            -CmsSignerSha256 $env:HCH_SIGNER_CERTIFICATE_SHA256
+
+          $bridgeRelease = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$bridgeTag" |
+            ConvertFrom-Json -Depth 50
+          if ($LASTEXITCODE -ne 0 -or $null -eq $bridgeRelease.id) {
+            throw 'Could not correlate fleet evidence to the verified bridge release id.'
+          }
+          ./scripts/windows/Test-HchWorkerFleetTransitionEvidence.ps1 `
+            -EvidencePath $fleetEvidencePath `
+            -EvidenceSignaturePath $fleetSignaturePath `
+            -ExpectedTelemetryAuthorityThumbprint $env:HCH_FLEET_ATTESTER_THUMBPRINT `
+            -ExpectedTelemetryAuthorityCertificateSha256 $env:HCH_FLEET_ATTESTER_CERTIFICATE_SHA256 `
+            -ExpectedRepository $env:GITHUB_REPOSITORY `
+            -ExpectedBridgeTag $bridgeTag `
+            -ExpectedBridgeReleaseId ([string]$bridgeRelease.id) `
+            -ExpectedBridgeSourceCommit $bridgeSourceCommit
+
+          $fleetEvidence = Get-Content -LiteralPath $fleetEvidencePath -Raw |
+            ConvertFrom-Json -Depth 100
+          $bridgePublishedAt = [DateTimeOffset]::Parse(
+            [string]$bridgeRelease.published_at,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+          $fleetWindowStartedAt = [DateTimeOffset]::Parse(
+            [string]$fleetEvidence.windowStartedAtUtc,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+          if ($fleetWindowStartedAt -lt $bridgePublishedAt) {
+            throw 'Fleet transition window cannot begin before the verified bridge was published.'
+          }
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -158,8 +277,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'GitHub artifact attestation verification failed.' }
 
           $canaryPath = "release-evidence/windows/$version/canary-evidence.json"
+          $canarySignaturePath = "release-evidence/windows/$version/canary-evidence.p7s"
           ./scripts/windows/Test-HchWorkerCanaryEvidence.ps1 `
             -EvidencePath $canaryPath `
+            -EvidenceSignaturePath $canarySignaturePath `
+            -ExpectedAttesterThumbprint $env:HCH_CANARY_ATTESTER_THUMBPRINT `
+            -ExpectedAttesterCertificateSha256 $env:HCH_CANARY_ATTESTER_CERTIFICATE_SHA256 `
             -Version $version `
             -SourceCommit $sourceCommit `
             -MsiPath $msi
@@ -175,15 +298,24 @@ jobs:
           $checksums = Join-Path $releaseRoot 'SHA256SUMS.txt'
           $signature = Join-Path $releaseRoot 'SHA256SUMS.p7s'
           $canary = Resolve-Path -LiteralPath "release-evidence/windows/$version/canary-evidence.json"
-          $evidenceZip = Join-Path $env:RUNNER_TEMP "HCH-Worker-$version-win-x64-evidence.zip"
-          Compress-Archive -Path (Join-Path $releaseRoot '*') -DestinationPath $evidenceZip -CompressionLevel Optimal
-          $notes = @"
-          Official Windows package promoted from the exact signed candidate built at $sourceCommit.
-          Gates: disposable MSI lifecycle, Defender, signed checksums, GitHub artifact attestation,
-          canary at parallelism 1, restart in Paused/Drain, and recoverable rollback to 3.1.0.
-          "@
-          gh release create $tag $msi $checksums $signature $canary $evidenceZip `
+          $canarySignature = Resolve-Path -LiteralPath "release-evidence/windows/$version/canary-evidence.p7s"
+          git fetch origin main --tags --force
+          if ($LASTEXITCODE -ne 0 `
+              -or (git cat-file -t "refs/tags/$tag") -cne 'tag' `
+              -or (git rev-parse "refs/tags/$tag^{commit}") -cne $sourceCommit) {
+            throw 'Official Windows tag changed after validation; publication is refused.'
+          }
+          $notes = @(
+            "Official Windows package promoted from the exact signed candidate built at $sourceCommit."
+            'Gates: disposable MSI lifecycle, Defender, signed checksums, GitHub artifact attestation,'
+            'sustained canary at parallelism 1, complete/fail, restart in Paused/Drain, and recoverable rollback to 3.1.0.'
+            ''
+            "HCH-Worker-Compatibility: $env:RELEASE_COMPATIBILITY"
+            "HCH-Worker-Content-Impact: $env:RELEASE_CONTENT_IMPACT"
+          ) -join "`n"
+          gh release create $tag $msi $checksums $signature $canary $canarySignature `
             --verify-tag `
+            --latest=false `
             --title "HCH Worker Windows $version" `
             --notes $notes
           if ($LASTEXITCODE -ne 0) { throw 'Official GitHub release publication failed.' }

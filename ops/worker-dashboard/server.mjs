@@ -168,7 +168,9 @@ async function handleRequest(request, response, context) {
       processStartedAt: context.processStartedAt,
       staleAfterMilliseconds: context.staleAfterMilliseconds,
     });
-    const updates = await context.releaseMonitor.snapshot(status.worker.version);
+    const updates = await context.releaseMonitor.snapshot(status.worker.version, {
+      platform: status.worker.platform,
+    });
     sendJson(response, 200, {
       ...status,
       updates,
@@ -245,7 +247,10 @@ async function handleControlPost(request, response, context) {
         processStartedAt: context.processStartedAt,
         staleAfterMilliseconds: context.staleAfterMilliseconds,
       });
-      const updates = await context.releaseMonitor.snapshot(current.worker.version, { force: true });
+      const updates = await context.releaseMonitor.snapshot(current.worker.version, {
+        force: true,
+        platform: current.worker.platform,
+      });
       if (!updates.updateAvailable || !updates.latestVersion) {
         throw new ControlHttpError(409, "worker-update-not-available");
       }

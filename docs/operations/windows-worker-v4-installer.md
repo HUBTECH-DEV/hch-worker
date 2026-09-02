@@ -200,6 +200,15 @@ O pipeline:
 - gera provenance com signer, SBOM SPDX 2.2, hashes, assinatura CMS destacada e
   attestation do GitHub para o candidato imutável.
 
+O check `native-windows-v4` restaura e testa a solução C# em todo pull request e
+em cada push na `main`, mesmo
+quando a organização ainda não registrou `WIX_EULA_ACCEPTED=wix7`. Nessa
+situação, somente os passos que restauram o binário WiX ou produzem MSI são
+adiados; o job unsigned de `Windows package` publica um resumo neutro em vez de
+deixar a `main` vermelha. Um dispatch assinado continua fail-closed: sem a
+aceitação revisada do WiX, root trust, assinatura e lifecycle descartável não
+há candidato assinável nem promoção.
+
 Saída: `artifacts\windows-v4\release`.
 
 ## Instalação

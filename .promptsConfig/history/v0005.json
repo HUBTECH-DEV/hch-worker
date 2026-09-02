@@ -1,9 +1,6 @@
 {
-  "schemaVersion": "1.0",
-  "projectName": "HCH Worker",
-  "createdAt": "2026-08-14T21:10:48-03:00",
-  "lastUpdated": "2026-09-02T01:12:15-03:00",
-  "currentVersion": 7,
+  "version": 5,
+  "createdAt": "2026-09-01T23:35:00-03:00",
   "agentConfigurationPrompt": "Manter o repositório HUBTECH-DEV/hch-worker como fonte canônica do Worker HCH e evoluir o Worker Windows 4.0.0 nativo em C# como candidato, com rollout reversível, Paused/Drain por padrão e evidência operacional antes de qualquer promoção de versão.",
   "agentProfile": "Principal Implementation Engineer / Deployment Engineer; Principal Git Engineer",
   "projectRules": [
@@ -38,11 +35,9 @@
     "O canário de promoção deve operar com MaxConcurrentJobs=1 e comprovar enrollment, bootstrap, heartbeat, claim, progresso, complete/fail, restart e rollback.",
     "Preservar o serviço e os dados 3.1.0 como rollback até a conclusão e reconciliação do canário 4.0.0.",
     "O canário deve durar pelo menos 15 minutos, conter pelo menos 10 heartbeats sem stale e com gap máximo de 120 segundos, e provar complete e fail reportados, aceitos e reconciliados.",
-    "A promoção Windows exige evidência de canário schema v2 assinada em CMS detached sobre os bytes exatos por certificado de atestador pinado em SHA-1 e SHA-256 com EKU Code Signing; contagens, gaps, progresso, outcomes e rollback são derivados de amostras reais sanitizadas, nunca de agregados autodeclarados.",
     "O check native-windows-v4 deve testar a fonte C# sem depender da aceitação do WiX; packaging e release continuam fail-closed sem WIX_EULA_ACCEPTED e sem assinatura.",
     "O dashboard deve listar releases e selecionar windows-v*, linux-v* ou macos-v* do host, mantendo vX.Y.Z apenas como fallback da ponte 3.1.1 e ignorando tags de outros sistemas.",
-    "Releases por sistema devem declarar HCH-Worker-Compatibility e HCH-Worker-Content-Impact com pareamento exato e usar --latest=false durante a janela da ponte 3.1.1.",
-    "A promoção 4.0.0 deve verificar diretamente no GitHub a release-ponte v3.1.1, seus artefatos, checksums, assinatura e attestations, e exigir evidência CMS separada da migração integral da frota emitida por autoridade de telemetria distinta do atestador do canário."
+    "Releases por sistema devem declarar HCH-Worker-Compatibility e HCH-Worker-Content-Impact com pareamento exato e usar --latest=false durante a janela da ponte 3.1.1."
   ],
   "customInstructions": [
     "Usar o HGC como interface central de configuração e o HubICG Enterprise como governança ativa.",
@@ -65,8 +60,6 @@
     "releaseUpdateMode": "platform-release-list-discovery-manual-apply",
     "legacyCompatibilityBridge": "v3.1.1-cross-platform-latest",
     "releaseCompatibilityMarkers": "HCH-Worker-Compatibility-and-HCH-Worker-Content-Impact",
-    "canaryEvidenceAttestation": "cms-detached-pinned-code-signing-certificate-over-v2-sanitized-samples",
-    "fleetTransitionEvidenceAttestation": "separate-cms-detached-pinned-telemetry-authority-over-complete-orchestrator-inventory",
     "deviceBranch": "NB-PE0FHWM9",
     "deviceBranchPublication": "automatic-no-force",
     "mainPromotion": "explicit-authorization-required"

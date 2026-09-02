@@ -56,18 +56,30 @@ jobs:
           ./scripts/windows/Test-HchWorkerInstallerSource.ps1
           ./scripts/windows/Test-HchWorkerReleaseWorkflow.ps1
 
-      - name: Restore exact locked dependencies
+      - name: Restore exact locked .NET dependencies
         shell: pwsh
         run: |
-          if ($env:WIX_EULA_ACCEPTED -ne 'wix7') {
-            throw 'Set WIX_EULA_ACCEPTED=wix7 only after organizational review of the WiX 7 terms.'
-          }
           dotnet tool restore
           if ($LASTEXITCODE -ne 0) { throw 'Tool restore failed.' }
           dotnet restore src/windows/Hch.Worker.sln --locked-mode --runtime win-x64 -p:PublishReadyToRun=true
           if ($LASTEXITCODE -ne 0) { throw 'Locked solution restore failed.' }
+
+      - name: Restore exact WiX dependencies after organizational acceptance
+        if: vars.WIX_EULA_ACCEPTED == 'wix7'
+        shell: pwsh
+        run: |
           dotnet restore src/windows/Hch.Worker.Installer/Hch.Worker.Installer.wixproj --locked-mode -p:AcceptEula=wix7
           if ($LASTEXITCODE -ne 0) { throw 'Locked WiX restore failed.' }
+
+      - name: Record deferred WiX binary gate
+        if: vars.WIX_EULA_ACCEPTED != 'wix7'
+        shell: pwsh
+        run: |
+          @"
+          WiX binary restore is intentionally deferred because WIX_EULA_ACCEPTED is not wix7.
+          Native source, dependency, formatting and test gates continue to run. MSI packaging and
+          every signing/release path remain fail-closed until organizational acceptance is recorded.
+          "@ >> $env:GITHUB_STEP_SUMMARY
 
       - name: Enforce formatting and dependency vulnerability gates
         shell: pwsh
@@ -80,11 +92,20 @@ jobs:
 
       - name: Build and test native Windows Worker
         shell: pwsh
-        run: >-
-          dotnet test src/windows/Hch.Worker.Tests/Hch.Worker.Tests.csproj
-          --configuration Release
-          --runtime win-x64
-          --no-restore
-          -p:Version=4.0.0
-          -p:AssemblyVersion=4.0.0.0
-          -p:FileVersion=4.0.0.0
+        run: |
+          $versionProperties = @(
+            '-p:Version=4.0.0',
+            '-p:AssemblyVersion=4.0.0.0',
+            '-p:FileVersion=4.0.0.0'
+          )
+          dotnet build src/windows/Hch.Worker.sln `
+            --configuration Release `
+            --no-restore `
+            @versionProperties
+          if ($LASTEXITCODE -ne 0) { throw 'Native solution build failed.' }
+          dotnet test src/windows/Hch.Worker.Tests/Hch.Worker.Tests.csproj `
+            --configuration Release `
+            --runtime win-x64 `
+            --no-restore `
+            @versionProperties
+          if ($LASTEXITCODE -ne 0) { throw 'Native test suite failed.' }

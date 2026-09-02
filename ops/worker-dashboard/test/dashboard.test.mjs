@@ -150,27 +150,27 @@ test("contributor auth expires or becomes stale fail-closed", async (t) => {
 
 test("release monitor detects only newer stable semantic releases", async () => {
   const payload = {
-    tag_name: "v3.2.0",
+    tag_name: "v3.1.1",
     draft: false,
     prerelease: false,
-    html_url: "https://github.com/HUBTECH-DEV/hch-worker/releases/tag/v3.2.0",
+    html_url: "https://github.com/HUBTECH-DEV/hch-worker/releases/tag/v3.1.1",
     published_at: "2026-08-15T12:00:00Z",
     body: "HCH-Worker-Compatibility: compatible\nHCH-Worker-Content-Impact: none\n",
   };
   const monitor = createReleaseMonitor({
     now: new Date("2026-08-15T12:05:00Z"),
-    fetchImpl: async () => new Response(JSON.stringify(payload), {
+    fetchImpl: async () => new Response(JSON.stringify([payload]), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     }),
   });
   const outdated = await monitor.snapshot("3.1.0");
   assert.equal(outdated.updateAvailable, true);
-  assert.equal(outdated.latestVersion, "3.2.0");
+  assert.equal(outdated.latestVersion, "3.1.1");
   assert.equal(outdated.channel, "stable");
   assert.equal(outdated.compatibility, "compatible");
   assert.equal(outdated.contentImpact, "none");
-  assert.equal((await monitor.snapshot("3.2.0")).updateAvailable, false);
+  assert.equal((await monitor.snapshot("3.1.1")).updateAvailable, false);
   assert.equal(compareVersions("3.10.0", "3.2.9"), 1);
   assert.equal(compareVersions("3.2.0", "3.2.0-rc.1"), 1);
 });
@@ -199,18 +199,232 @@ test("release monitor fails closed for absent or malformed releases", async () =
   );
   const malformed = createReleaseMonitor({
     now: T0,
-    fetchImpl: async () => new Response(JSON.stringify({
+    fetchImpl: async () => new Response(JSON.stringify([{
       tag_name: "v999",
       draft: false,
       prerelease: false,
       html_url: "https://attacker.invalid/release",
       published_at: "invalid",
-    }), { status: 200 }),
+    }]), { status: 200 }),
   });
   const snapshot = await malformed.snapshot("3.1.0");
   assert.equal(snapshot.updateAvailable, false);
   assert.equal(snapshot.status, "error");
   assert.equal(snapshot.errorCode, "release-version-invalid");
+});
+
+test("release monitor selects the Windows channel and ignores newer releases from other systems", async () => {
+  const release = (tag, body = "HCH-Worker-Compatibility: compatible\nHCH-Worker-Content-Impact: none\n") => ({
+    tag_name: tag,
+    draft: false,
+    prerelease: false,
+    html_url: `https://github.com/HUBTECH-DEV/hch-worker/releases/tag/${tag}`,
+    published_at: "2026-09-01T22:00:00Z",
+    body,
+  });
+  let requestedUrl = null;
+  const monitor = createReleaseMonitor({
+    now: new Date("2026-09-01T22:05:00Z"),
+    fetchImpl: async (url) => {
+      requestedUrl = url;
+      return new Response(JSON.stringify([
+        release("linux-v9.0.0"),
+        release("macos-v8.0.0"),
+        release("windows-v4.0.0"),
+        release("v3.1.1"),
+      ]), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+  });
+
+  const windows = await monitor.snapshot("3.1.0", { platform: "windows" });
+  assert.match(requestedUrl, /\/releases\?per_page=100&page=1$/);
+  assert.equal(windows.latestVersion, "4.0.0");
+  assert.equal(windows.updateAvailable, true);
+  assert.equal(windows.compatibility, "compatible");
+  assert.equal(windows.contentImpact, "none");
+  assert.match(windows.releaseUrl, /windows-v4\.0\.0$/);
+
+  const linux = await monitor.snapshot("3.1.0", { platform: "linux" });
+  assert.equal(linux.latestVersion, "9.0.0");
+  assert.match(linux.releaseUrl, /linux-v9\.0\.0$/);
+
+  const legacy = await monitor.snapshot("3.1.0");
+  assert.equal(legacy.latestVersion, "3.1.1");
+  assert.match(legacy.releaseUrl, /\/v3\.1\.1$/);
+});
+
+test("release monitor paginates beyond the first 100 releases", async () => {
+  const requestedPages = [];
+  const ignored = Array.from({ length: 100 }, (_, index) => ({
+    tag_name: `notes-${index}`,
+    draft: false,
+    prerelease: false,
+  }));
+  const target = {
+    tag_name: "windows-v4.0.0",
+    draft: false,
+    prerelease: false,
+    html_url: "https://github.com/HUBTECH-DEV/hch-worker/releases/tag/windows-v4.0.0",
+    published_at: "2026-09-01T22:00:00Z",
+    body: "HCH-Worker-Compatibility: compatible\nHCH-Worker-Content-Impact: none\n",
+  };
+  const monitor = createReleaseMonitor({
+    now: new Date("2026-09-01T22:05:00Z"),
+    fetchImpl: async (url) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      requestedPages.push(page);
+      return new Response(JSON.stringify(page === 1 ? ignored : [target]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+
+  const snapshot = await monitor.snapshot("3.1.1", { platform: "windows" });
+  assert.deepEqual(requestedPages, [1, 2]);
+  assert.equal(snapshot.latestVersion, "4.0.0");
+  assert.equal(snapshot.updateAvailable, true);
+});
+
+test("generic 3.1.1 remains a cross-platform discovery bridge while new clients use OS channels", async () => {
+  const release = (tag) => ({
+    tag_name: tag,
+    draft: false,
+    prerelease: false,
+    html_url: `https://github.com/HUBTECH-DEV/hch-worker/releases/tag/${tag}`,
+    published_at: "2026-09-01T22:00:00Z",
+    body: "HCH-Worker-Compatibility: compatible\nHCH-Worker-Content-Impact: none\n",
+  });
+  const monitor = createReleaseMonitor({
+    now: new Date("2026-09-01T22:05:00Z"),
+    fetchImpl: async () => new Response(JSON.stringify([
+      release("windows-v4.0.0"),
+      release("v3.1.1"),
+    ]), { status: 200, headers: { "Content-Type": "application/json" } }),
+  });
+
+  const windows = await monitor.snapshot("3.1.1", { platform: "win32-x64" });
+  assert.equal(windows.latestVersion, "4.0.0");
+  assert.match(windows.releaseUrl, /windows-v4\.0\.0$/);
+
+  const linux = await monitor.snapshot("3.1.0", { platform: "linux-x64" });
+  assert.equal(linux.latestVersion, "3.1.1");
+  assert.match(linux.releaseUrl, /\/v3\.1\.1$/);
+
+  const macos = await monitor.snapshot("3.1.0", { platform: "darwin-arm64" });
+  assert.equal(macos.latestVersion, "3.1.1");
+  assert.match(macos.releaseUrl, /\/v3\.1\.1$/);
+});
+
+test("a new OS release supersedes generic tags above the allowed 3.1.1 bridge", async () => {
+  const release = (tag) => ({
+    tag_name: tag,
+    draft: false,
+    prerelease: false,
+    html_url: `https://github.com/HUBTECH-DEV/hch-worker/releases/tag/${tag}`,
+    published_at: "2026-09-01T22:00:00Z",
+    body: "HCH-Worker-Compatibility: compatible\nHCH-Worker-Content-Impact: none\n",
+  });
+  const monitor = createReleaseMonitor({
+    now: new Date("2026-09-01T22:05:00Z"),
+    fetchImpl: async () => new Response(JSON.stringify([
+      release("v9.0.0"),
+      release("windows-v4.0.0"),
+    ]), { status: 200, headers: { "Content-Type": "application/json" } }),
+  });
+
+  const windows = await monitor.snapshot("3.1.1", { platform: "windows" });
+  assert.equal(windows.latestVersion, "4.0.0");
+  assert.match(windows.releaseUrl, /windows-v4\.0\.0$/);
+
+  const linux = await monitor.snapshot("3.1.1", { platform: "linux" });
+  assert.equal(linux.latestVersion, null);
+  assert.equal(linux.updateAvailable, false);
+  assert.equal(linux.status, "no-release");
+});
+
+test("an older OS release does not hide the 3.1.1 compatibility bridge", async () => {
+  const release = (tag) => ({
+    tag_name: tag,
+    draft: false,
+    prerelease: false,
+    html_url: `https://github.com/HUBTECH-DEV/hch-worker/releases/tag/${tag}`,
+    published_at: "2026-09-01T22:00:00Z",
+    body: "HCH-Worker-Compatibility: compatible\nHCH-Worker-Content-Impact: none\n",
+  });
+  const monitor = createReleaseMonitor({
+    now: new Date("2026-09-01T22:05:00Z"),
+    fetchImpl: async () => new Response(JSON.stringify([
+      release("windows-v3.0.0"),
+      release("v3.1.1"),
+    ]), { status: 200, headers: { "Content-Type": "application/json" } }),
+  });
+
+  const windows = await monitor.snapshot("3.1.0", { platform: "windows" });
+  assert.equal(windows.latestVersion, "3.1.1");
+  assert.equal(windows.updateAvailable, true);
+  assert.match(windows.releaseUrl, /\/v3\.1\.1$/);
+});
+
+test("platform release without compatibility markers is rejected", async () => {
+  const monitor = createReleaseMonitor({
+    now: T0,
+    fetchImpl: async () => new Response(JSON.stringify([{
+      tag_name: "windows-v4.0.0",
+      draft: false,
+      prerelease: false,
+      html_url: "https://github.com/HUBTECH-DEV/hch-worker/releases/tag/windows-v4.0.0",
+      published_at: "2026-09-01T22:00:00Z",
+      body: "Official Windows release without machine-readable compatibility declarations.",
+    }]), { status: 200 }),
+  });
+
+  const snapshot = await monitor.snapshot("3.1.0", { platform: "windows" });
+  assert.equal(snapshot.updateAvailable, false);
+  assert.equal(snapshot.status, "error");
+  assert.equal(snapshot.errorCode, "release-compatibility-declaration-missing");
+});
+
+test("release compatibility and generated-content impact must be an exact pair", async () => {
+  const makeMonitor = (body) => createReleaseMonitor({
+    now: T0,
+    fetchImpl: async () => new Response(JSON.stringify([{
+      tag_name: "windows-v4.0.0",
+      draft: false,
+      prerelease: false,
+      html_url: "https://github.com/HUBTECH-DEV/hch-worker/releases/tag/windows-v4.0.0",
+      published_at: "2026-09-01T22:00:00Z",
+      body,
+    }]), { status: 200 }),
+  });
+
+  const incompatible = await makeMonitor(
+    "HCH-Worker-Compatibility: incompatible\nHCH-Worker-Content-Impact: generated-content\n",
+  ).snapshot("3.1.1", { platform: "windows" });
+  assert.equal(incompatible.status, "checked");
+  assert.equal(incompatible.compatibility, "incompatible");
+  assert.equal(incompatible.contentImpact, "generated-content");
+
+  const windowsLineEndings = await makeMonitor(
+    "HCH-Worker-Compatibility: compatible\r\nHCH-Worker-Content-Impact: none\r\n",
+  ).snapshot("3.1.1", { platform: "windows" });
+  assert.equal(windowsLineEndings.status, "checked");
+  assert.equal(windowsLineEndings.compatibility, "compatible");
+  assert.equal(windowsLineEndings.contentImpact, "none");
+
+  const crossed = await makeMonitor(
+    "HCH-Worker-Compatibility: compatible\nHCH-Worker-Content-Impact: generated-content\n",
+  ).snapshot("3.1.1", { platform: "windows" });
+  assert.equal(crossed.updateAvailable, false);
+  assert.equal(crossed.status, "error");
+  assert.equal(crossed.errorCode, "release-compatibility-declaration-invalid");
+
+  const duplicated = await makeMonitor(
+    "HCH-Worker-Compatibility: compatible\nHCH-Worker-Compatibility: incompatible\nHCH-Worker-Content-Impact: none\n",
+  ).snapshot("3.1.1", { platform: "windows" });
+  assert.equal(duplicated.updateAvailable, false);
+  assert.equal(duplicated.status, "error");
+  assert.equal(duplicated.errorCode, "release-compatibility-declaration-invalid");
 });
 
 test("update handoff invokes only the fixed backend and records a sanitized result", async (t) => {

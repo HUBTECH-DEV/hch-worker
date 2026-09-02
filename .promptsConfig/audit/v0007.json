@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "version": 7,
+  "timestamp": "2026-09-02T01:12:15-03:00",
+  "source": "user",
+  "action": "project-configuration-updated",
+  "summary": "Windows 4.0.0 promotion now requires direct GitHub verification of bridge v3.1.1 plus independently signed evidence of the complete fleet transition before Windows 3.1.0 can become historical.",
+  "previousVersion": 6,
+  "newVersion": 7,
+  "rollback": null
+}

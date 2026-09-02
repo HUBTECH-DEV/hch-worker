@@ -1,9 +1,6 @@
 {
-  "schemaVersion": "1.0",
-  "projectName": "HCH Worker",
-  "createdAt": "2026-08-14T21:10:48-03:00",
-  "lastUpdated": "2026-09-02T01:12:15-03:00",
-  "currentVersion": 7,
+  "version": 7,
+  "createdAt": "2026-09-02T01:12:15-03:00",
   "agentConfigurationPrompt": "Manter o repositório HUBTECH-DEV/hch-worker como fonte canônica do Worker HCH e evoluir o Worker Windows 4.0.0 nativo em C# como candidato, com rollout reversível, Paused/Drain por padrão e evidência operacional antes de qualquer promoção de versão.",
   "agentProfile": "Principal Implementation Engineer / Deployment Engineer; Principal Git Engineer",
   "projectRules": [
