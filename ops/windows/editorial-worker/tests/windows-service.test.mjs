@@ -226,7 +226,7 @@ test("the local compiler produces a winexe and preserves Windows arguments with 
   const escapedOutput = outputPath.replaceAll("'", "''");
   const encoded = powershell(String.raw`
     $ProgressPreference = 'SilentlyContinue'
-    [void](& '${buildPath}' -OutputPath '${escapedOutput}')
+    [void](& '${buildPath}' -OutputPath '${escapedOutput}' -Version '3.1.1')
     $assembly = [Reflection.Assembly]::LoadFrom('${escapedOutput}')
     $type = $assembly.GetType('Hch.EditorialWorker.ServiceHost.HchEditorialWorkerService', $true)
     $method = $type.GetMethod('Quote', [Reflection.BindingFlags]'Static,NonPublic')
@@ -235,14 +235,24 @@ test("the local compiler produces a winexe and preserves Windows arguments with 
       $method.Invoke($null, [object[]]@('C:\ending\')),
       $method.Invoke($null, [object[]]@('a"b'))
     )
-    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($values | ConvertTo-Json -Compress)))
+    $version = [Diagnostics.FileVersionInfo]::GetVersionInfo('${escapedOutput}')
+    $result = @{
+      values = $values
+      assemblyVersion = $assembly.GetName().Version.ToString()
+      fileVersion = $version.FileVersion
+      productVersion = $version.ProductVersion
+    }
+    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($result | ConvertTo-Json -Compress)))
   `);
-  const values = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-  assert.deepEqual(values, [
+  const result = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  assert.deepEqual(result.values, [
     '"C:\\Program Files\\HCH\\WorkerConfig.psd1"',
     '"C:\\ending\\\\"',
     '"a\\"b"',
   ]);
+  assert.equal(result.assemblyVersion, "3.1.1.0");
+  assert.equal(result.fileVersion, "3.1.1.0");
+  assert.equal(result.productVersion, "3.1.1");
   assert.ok(existsSync(outputPath));
 });
 

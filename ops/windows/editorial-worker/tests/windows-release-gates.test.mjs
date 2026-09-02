@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,12 @@ const validator = join(repositoryRoot, "scripts", "windows", "Test-HchWorkerCana
 const signer = join(repositoryRoot, "scripts", "windows", "Sign-HchWorkerCanaryEvidence.ps1");
 const sourceCommit = "a".repeat(40);
 const version = "4.0.0";
+const productCode = "{11111111-1111-4111-8111-111111111111}";
+const packageCode = "{22222222-2222-4222-8222-222222222222}";
+const serviceImagePath = "C:\\Program Files\\HubTech\\HCH Worker\\4\\Service\\Hch.Worker.Service.exe";
+const trayExecutablePath = "C:\\Program Files\\HubTech\\HCH Worker\\4\\Tray\\Hch.Worker.Tray.exe";
+const serviceExecutableSha256 = hash("service-executable");
+const trayExecutableSha256 = hash("tray-executable");
 
 test("Windows promotion requires pinned CMS attestation and derived v2 canary samples", (context) => {
   if (process.platform !== "win32") return context.skip("Windows certificate store is required");
@@ -28,15 +34,72 @@ test("Windows promotion requires pinned CMS attestation and derived v2 canary sa
   });
 
   const msiPath = join(directory, "HCH-Worker-4.0.0-win-x64.msi");
-  const msiBytes = Buffer.from("synthetic signed-candidate bytes\n", "utf8");
-  writeFileSync(msiPath, msiBytes);
+  createStructuralMsi(directory, msiPath);
+  const msiBytes = readFileSync(msiPath);
   const msiSha256 = createHash("sha256").update(msiBytes).digest("hex");
-  const valid = createValidEvidence(msiSha256);
+  const lifecyclePath = join(directory, "msi-disposable-e2e.json");
+  writeFileSync(lifecyclePath, `${JSON.stringify(createMsiLifecycleEvidence(msiBytes.length, msiSha256))}\n`, "utf8");
+  const lifecycleSha256 = createHash("sha256").update(readFileSync(lifecyclePath)).digest("hex");
+  const valid = createValidEvidence(msiSha256, lifecycleSha256);
 
   const passed = runSignedValidator(directory, msiPath, valid, certificate);
   assert.equal(passed.status, 0, passed.stderr || passed.stdout);
   assert.match(passed.stdout, /CMS attester/);
   assert.match(passed.stdout, /10 heartbeats/);
+
+  const fakeMsiPath = join(directory, "fake-HCH-Worker-4.0.0-win-x64.msi");
+  writeFileSync(fakeMsiPath, "synthetic signed-candidate bytes\n", "utf8");
+  const fakeMsiEvidence = structuredClone(valid);
+  fakeMsiEvidence.msiSha256 = hashBytes(readFileSync(fakeMsiPath));
+  assertSignedEvidenceRejected(
+    directory,
+    fakeMsiPath,
+    fakeMsiEvidence,
+    certificate,
+    /too small|not an OLE compound Windows Installer database/,
+  );
+
+  const reusedRestartPid = structuredClone(valid);
+  reusedRestartPid.installationReceipt.restart.processId = reusedRestartPid.installationReceipt.installed.processId;
+  reusedRestartPid.installationReceipt.receiptSha256 = installationReceiptSha256(
+    reusedRestartPid.installationReceipt,
+    reusedRestartPid.msiSha256,
+  );
+  assertSignedEvidenceRejected(
+    directory,
+    msiPath,
+    reusedRestartPid,
+    certificate,
+    /does not prove a new boot and a distinct SCM process/,
+  );
+
+  const staleRestartBoot = structuredClone(valid);
+  staleRestartBoot.installationReceipt.restart.bootStartedAtUtc = staleRestartBoot.installationReceipt.installed.bootStartedAtUtc;
+  staleRestartBoot.installationReceipt.receiptSha256 = installationReceiptSha256(
+    staleRestartBoot.installationReceipt,
+    staleRestartBoot.msiSha256,
+  );
+  assertSignedEvidenceRejected(
+    directory,
+    msiPath,
+    staleRestartBoot,
+    certificate,
+    /does not prove a new boot and a distinct SCM process/,
+  );
+
+  const mismatchedPackageCode = structuredClone(valid);
+  mismatchedPackageCode.installationReceipt.packageCode = "{33333333-3333-4333-8333-333333333333}";
+  mismatchedPackageCode.installationReceipt.receiptSha256 = installationReceiptSha256(
+    mismatchedPackageCode.installationReceipt,
+    mismatchedPackageCode.msiSha256,
+  );
+  assertSignedEvidenceRejected(
+    directory,
+    msiPath,
+    mismatchedPackageCode,
+    certificate,
+    /does not bind the MSI lifecycle ProductCode,[\s\S]*payload[\s\S]*hashes/,
+  );
 
   const selfDeclared = writeEvidence(directory, valid);
   const emptySignature = join(directory, `unsigned-${randomUUID()}.p7s`);
@@ -244,7 +307,11 @@ test("Windows promotion requires pinned CMS attestation and derived v2 canary sa
   });
   assertRejected(pinMismatch, /does not match both protected certificate pins/, "Wrong attester pin was accepted");
 
-  const oldEvidence = createValidEvidence(msiSha256, new Date(Date.now() - (25 * 60 * 60 * 1000)));
+  const oldEvidence = createValidEvidence(
+    msiSha256,
+    lifecycleSha256,
+    new Date(Date.now() - (25 * 60 * 60 * 1000)),
+  );
   const oldEvidencePath = writeEvidence(directory, oldEvidence);
   assertRejected(
     runSigner(oldEvidencePath, join(directory, `late-${randomUUID()}.p7s`), certificate),
@@ -268,7 +335,96 @@ test("Windows promotion requires pinned CMS attestation and derived v2 canary sa
   );
 });
 
-function createValidEvidence(msiSha256, completed = new Date(Date.now() - 30_000)) {
+function createMsiLifecycleEvidence(msiLengthBytes, msiSha256) {
+  const observedMs = Date.now() - (2 * 60 * 60 * 1000);
+  return {
+    schema: "hch.worker-windows-msi-e2e/v1",
+    status: "passed",
+    version,
+    productCode,
+    packageCode,
+    msiSha256,
+    msiLengthBytes,
+    signerThumbprint: "A".repeat(40),
+    signerCertificateSha256: "B".repeat(64),
+    environmentKind: "GitHubHosted",
+    machineName: "CANARY-TEST-HOST",
+    rollbackExitCode: 1603,
+    extractedFirstPartySignedFiles: 3,
+    extractedPayloads: {
+      service: {
+        relativePath: "Program Files/HubTech/HCH Worker/4/Service/Hch.Worker.Service.exe",
+        sha256: serviceExecutableSha256,
+        sizeBytes: 8192,
+      },
+      tray: {
+        relativePath: "Program Files/HubTech/HCH Worker/4/Tray/Hch.Worker.Tray.exe",
+        sha256: trayExecutableSha256,
+        sizeBytes: 8192,
+      },
+      installer: {
+        relativePath: "Program Files/HubTech/HCH Worker/4/Installer/Hch.Worker.Installer.exe",
+        sha256: hash("installer-executable"),
+        sizeBytes: 8192,
+      },
+    },
+    installedService: {
+      serviceName: "HchWorker",
+      displayName: "HCH Worker",
+      scmState: "Running",
+      scmStartMode: "Automatic",
+      scmDelayedAutomaticStart: true,
+      scmAccountName: "LocalSystem",
+      scmImagePath: serviceImagePath,
+      scmProcessId: 3100,
+      processImagePath: serviceImagePath,
+      processStartedAtUtc: iso(observedMs - 10_000),
+      bootStartedAtUtc: iso(observedMs - 3_600_000),
+      serviceExecutableSha256,
+      trayExecutablePath,
+      trayExecutableSha256,
+      observedAtUtc: iso(observedMs),
+    },
+    pausedDrainEvidence: "ready-state-requested-and-granted-capacity-zero",
+    repairPreservedState: true,
+    uninstallPreservedState: true,
+    logs: ["administrative-extract", "forced-rollback", "clean-install", "repair", "uninstall"].map((name) => ({
+      name: `${name}.log`,
+      sha256: hash(name),
+    })),
+    completedAtUtc: iso(observedMs + 1_000),
+  };
+}
+
+function createStructuralMsi(directory, msiPath) {
+  const scriptPath = join(directory, `create-msi-${randomUUID()}.ps1`);
+  writeFileSync(scriptPath, [
+    "param([Parameter(Mandatory)][string]$Path)",
+    "$ErrorActionPreference = 'Stop'",
+    "$installer = New-Object -ComObject WindowsInstaller.Installer",
+    "$database = $installer.OpenDatabase($Path, 3)",
+    "$view = $database.OpenView('CREATE TABLE `Property` (`Property` CHAR(72) NOT NULL, `Value` CHAR(0) LOCALIZABLE PRIMARY KEY `Property`)')",
+    "$view.Execute(); $view.Close()",
+    `foreach ($pair in @(@('ProductCode','${productCode}'),@('ProductVersion','${version}'),@('ProductName','HCH Worker'),@('Manufacturer','HubTech'))) {`,
+    "  $view = $database.OpenView(\"INSERT INTO ``Property`` (``Property``,``Value``) VALUES ('$($pair[0])','$($pair[1])')\")",
+    "  $view.Execute(); $view.Close()",
+    "}",
+    "$summary = $database.SummaryInformation(20)",
+    `$summary.Property(9) = '${packageCode}'`,
+    "$summary.Persist(); $database.Commit()",
+  ].join("\n"), "utf8");
+  try {
+    const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-File", scriptPath, "-Path", msiPath], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  } finally {
+    unlinkSync(scriptPath);
+  }
+}
+
+function createValidEvidence(msiSha256, msiLifecycleEvidenceSha256, completed = new Date(Date.now() - 30_000)) {
   const completedMs = completed.getTime();
   const startedMs = completedMs - (18 * 60 * 1000);
   const nodeId = "windows-canary-node-0001";
@@ -276,6 +432,29 @@ function createValidEvidence(msiSha256, completed = new Date(Date.now() - 30_000
   const failedAssignment = "22222222-2222-4222-8222-222222222222";
   const completionGenerationPlanHash = hash("completion-generation-plan");
   const failureGenerationPlanHash = hash("failure-generation-plan");
+  const installationReceipt = {
+    msiLifecycleEvidenceSha256,
+    productCode,
+    packageCode,
+    serviceName: "HchWorker",
+    serviceImagePath,
+    serviceExecutableSha256,
+    trayExecutablePath,
+    trayExecutableSha256,
+    installed: {
+      bootStartedAtUtc: iso(startedMs - 3_600_000),
+      processStartedAtUtc: iso(startedMs - 20_000),
+      observedAtUtc: iso(startedMs - 10_000),
+      processId: 4100,
+    },
+    restart: {
+      bootStartedAtUtc: iso(startedMs + 970_000),
+      processStartedAtUtc: iso(startedMs + 972_000),
+      observedAtUtc: iso(startedMs + 974_000),
+      processId: 4200,
+    },
+  };
+  installationReceipt.receiptSha256 = installationReceiptSha256(installationReceipt, msiSha256);
   const heartbeatSamples = Array.from({ length: 10 }, (_, index) => {
     const serverTime = iso(startedMs + 1_000 + (index * 107_000));
     const sample = {
@@ -369,7 +548,7 @@ function createValidEvidence(msiSha256, completed = new Date(Date.now() - 30_000
   failure.receiptSha256 = failureReceiptSha256(failure);
 
   const legacyHeartbeat = {
-    workerVersion: "3.1.0",
+    workerVersion: "3.1.1",
     requestId: "50000000-0000-4000-8000-000000000001",
     nodeId,
     heartbeatAt: iso(completedMs - 1_000),
@@ -391,7 +570,7 @@ function createValidEvidence(msiSha256, completed = new Date(Date.now() - 30_000
   const rollbackReceipt = {
     receiptId: "60000000-0000-4000-8000-000000000001",
     serverTime: iso(startedMs + 1_000_000),
-    targetVersion: "3.1.0",
+    targetVersion: "3.1.1",
     v4ServiceDisabled: true,
     legacyServiceStartMode: "AutomaticDelayed",
     backupSha256: hash("rollback-backup"),
@@ -408,6 +587,7 @@ function createValidEvidence(msiSha256, completed = new Date(Date.now() - 30_000
     version,
     sourceCommit,
     msiSha256,
+    installationReceipt,
     startedAtUtc: iso(startedMs),
     completedAtUtc: iso(completedMs),
     gates: {
@@ -567,8 +747,34 @@ function rollbackReceiptSha256(sample) {
   ]);
 }
 
+function installationReceiptSha256(sample, msiSha256) {
+  return receiptHash("install-restart", [
+    `msiSha256=${msiSha256}`,
+    `msiLifecycleEvidenceSha256=${sample.msiLifecycleEvidenceSha256}`,
+    `productCode=${sample.productCode}`,
+    `packageCode=${sample.packageCode}`,
+    `serviceName=${sample.serviceName}`,
+    `serviceImagePath=${sample.serviceImagePath}`,
+    `serviceExecutableSha256=${sample.serviceExecutableSha256}`,
+    `trayExecutablePath=${sample.trayExecutablePath}`,
+    `trayExecutableSha256=${sample.trayExecutableSha256}`,
+    `installed.bootStartedAtUnixMs=${timeValue(sample.installed.bootStartedAtUtc)}`,
+    `installed.processStartedAtUnixMs=${timeValue(sample.installed.processStartedAtUtc)}`,
+    `installed.observedAtUnixMs=${timeValue(sample.installed.observedAtUtc)}`,
+    `installed.processId=${sample.installed.processId}`,
+    `restart.bootStartedAtUnixMs=${timeValue(sample.restart.bootStartedAtUtc)}`,
+    `restart.processStartedAtUnixMs=${timeValue(sample.restart.processStartedAtUtc)}`,
+    `restart.observedAtUnixMs=${timeValue(sample.restart.observedAtUtc)}`,
+    `restart.processId=${sample.restart.processId}`,
+  ]);
+}
+
 function receiptHash(kind, fields) {
   return hash(["schema=hch.worker-canary-receipt/v1", `kind=${kind}`, ...fields, ""].join("\n"));
+}
+
+function hashBytes(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function timeValue(value) {

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -12,7 +13,7 @@ namespace Hch.Worker.Windows;
 /// The connection is established without application bytes; its exact server
 /// row is bound to a stable listener PID before HTTP is allowed to use it.
 /// </summary>
-public sealed class WindowsOllamaEndpointGuard : IOllamaEndpointGuard
+public sealed class WindowsOllamaEndpointGuard : IOllamaEndpointGuard, IAuxiliaryProcessCountProvider
 {
     private const int AddressFamilyInet = 2;
     private const int AddressFamilyInet6 = 23;
@@ -24,6 +25,8 @@ public sealed class WindowsOllamaEndpointGuard : IOllamaEndpointGuard
 
     private readonly Uri baseUri;
     private readonly SecurityIdentifier[] permittedUsers;
+    private int lastVerifiedProcessId;
+    private long lastVerifiedTimestamp;
 
     public WindowsOllamaEndpointGuard(
         Uri ollamaBaseUri,
@@ -54,6 +57,34 @@ public sealed class WindowsOllamaEndpointGuard : IOllamaEndpointGuard
         using Socket socket = await ConnectTrustedSocketAsync(
             new DnsEndPoint(baseUri.Host, baseUri.Port),
             cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Counts only the recently authenticated Ollama process. A process found
+    /// by name alone is never treated as an auxiliary Worker process.
+    /// </summary>
+    public int Collect()
+    {
+        int processId = Volatile.Read(ref lastVerifiedProcessId);
+        long verifiedAt = Interlocked.Read(ref lastVerifiedTimestamp);
+        if (processId < 1 || verifiedAt < 1
+            || Stopwatch.GetElapsedTime(verifiedAt) > TimeSpan.FromMinutes(2))
+        {
+            return 0;
+        }
+
+        try
+        {
+            using Process process = Process.GetProcessById(processId);
+            return process.HasExited ? 0 : 1;
+        }
+        catch (Exception error) when (error is ArgumentException
+            or InvalidOperationException
+            or NotSupportedException
+            or Win32Exception)
+        {
+            return 0;
+        }
     }
 
     /// <summary>
@@ -142,6 +173,9 @@ public sealed class WindowsOllamaEndpointGuard : IOllamaEndpointGuard
                     {
                         throw Refused("ollama-endpoint-owner-race");
                     }
+
+                    Volatile.Write(ref lastVerifiedProcessId, checked((int)connectionAfter));
+                    Interlocked.Exchange(ref lastVerifiedTimestamp, Stopwatch.GetTimestamp());
 
                     return socket;
                 }

@@ -20,13 +20,25 @@ public sealed record WindowsTelemetrySnapshot(
     long? NetworkReceivedBytes,
     long? NetworkSentBytes,
     double? GpuPercent,
-    ulong? VramUsedBytes);
+    ulong? VramUsedBytes,
+    string? GpuName = null,
+    ulong? VramTotalBytes = null,
+    int AuxiliaryProcessCount = 0);
 
-public readonly record struct GpuTelemetry(double? UtilizationPercent, ulong? VramUsedBytes);
+public readonly record struct GpuTelemetry(
+    double? UtilizationPercent,
+    ulong? VramUsedBytes,
+    string? Name = null,
+    ulong? VramTotalBytes = null);
 
 public interface IGpuTelemetryProvider
 {
     GpuTelemetry Collect();
+}
+
+public interface IAuxiliaryProcessCountProvider
+{
+    int Collect();
 }
 
 /// <summary>Explicit null provider; missing GPU data is never reported as zero.</summary>
@@ -41,6 +53,17 @@ public sealed class UnavailableGpuTelemetryProvider : IGpuTelemetryProvider
     public GpuTelemetry Collect() => new(null, null);
 }
 
+public sealed class NoAuxiliaryProcessCountProvider : IAuxiliaryProcessCountProvider
+{
+    public static NoAuxiliaryProcessCountProvider Instance { get; } = new();
+
+    private NoAuxiliaryProcessCountProvider()
+    {
+    }
+
+    public int Collect() => 0;
+}
+
 /// <summary>Collects process and host counters without WMI or localized counters.</summary>
 public sealed class WindowsTelemetryCollector : IDisposable
 {
@@ -48,6 +71,7 @@ public sealed class WindowsTelemetryCollector : IDisposable
     private readonly Process process;
     private readonly bool ownsProcess;
     private readonly IGpuTelemetryProvider gpuProvider;
+    private readonly IAuxiliaryProcessCountProvider auxiliaryProcessProvider;
 
     private long? previousTimestamp;
     private TimeSpan? previousProcessCpu;
@@ -55,11 +79,14 @@ public sealed class WindowsTelemetryCollector : IDisposable
 
     public WindowsTelemetryCollector(
         Process? process = null,
-        IGpuTelemetryProvider? gpuProvider = null)
+        IGpuTelemetryProvider? gpuProvider = null,
+        IAuxiliaryProcessCountProvider? auxiliaryProcessProvider = null)
     {
         this.process = process ?? Process.GetCurrentProcess();
         ownsProcess = process is null;
-        this.gpuProvider = gpuProvider ?? UnavailableGpuTelemetryProvider.Instance;
+        this.gpuProvider = gpuProvider ?? WindowsGpuTelemetryProvider.Instance;
+        this.auxiliaryProcessProvider = auxiliaryProcessProvider
+            ?? NoAuxiliaryProcessCountProvider.Instance;
     }
 
     public WindowsTelemetrySnapshot Collect()
@@ -74,6 +101,7 @@ public sealed class WindowsTelemetryCollector : IDisposable
             (ulong? readBytes, ulong? writeBytes) = CollectProcessIo();
             (long? receivedBytes, long? sentBytes) = CollectNetwork();
             GpuTelemetry gpu = CollectGpu();
+            int auxiliaryProcessCount = CollectAuxiliaryProcessCount();
 
             return new WindowsTelemetrySnapshot(
                 DateTimeOffset.UtcNow,
@@ -89,7 +117,10 @@ public sealed class WindowsTelemetryCollector : IDisposable
                 receivedBytes,
                 sentBytes,
                 gpu.UtilizationPercent,
-                gpu.VramUsedBytes);
+                gpu.VramUsedBytes,
+                gpu.Name,
+                gpu.VramTotalBytes,
+                auxiliaryProcessCount);
         }
     }
 
@@ -236,12 +267,58 @@ public sealed class WindowsTelemetryCollector : IDisposable
             double? utilization = result.UtilizationPercent is double value
                 ? NormalizePercent(value)
                 : null;
-            return new GpuTelemetry(utilization, result.VramUsedBytes);
+            ulong? used = result.VramUsedBytes;
+            ulong? total = result.VramTotalBytes;
+            if (used is not null && total is not null && used > total)
+            {
+                used = null;
+            }
+
+            return new GpuTelemetry(
+                utilization,
+                used,
+                NormalizeGpuName(result.Name),
+                total is > 0 ? total : null);
         }
-        catch (Exception error) when (error is NotSupportedException or Win32Exception or InvalidOperationException)
+        catch (Exception error) when (error is NotSupportedException
+            or Win32Exception
+            or InvalidOperationException
+            or UnauthorizedAccessException
+            or IOException
+            or System.Security.SecurityException
+            or System.Security.Cryptography.CryptographicException)
         {
             return new GpuTelemetry(null, null);
         }
+    }
+
+    private int CollectAuxiliaryProcessCount()
+    {
+        try
+        {
+            return Math.Clamp(auxiliaryProcessProvider.Collect(), 0, 1_024);
+        }
+        catch (Exception error) when (error is NotSupportedException
+            or Win32Exception
+            or InvalidOperationException
+            or UnauthorizedAccessException)
+        {
+            return 0;
+        }
+    }
+
+    private static string? NormalizeGpuName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        string normalized = new(value.Trim()
+            .Where(static character => !char.IsControl(character))
+            .Take(160)
+            .ToArray());
+        return normalized.Length == 0 ? null : normalized;
     }
 
     private static double? NormalizePercent(double value) =>

@@ -28,6 +28,9 @@ public sealed record LegacyWorkerSourceDescriptor(
 public sealed record LegacyServiceDefinitionReceipt(
     string ServiceName,
     string ImagePath,
+    string ExecutablePath,
+    string ExecutableVersion,
+    string ExecutableSha256,
     string AccountName,
     int StartMode,
     int ServiceType,
@@ -71,7 +74,7 @@ public sealed record LegacyWindowsMigrationRequest(
     string LegacyProductRoot,
     string TargetProductRoot,
     string OwnerSid,
-    string SourceVersion = "3.1.0",
+    string? ExpectedSourceVersion = null,
     string TargetVersion = "4.0.0");
 
 public sealed record LegacyWindowsMigrationResult(

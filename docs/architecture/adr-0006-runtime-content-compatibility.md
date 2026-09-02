@@ -7,7 +7,7 @@
 
 Wire protocol, documento OpenAPI, bootstrap, runtime e conteúdo editorial têm
 versões distintas. O contrato atual exige igualdade exata de runtime e publica
-toda atualização como obrigatória, o que impede coexistência segura 3.1.0/4.0.0.
+toda atualização como obrigatória, o que impede coexistência segura 3.1.x/4.0.0.
 
 ## Decisão
 
@@ -36,6 +36,9 @@ somente com benchmark e aprovação humana. Não há fallback silencioso.
 
 ## Regra de transição
 
-Durante o canário, 3.1.0 e 4.0.0 permanecem aceitos. A promoção de 4.0.0 não
+Antes do canário, a frota suportada deve convergir para a ponte 3.1.1. Durante
+o canário, 3.1.1 e 4.0.0 permanecem aceitos; a migração direta de uma instalação
+3.1.0 continua possível, mas não substitui a evidência de transição integral da
+frota. A promoção de 4.0.0 não
 reescreve `minimumRequiredWorkerVersion` até a janela de compatibilidade ser
 encerrada por decisão explícita.

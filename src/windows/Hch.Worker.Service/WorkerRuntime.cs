@@ -92,13 +92,23 @@ public sealed class WorkerRuntimeMetadata(
     }
 }
 
-public sealed class WorkerRuntimeState(TimeProvider? timeProvider = null)
+public sealed class WorkerRuntimeState
 {
+    public const int MaximumOperationalHistoryPoints = 120;
+    public static readonly TimeSpan OperationalHistoryInterval = TimeSpan.FromMinutes(1);
+    public static readonly TimeSpan QueueDepthFreshness = TimeSpan.FromMinutes(2);
+    public static readonly TimeSpan ThroughputWindow = TimeSpan.FromHours(1);
+
     private readonly object gate = new();
-    private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
-    private readonly DateTimeOffset startedAt = (timeProvider ?? TimeProvider.System).GetUtcNow();
+    private readonly TimeProvider clock;
+    private readonly DateTimeOffset startedAt;
+    private readonly IWindowsServiceStateProvider serviceStateProvider;
+    private readonly Queue<DateTimeOffset> completedOutcomeTimes = new();
+    private readonly List<OperationalHistoryPointPayload> operationalHistory = [];
     private DateTimeOffset? lastHeartbeatAt;
     private long? orchestratorLatencyMilliseconds;
+    private int? queueDepth;
+    private DateTimeOffset? queueDepthObservedAt;
     private WindowsTelemetrySnapshot? telemetry;
     private long memorySampleTotal;
     private int memorySampleCount;
@@ -107,13 +117,38 @@ public sealed class WorkerRuntimeState(TimeProvider? timeProvider = null)
     private long completed;
     private long failed;
     private long retries;
+    private double completedDurationSecondsTotal;
+    private long completedDurationCount;
+
+    public WorkerRuntimeState(
+        TimeProvider? timeProvider = null,
+        IWindowsServiceStateProvider? serviceStateProvider = null)
+    {
+        clock = timeProvider ?? TimeProvider.System;
+        startedAt = clock.GetUtcNow();
+        this.serviceStateProvider = serviceStateProvider ?? WindowsServiceStateProvider.Instance;
+    }
 
     public void RecordHeartbeat(DateTimeOffset observedAt, TimeSpan latency)
+        => RecordHeartbeat(observedAt, latency, null);
+
+    public void RecordHeartbeat(DateTimeOffset observedAt, TimeSpan latency, int? claimableQueueDepth)
     {
         lock (gate)
         {
             lastHeartbeatAt = observedAt;
             orchestratorLatencyMilliseconds = Math.Max(0, (long)latency.TotalMilliseconds);
+            queueDepth = claimableQueueDepth is >= 0 ? claimableQueueDepth : null;
+            queueDepthObservedAt = claimableQueueDepth is >= 0 ? clock.GetUtcNow() : null;
+        }
+    }
+
+    public void RecordHeartbeatFailure()
+    {
+        lock (gate)
+        {
+            queueDepth = null;
+            queueDepthObservedAt = null;
         }
     }
 
@@ -124,7 +159,9 @@ public sealed class WorkerRuntimeState(TimeProvider? timeProvider = null)
             telemetry = value;
             if (value.ProcessWorkingSetBytes is long bytes)
             {
-                memorySampleTotal = checked(memorySampleTotal + bytes);
+                memorySampleTotal = long.MaxValue - memorySampleTotal < bytes
+                    ? long.MaxValue
+                    : memorySampleTotal + bytes;
                 memorySampleCount++;
                 if (memorySampleCount > 10_000)
                 {
@@ -146,18 +183,73 @@ public sealed class WorkerRuntimeState(TimeProvider? timeProvider = null)
     }
 
     public void RecordCompleted()
+        => RecordCompleted(duration: null);
+
+    public void RecordCompleted(TimeSpan? duration)
     {
-        lock (gate) { completed++; }
+        lock (gate)
+        {
+            completed = Increment(completed);
+            DateTimeOffset now = clock.GetUtcNow();
+            completedOutcomeTimes.Enqueue(now);
+            PruneCompletedOutcomes(now);
+            if (duration is { } actualDuration
+                && actualDuration >= TimeSpan.Zero
+                && double.IsFinite(actualDuration.TotalSeconds))
+            {
+                completedDurationSecondsTotal = Math.Min(
+                    double.MaxValue,
+                    completedDurationSecondsTotal + actualDuration.TotalSeconds);
+                completedDurationCount = Increment(completedDurationCount);
+            }
+        }
     }
 
     public void RecordFailed()
     {
-        lock (gate) { failed++; }
+        lock (gate) { failed = Increment(failed); }
     }
 
     public void RecordRetry()
     {
-        lock (gate) { retries++; }
+        lock (gate) { retries = Increment(retries); }
+    }
+
+    public void RecordOperationalSample(WorkerControlSnapshot control)
+    {
+        ArgumentNullException.ThrowIfNull(control);
+        lock (gate)
+        {
+            DateTimeOffset now = clock.GetUtcNow();
+            int? currentQueueDepth = CurrentQueueDepth(now);
+            double? throughput = CurrentThroughput(now);
+            double? averageDuration = AverageDuration();
+            var point = new OperationalHistoryPointPayload(
+                now,
+                control.ActiveJobs,
+                control.ReservedJobs,
+                currentQueueDepth,
+                completed,
+                failed,
+                retries,
+                throughput,
+                averageDuration);
+            if (operationalHistory.Count > 0
+                && now - operationalHistory[^1].ObservedAt < OperationalHistoryInterval)
+            {
+                operationalHistory[^1] = point;
+            }
+            else
+            {
+                operationalHistory.Add(point);
+                if (operationalHistory.Count > MaximumOperationalHistoryPoints)
+                {
+                    operationalHistory.RemoveRange(
+                        0,
+                        operationalHistory.Count - MaximumOperationalHistoryPoints);
+                }
+            }
+        }
     }
 
     public WorkerSnapshotPayload Snapshot(
@@ -166,8 +258,12 @@ public sealed class WorkerRuntimeState(TimeProvider? timeProvider = null)
         WorkerControlSnapshot control,
         IReadOnlyList<WorkerJobProgress> progress)
     {
+        WindowsServiceStatus service = serviceStateProvider.Collect(
+            Worker.ServiceName,
+            Environment.ProcessId);
         lock (gate)
         {
+            DateTimeOffset now = clock.GetUtcNow();
             var resources = Resources();
             var activeWork = progress.Select(item => new JobProgressPayload(
                 item.AssignmentId,
@@ -184,7 +280,7 @@ public sealed class WorkerRuntimeState(TimeProvider? timeProvider = null)
                 configuration.WorkerName,
                 WorkerInstalledVersion.Current,
                 metadata.AvailableVersion,
-                "Running",
+                service.State,
                 control.State.ToString(),
                 control.Ready,
                 control.AcceptingClaims,
@@ -206,12 +302,14 @@ public sealed class WorkerRuntimeState(TimeProvider? timeProvider = null)
                 metadata.UpdateCompatible,
                 metadata.OllamaModel,
                 ollamaAvailable,
-                QueueDepth: 0,
+                CurrentQueueDepth(now),
                 completed,
                 failed,
                 retries,
-                AverageDurationSeconds: null,
+                AverageDuration(),
+                CurrentThroughput(now),
                 activeWork,
+                operationalHistory.ToArray(),
                 resources,
                 lastError);
         }
@@ -229,16 +327,50 @@ public sealed class WorkerRuntimeState(TimeProvider? timeProvider = null)
                 ? unavailableLong
                 : new MetricPayload<long>(true, memorySampleTotal / memorySampleCount, null),
             Metric(sample?.ProcessPeakWorkingSetBytes, "not-collected"),
-            new MetricPayload<string>(false, null, "gpu-name-not-collected"),
+            sample?.GpuName is { Length: > 0 } gpuName
+                ? new MetricPayload<string>(true, gpuName, null)
+                : new MetricPayload<string>(false, null, "gpu-name-not-available"),
             Metric(sample?.GpuPercent, "gpu-not-available"),
             Metric(ToLong(sample?.VramUsedBytes), "gpu-not-available"),
-            new MetricPayload<long>(false, default, "vram-total-not-collected"),
+            Metric(ToLong(sample?.VramTotalBytes), "vram-total-not-available"),
             Metric(ToLong(sample?.ProcessReadBytes), "not-collected"),
             Metric(ToLong(sample?.ProcessWriteBytes), "not-collected"),
             Metric(sample?.NetworkReceivedBytes, "not-collected"),
             Metric(sample?.NetworkSentBytes, "not-collected"),
             Math.Max(0, (long)(clock.GetUtcNow() - startedAt).TotalSeconds),
-            AuxiliaryProcessCount: 0);
+            sample?.AuxiliaryProcessCount ?? 0);
+    }
+
+    private int? CurrentQueueDepth(DateTimeOffset now) =>
+        queueDepthObservedAt is { } observedAt
+            && now >= observedAt
+            && now - observedAt <= QueueDepthFreshness
+            ? queueDepth
+            : null;
+
+    private double? AverageDuration() => completedDurationCount == 0
+        ? null
+        : completedDurationSecondsTotal / completedDurationCount;
+
+    private double? CurrentThroughput(DateTimeOffset now)
+    {
+        PruneCompletedOutcomes(now);
+        double elapsedHours = Math.Min(
+            ThroughputWindow.TotalHours,
+            Math.Max(0, (now - startedAt).TotalHours));
+        return elapsedHours < TimeSpan.FromMinutes(1).TotalHours
+            ? null
+            : completedOutcomeTimes.Count / elapsedHours;
+    }
+
+    private void PruneCompletedOutcomes(DateTimeOffset now)
+    {
+        DateTimeOffset cutoff = now - ThroughputWindow;
+        while (completedOutcomeTimes.TryPeek(out DateTimeOffset completedAt)
+            && completedAt < cutoff)
+        {
+            _ = completedOutcomeTimes.Dequeue();
+        }
     }
 
     private static MetricPayload<T> Metric<T>(T? value, string reason) where T : struct => value is T actual
@@ -248,6 +380,8 @@ public sealed class WorkerRuntimeState(TimeProvider? timeProvider = null)
     private static long? ToLong(ulong? value) => value is null
         ? null
         : value > long.MaxValue ? long.MaxValue : (long)value.Value;
+
+    private static long Increment(long value) => value == long.MaxValue ? value : value + 1;
 }
 
 public sealed class WorkerServiceRuntime : IAsyncDisposable
@@ -350,11 +484,28 @@ public sealed class WorkerServiceRuntime : IAsyncDisposable
                 var started = Stopwatch.GetTimestamp();
                 var response = await orchestrator!.HeartbeatNodeAsync(requested, cancellationToken).ConfigureAwait(false);
                 var latency = Stopwatch.GetElapsedTime(started);
+                ValidatedNodeHeartbeatDirective directive =
+                    OrchestratorContractValidator.ReadHeartbeatDirective(response);
                 var grant = snapshot.AcceptingClaims
                     ? Math.Min(response.Capacity.GrantedCapacity, requested)
                     : 0;
-                control.SetGrantedCapacity(grant, "orchestrator-node-heartbeat");
-                state.RecordHeartbeat(ProtocolTime.ParseTimestamp(response.HeartbeatAt, "heartbeatAt"), latency);
+                bool claimAllowed = snapshot.AcceptingClaims && directive.Claim.Allowed;
+                DateTimeOffset heartbeatAt = ProtocolTime.ParseTimestamp(
+                    response.HeartbeatAt,
+                    "heartbeatAt");
+                DateTimeOffset authorizationValidUntil = heartbeatAt.AddSeconds(
+                    response.NextHeartbeatSeconds * 2d);
+                control.ApplyHeartbeatDecision(
+                    grant,
+                    claimAllowed,
+                    claimAllowed ? directive.Claim.RecommendedCount : 0,
+                    authorizationValidUntil,
+                    directive.Claim.Reason,
+                    "orchestrator-node-heartbeat");
+                state.RecordHeartbeat(
+                    heartbeatAt,
+                    latency,
+                    SaturatingQueueDepth(directive.Workload.Claimable));
                 metadata.RecordUpdate(response.Update);
                 if (!response.Update.Compatible
                     && response.Update.ContentImpact.Equals("generated-content", StringComparison.Ordinal))
@@ -368,7 +519,8 @@ public sealed class WorkerServiceRuntime : IAsyncDisposable
             }
             catch (Exception error)
             {
-                control.SetGrantedCapacity(0, "orchestrator-node-heartbeat-failed");
+                control.ClearClaimAuthorization();
+                state.RecordHeartbeatFailure();
                 await RecordErrorAsync("node-heartbeat-failed", error, cancellationToken).ConfigureAwait(false);
             }
 
@@ -391,7 +543,9 @@ public sealed class WorkerServiceRuntime : IAsyncDisposable
             }
             catch (OrchestratorRequestException error) when (error.Retryable)
             {
-                control.SetGrantedCapacity(0, "scheduler-network-retry");
+                control.ClearClaimAuthorization(
+                    "heartbeat-unavailable",
+                    "scheduler-network-retry");
                 state.RecordRetry();
                 await RecordErrorAsync(error.Code, error, cancellationToken).ConfigureAwait(false);
                 await Task.Delay(TimeSpan.FromSeconds(5), clock, cancellationToken).ConfigureAwait(false);
@@ -424,6 +578,8 @@ public sealed class WorkerServiceRuntime : IAsyncDisposable
             {
                 await RecordErrorAsync("telemetry-collection-failed", error, cancellationToken).ConfigureAwait(false);
             }
+
+            state.RecordOperationalSample(control.Snapshot);
 
             await Task.Delay(TelemetryInterval, clock, cancellationToken).ConfigureAwait(false);
         }
@@ -462,6 +618,22 @@ public sealed class WorkerServiceRuntime : IAsyncDisposable
             "A sanitized Worker runtime event occurred.",
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
+
+    internal static int? ReadQueueDepth(JsonElement workload)
+    {
+        try
+        {
+            return OrchestratorContractValidator.ReadClaimableWorkload(workload);
+        }
+        catch (WorkerServiceException)
+        {
+            return null;
+        }
+    }
+
+    private static int SaturatingQueueDepth(long value) => value > int.MaxValue
+        ? int.MaxValue
+        : checked((int)value);
 
     public async ValueTask DisposeAsync()
     {
@@ -510,6 +682,8 @@ public sealed class WorkerRuntimeFactory(
 
         AppliedManifestState? appliedState = null;
         AppliedRuntimeContract? applied = null;
+        AppliedManifestState? priorAppliedState = null;
+        AppliedRuntimeContract? priorApplied = null;
         ManifestPayload? availableManifest = null;
         ManifestCompatibilityEvaluation? compatibility = null;
         WorkerReadyStateRecord? readyState = null;
@@ -531,6 +705,27 @@ public sealed class WorkerRuntimeFactory(
 
         try
         {
+            priorAppliedState = await files.ReadJsonAsync<AppliedManifestState>(
+                ManifestArtifactApplier.PreviousAppliedStatePath,
+                cancellationToken).ConfigureAwait(false);
+            if (priorAppliedState is not null)
+            {
+                priorApplied = AppliedRuntimeContract.FromAppliedState(priorAppliedState);
+            }
+        }
+        catch (Exception error) when (error is JsonException or ProtocolValidationException or WorkerServiceException)
+        {
+            priorAppliedState = null;
+            priorApplied = null;
+            await logs.WriteAsync(
+                "warning",
+                "previous-applied-manifest-invalid",
+                "The previous applied manifest cannot be used for ready-state recovery.",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+
+        try
+        {
             readyState = await files.ReadJsonAsync<WorkerReadyStateRecord>("ready.json", cancellationToken)
                 .ConfigureAwait(false);
             trustState = await files.ReadJsonAsync<ManifestTrustStateRecord>("trust-state.json", cancellationToken)
@@ -541,6 +736,44 @@ public sealed class WorkerRuntimeFactory(
             readyState = null;
             trustState = null;
             await logs.WriteAsync("warning", "bootstrap-state-invalid", "The durable bootstrap state is not usable.",
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+
+        ManifestTrustPins? configuredPins = null;
+        if (configuration.HasRootTrustPins)
+        {
+            try
+            {
+                configuredPins = await ManifestTrustPinsLoader.LoadAsync(configuration, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (WorkerServiceException)
+            {
+                // The regular bootstrap path records the actionable trust error.
+                // No predecessor is selected without the configured root pins.
+            }
+        }
+
+        AppliedManifestState? readyAppliedState = configuredPins is null
+            ? null
+            : SelectReadyAppliedState(
+                appliedState,
+                priorAppliedState,
+                readyState,
+                trustState,
+                configuration,
+                configuredPins,
+                timeProvider.GetUtcNow());
+        if (readyAppliedState is not null
+            && ReferenceEquals(readyAppliedState, priorAppliedState)
+            && priorApplied is not null)
+        {
+            appliedState = readyAppliedState;
+            applied = priorApplied;
+            await logs.WriteAsync(
+                "warning",
+                "attested-applied-state-recovered",
+                "Startup selected the predecessor referenced by the durable ready commit after an interrupted compatible refresh.",
                 cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
@@ -663,8 +896,9 @@ public sealed class WorkerRuntimeFactory(
         {
             try
             {
-                var pins = await ManifestTrustPinsLoader.LoadAsync(configuration, cancellationToken)
-                    .ConfigureAwait(false);
+                var pins = configuredPins
+                    ?? await ManifestTrustPinsLoader.LoadAsync(configuration, cancellationToken)
+                        .ConfigureAwait(false);
                 var signedClient = (SignedOrchestratorClient)orchestrator!;
                 var coordinator = new BootstrapAttestationCoordinator(
                     files,
@@ -861,7 +1095,7 @@ public sealed class WorkerRuntimeFactory(
                 configuration.NodeId,
                 configuration.KeyId,
                 unsafeOutcome: _ => control.MarkNotReady("journal-outcome-unknown"),
-                completed: state.RecordCompleted,
+                completed: duration => state.RecordCompleted(duration),
                 failed: state.RecordFailed,
                 timeProvider: timeProvider);
             scheduler = new ConcurrentJobScheduler(control, source, executor, reporter);
@@ -990,7 +1224,7 @@ public sealed class WorkerRuntimeFactory(
             orchestrator,
             assignments,
             state,
-            new WindowsTelemetryCollector(),
+            new WindowsTelemetryCollector(auxiliaryProcessProvider: ollamaGuard),
             ollama,
             pipe,
             logs,
@@ -1152,7 +1386,7 @@ public sealed class WorkerRuntimeFactory(
             configuration.NodeId,
             configuration.KeyId,
             unsafeOutcome: _ => control.MarkNotReady("journal-outcome-unknown"),
-            completed: state.RecordCompleted,
+            completed: duration => state.RecordCompleted(duration),
             failed: state.RecordFailed,
             timeProvider: timeProvider);
         var scheduler = new ConcurrentJobScheduler(control, source, executor, reporter);
@@ -1190,11 +1424,102 @@ public sealed class WorkerRuntimeFactory(
             appliedState?.Model);
     }
 
-    private static bool ReadyStateIsUsable(
+    internal static AppliedManifestState? SelectReadyAppliedState(
+        AppliedManifestState? current,
+        AppliedManifestState? prior,
+        WorkerReadyStateRecord? ready,
+        ManifestTrustStateRecord? trust,
+        WorkerConfiguration configuration,
+        ManifestTrustPins pins,
+        DateTimeOffset now) => SelectReadyAppliedState(
+            current,
+            prior,
+            ready,
+            trust,
+            configuration.NodeId,
+            configuration.KeyId,
+            WorkerInstalledVersion.Current,
+            pins,
+            now);
+
+    internal static AppliedManifestState? SelectReadyAppliedState(
+        AppliedManifestState? current,
+        AppliedManifestState? prior,
+        WorkerReadyStateRecord? ready,
+        ManifestTrustStateRecord? trust,
+        BootstrapCoordinatorRequest request,
+        ManifestTrustPins pins,
+        DateTimeOffset now) => SelectReadyAppliedState(
+            current,
+            prior,
+            ready,
+            trust,
+            request.NodeId,
+            request.WorkerKeyId,
+            request.WorkerRuntimeVersion,
+            pins,
+            now);
+
+    private static AppliedManifestState? SelectReadyAppliedState(
+        AppliedManifestState? current,
+        AppliedManifestState? prior,
+        WorkerReadyStateRecord? ready,
+        ManifestTrustStateRecord? trust,
+        string nodeId,
+        string keyId,
+        string workerRuntimeVersion,
+        ManifestTrustPins pins,
+        DateTimeOffset now)
+    {
+        if (current is not null && ReadyStateIsUsable(
+                ready,
+                trust,
+                current,
+                nodeId,
+                keyId,
+                workerRuntimeVersion,
+                pins,
+                now))
+        {
+            return current;
+        }
+
+        return prior is not null && ReadyStateIsUsable(
+            ready,
+            trust,
+            prior,
+            nodeId,
+            keyId,
+            workerRuntimeVersion,
+            pins,
+            now)
+            ? prior
+            : null;
+    }
+
+    internal static bool ReadyStateIsUsable(
         WorkerReadyStateRecord? ready,
         ManifestTrustStateRecord? trust,
         AppliedManifestState applied,
         WorkerConfiguration configuration,
+        ManifestTrustPins pins,
+        DateTimeOffset now) => ReadyStateIsUsable(
+            ready,
+            trust,
+            applied,
+            configuration.NodeId,
+            configuration.KeyId,
+            WorkerInstalledVersion.Current,
+            pins,
+            now);
+
+    internal static bool ReadyStateIsUsable(
+        WorkerReadyStateRecord? ready,
+        ManifestTrustStateRecord? trust,
+        AppliedManifestState applied,
+        string nodeId,
+        string keyId,
+        string workerRuntimeVersion,
         ManifestTrustPins pins,
         DateTimeOffset now)
     {
@@ -1210,12 +1535,14 @@ public sealed class WorkerRuntimeFactory(
             var trustVerifiedAt = ProtocolTime.ParseTimestamp(
                 ready.TrustVerifiedAt,
                 "ready.trustVerifiedAt");
-            _ = ProtocolTime.ParseTimestamp(trust.VerifiedAt, "trust.verifiedAt");
+            var persistedTrustVerifiedAt = ProtocolTime.ParseTimestamp(
+                trust.VerifiedAt,
+                "trust.verifiedAt");
             return ready.SchemaVersion == 1
                 && ready.Ready
-                && ready.NodeId == configuration.NodeId
-                && ready.KeyId == configuration.KeyId
-                && ready.WorkerRuntimeVersion == WorkerInstalledVersion.Current
+                && ready.NodeId == nodeId
+                && ready.KeyId == keyId
+                && ready.WorkerRuntimeVersion == workerRuntimeVersion
                 && ready.ManifestSequence == applied.ManifestSequence
                 && ready.ManifestHash == applied.ManifestHash
                 && ready.ContentContractHash == applied.ContentContractHash
@@ -1241,15 +1568,39 @@ public sealed class WorkerRuntimeFactory(
                 && !string.IsNullOrWhiteSpace(trust.ReleaseKeyId)
                 && trust.DelegationSequence >= 1
                 && HchDigest.IsLowerSha256(trust.DelegationHash)
-                && trust.ManifestSequence == applied.ManifestSequence
-                && trust.ManifestHash == applied.ManifestHash
-                && trust.ContentContractHash == applied.ContentContractHash
-                && trust.PolicyHash == applied.PolicyHash;
+                && persistedTrustVerifiedAt <= now.AddMinutes(5)
+                && TrustStateAuthorizesAppliedContract(trust, applied);
         }
         catch (ProtocolValidationException)
         {
             return false;
         }
+    }
+
+    private static bool TrustStateAuthorizesAppliedContract(
+        ManifestTrustStateRecord trust,
+        AppliedManifestState applied)
+    {
+        if (!HchDigest.IsLowerSha256(trust.ManifestHash)
+            || !HchDigest.IsLowerSha256(trust.ContentContractHash)
+            || !HchDigest.IsLowerSha256(trust.PolicyHash)
+            || !HchDigest.IsLowerSha256(applied.ManifestHash)
+            || !HchDigest.IsLowerSha256(applied.ContentContractHash)
+            || !HchDigest.IsLowerSha256(applied.PolicyHash)
+            || trust.ManifestSequence < applied.ManifestSequence
+            || trust.ContentContractHash != applied.ContentContractHash
+            || trust.PolicyHash != applied.PolicyHash)
+        {
+            return false;
+        }
+
+        // Persisting a newly signature-verified compatible manifest advances the
+        // anti-rollback pin before bootstrap. If bootstrap then fails transiently,
+        // the previous applied content contract remains safe to run. At the same
+        // sequence, however, a different manifest hash is equivocation and must
+        // fail closed.
+        return trust.ManifestSequence > applied.ManifestSequence
+            || trust.ManifestHash == applied.ManifestHash;
     }
 
     private static DateTimeOffset? ReadyUntil(WorkerReadyStateRecord? ready)
@@ -1269,7 +1620,7 @@ public sealed class WorkerRuntimeFactory(
         }
     }
 
-    private static bool IsTransientBootstrapFailure(Exception error) => error switch
+    internal static bool IsTransientBootstrapFailure(Exception error) => error switch
     {
         OrchestratorRequestException request => request.Retryable,
         WorkerServiceException service => service.Code is

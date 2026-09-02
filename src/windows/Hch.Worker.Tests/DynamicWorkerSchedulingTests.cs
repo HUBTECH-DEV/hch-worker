@@ -46,7 +46,13 @@ public sealed class DynamicWorkerSchedulingTests
         var running = await controller.StartAsync(timeout.Token);
         Assert.True(running.AcceptingClaims);
         Assert.Equal(2, running.MaxConcurrentJobs);
-        control.SetGrantedCapacity(1, "test-grant");
+        control.ApplyHeartbeatDecision(
+            grantedCapacity: 1,
+            claimAllowed: true,
+            recommendedClaimCount: 1,
+            DateTimeOffset.UtcNow.AddMinutes(2),
+            "claim-recommended",
+            "test-heartbeat");
         await source.FirstClaim.Task.WaitAsync(timeout.Token);
 
         Assert.True(source.ClaimCalls >= 1);

@@ -15,6 +15,278 @@ namespace Hch.Worker.Tests;
 public sealed class TraySecurityTests
 {
     [Fact]
+    public async Task StalledServerAttestationUsesTheOperationDeadlineAndSendsNoFrame()
+    {
+        string nodeId = $"attestation-stalled-{Guid.NewGuid():N}";
+        string pipeName = IpcProtocol.PipeName(nodeId);
+        await using var peer = new NamedPipeServerStream(
+            pipeName,
+            PipeDirection.InOut,
+            1,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous);
+        using var releaseAuthentication = new ManualResetEventSlim();
+        var authenticator = new BlockingAuthenticator(releaseAuthentication);
+        var client = new NamedPipeWorkerClient(
+            nodeId,
+            authenticator,
+            operationTimeout: TimeSpan.FromMilliseconds(250));
+        using var globalTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        byte[] observed = new byte[1];
+        Task server = Task.Run(async () =>
+        {
+            await peer.WaitForConnectionAsync(globalTimeout.Token);
+            connected.SetResult();
+            int count = await peer.ReadAsync(observed, globalTimeout.Token);
+            Assert.Equal(0, count);
+        }, globalTimeout.Token);
+
+        try
+        {
+            Task<WorkerSnapshotPayload> request = client.GetSnapshotAsync(globalTimeout.Token);
+            await connected.Task.WaitAsync(globalTimeout.Token);
+            TimeoutException error = await Assert.ThrowsAsync<TimeoutException>(() => request);
+            Assert.Equal("ipc-operation-timeout", error.Message);
+            Assert.Equal(1, authenticator.Calls);
+            await server;
+            Assert.Equal(0, observed[0]);
+        }
+        finally
+        {
+            releaseAuthentication.Set();
+            CryptographicOperations.ZeroMemory(observed);
+        }
+    }
+
+    [Fact]
+    public async Task ConnectedPeerThatNeverRepliesHitsTheFastCommandResponseDeadline()
+    {
+        string nodeId = $"stalled-{Guid.NewGuid():N}";
+        string pipeName = IpcProtocol.PipeName(nodeId);
+        await using var stalledPeer = new NamedPipeServerStream(
+            pipeName,
+            PipeDirection.InOut,
+            1,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous);
+        var client = new NamedPipeWorkerClient(
+            nodeId,
+            new AllowingAuthenticator(),
+            operationTimeout: TimeSpan.FromMilliseconds(250));
+        using var globalTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePeer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task server = Task.Run(async () =>
+        {
+            await stalledPeer.WaitForConnectionAsync(globalTimeout.Token);
+            connected.SetResult();
+            await releasePeer.Task.WaitAsync(globalTimeout.Token);
+        }, globalTimeout.Token);
+
+        try
+        {
+            Task<WorkerSnapshotPayload> request = client.GetSnapshotAsync(globalTimeout.Token);
+            await connected.Task.WaitAsync(globalTimeout.Token);
+            TimeoutException error = await Assert.ThrowsAsync<TimeoutException>(() => request);
+            Assert.Equal("ipc-operation-timeout", error.Message);
+        }
+        finally
+        {
+            releasePeer.TrySetResult();
+            await server;
+        }
+    }
+
+    [Fact]
+    public async Task StopCanCompleteAfterTheFailFastDeadlineButBeforeItsCommandDeadline()
+    {
+        string nodeId = $"stop-long-{Guid.NewGuid():N}";
+        await using var peer = new NamedPipeServerStream(
+            IpcProtocol.PipeName(nodeId),
+            PipeDirection.InOut,
+            1,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous);
+        var client = new NamedPipeWorkerClient(
+            nodeId,
+            new AllowingAuthenticator(),
+            operationTimeout: TimeSpan.FromMilliseconds(250),
+            longRunningOperationTimeout: TimeSpan.FromSeconds(2));
+        using var globalTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        Task server = Task.Run(async () =>
+        {
+            await peer.WaitForConnectionAsync(globalTimeout.Token);
+            IpcRequest request = await IpcFraming.ReadAsync<IpcRequest>(peer, globalTimeout.Token);
+            Assert.Equal(IpcCommand.Stop, request.Command);
+            await Task.Delay(TimeSpan.FromMilliseconds(500), globalTimeout.Token);
+            await IpcFraming.WriteAsync(
+                peer,
+                IpcResponse.Ok(
+                    request.RequestId,
+                    new CommandAcceptedPayload("Stopped", DateTimeOffset.UtcNow)),
+                globalTimeout.Token);
+        }, globalTimeout.Token);
+
+        CommandAcceptedPayload response = await client.StopAsync(globalTimeout.Token);
+
+        Assert.Equal("Stopped", response.State);
+        await server;
+    }
+
+    [Fact]
+    public async Task EnrollmentCanCompleteAfterTheFailFastDeadlineButBeforeItsCommandDeadline()
+    {
+        string nodeId = $"enrollment-long-{Guid.NewGuid():N}";
+        await using var peer = new NamedPipeServerStream(
+            IpcProtocol.PipeName(nodeId),
+            PipeDirection.InOut,
+            1,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous);
+        var client = new NamedPipeWorkerClient(
+            nodeId,
+            new AllowingAuthenticator(),
+            operationTimeout: TimeSpan.FromMilliseconds(250),
+            longRunningOperationTimeout: TimeSpan.FromSeconds(2));
+        using var globalTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        byte[] token = RandomNumberGenerator.GetBytes(32);
+        try
+        {
+            Task server = Task.Run(async () =>
+            {
+                await peer.WaitForConnectionAsync(globalTimeout.Token);
+                IpcRequest request = await IpcFraming.ReadAsync<IpcRequest>(peer, globalTimeout.Token);
+                Assert.Equal(IpcCommand.SubmitEnrollmentToken, request.Command);
+                EnrollmentTokenPayload received = IpcValidation.Payload<EnrollmentTokenPayload>(request.Payload);
+                try
+                {
+                    Assert.Equal(token, received.TokenUtf8);
+                }
+                finally
+                {
+                    received.Clear();
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(500), globalTimeout.Token);
+                await IpcFraming.WriteAsync(
+                    peer,
+                    IpcResponse.Ok(
+                        request.RequestId,
+                        new OperationalEnrollmentCompletedPayload(
+                            OperationalEnrollmentContract.Protocol,
+                            nodeId,
+                            Guid.NewGuid().ToString("D"),
+                            "SHA256:worker",
+                            Guid.NewGuid().ToString("D"),
+                            "owner@hubtech.online",
+                            Guid.NewGuid().ToString("D"),
+                            "SHA256:owner",
+                            "active",
+                            DateTimeOffset.UtcNow)),
+                    globalTimeout.Token);
+            }, globalTimeout.Token);
+
+            OperationalEnrollmentCompletedPayload response = await client.SubmitEnrollmentTokenAsync(
+                token,
+                Guid.NewGuid().ToString("D"),
+                "SHA256:owner",
+                globalTimeout.Token);
+
+            Assert.Equal(nodeId, response.NodeId);
+            await server;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(token);
+        }
+    }
+
+    [Fact]
+    public async Task LongRunningCommandStillHasAnEffectiveBoundedDeadline()
+    {
+        string nodeId = $"stop-deadline-{Guid.NewGuid():N}";
+        await using var peer = new NamedPipeServerStream(
+            IpcProtocol.PipeName(nodeId),
+            PipeDirection.InOut,
+            1,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous);
+        var client = new NamedPipeWorkerClient(
+            nodeId,
+            new AllowingAuthenticator(),
+            operationTimeout: TimeSpan.FromMilliseconds(100),
+            longRunningOperationTimeout: TimeSpan.FromMilliseconds(500));
+        using var globalTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var requestReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePeer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task server = Task.Run(async () =>
+        {
+            await peer.WaitForConnectionAsync(globalTimeout.Token);
+            IpcRequest request = await IpcFraming.ReadAsync<IpcRequest>(peer, globalTimeout.Token);
+            Assert.Equal(IpcCommand.Stop, request.Command);
+            requestReceived.SetResult();
+            await releasePeer.Task.WaitAsync(globalTimeout.Token);
+        }, globalTimeout.Token);
+
+        try
+        {
+            Task<CommandAcceptedPayload> command = client.StopAsync(globalTimeout.Token);
+            await requestReceived.Task.WaitAsync(globalTimeout.Token);
+            await Task.Delay(TimeSpan.FromMilliseconds(200), globalTimeout.Token);
+            Assert.False(command.IsCompleted);
+            TimeoutException error = await Assert.ThrowsAsync<TimeoutException>(() => command);
+            Assert.Equal("ipc-operation-timeout", error.Message);
+        }
+        finally
+        {
+            releasePeer.TrySetResult();
+            await server;
+        }
+    }
+
+    [Fact]
+    public async Task PeriodicRefreshSkipsWhileAStalledRefreshOwnsTheSingleFlightGate()
+    {
+        string nodeId = $"refresh-stalled-{Guid.NewGuid():N}";
+        string pipeName = IpcProtocol.PipeName(nodeId);
+        await using var stalledPeer = new NamedPipeServerStream(
+            pipeName,
+            PipeDirection.InOut,
+            1,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous);
+        var client = new NamedPipeWorkerClient(
+            nodeId,
+            new AllowingAuthenticator(),
+            operationTimeout: TimeSpan.FromMilliseconds(250));
+        var viewModel = new WorkerOptionsViewModel(client);
+        using var globalTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releasePeer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task server = Task.Run(async () =>
+        {
+            await stalledPeer.WaitForConnectionAsync(globalTimeout.Token);
+            connected.SetResult();
+            await releasePeer.Task.WaitAsync(globalTimeout.Token);
+        }, globalTimeout.Token);
+
+        try
+        {
+            Task<bool> firstRefresh = viewModel.TryRefreshAsync(globalTimeout.Token);
+            await connected.Task.WaitAsync(globalTimeout.Token);
+            Assert.False(await viewModel.TryRefreshAsync(globalTimeout.Token));
+            Assert.True(await firstRefresh.WaitAsync(globalTimeout.Token));
+            Assert.Equal("Serviço indisponível. O tray permanece aberto e tentará novamente.", viewModel.StatusMessage);
+        }
+        finally
+        {
+            releasePeer.TrySetResult();
+            await server;
+        }
+    }
+
+    [Fact]
     public async Task PipeSquatterReceivesNoFrameWhenServerAttestationFails()
     {
         string nodeId = $"squatter-{Guid.NewGuid():N}";
@@ -33,7 +305,18 @@ public sealed class TraySecurityTests
         {
             Task server = Task.Run(async () =>
             {
-                await squatter.WaitForConnectionAsync(timeout.Token);
+                try
+                {
+                    await squatter.WaitForConnectionAsync(timeout.Token);
+                }
+                catch (IOException) when (!squatter.IsConnected)
+                {
+                    // A rejected peer can close before the server-side connect
+                    // completion is delivered. That is an equivalent proof that
+                    // no enrollment frame reached the untrusted process.
+                    return;
+                }
+
                 int count = await squatter.ReadAsync(observed, timeout.Token);
                 Assert.Equal(0, count);
             }, timeout.Token);
@@ -309,6 +592,26 @@ public sealed class TraySecurityTests
     {
         public void Authenticate(NamedPipeClientStream pipe) =>
             throw new UnauthorizedAccessException("test-pipe-server-untrusted");
+    }
+
+    private sealed class AllowingAuthenticator : ILocalPipeServerAuthenticator
+    {
+        public void Authenticate(NamedPipeClientStream pipe)
+        {
+        }
+    }
+
+    private sealed class BlockingAuthenticator(ManualResetEventSlim release) : ILocalPipeServerAuthenticator
+    {
+        private int calls;
+
+        public int Calls => Volatile.Read(ref calls);
+
+        public void Authenticate(NamedPipeClientStream pipe)
+        {
+            Interlocked.Increment(ref calls);
+            release.Wait();
+        }
     }
 
     private sealed class ProofFixture : IDisposable

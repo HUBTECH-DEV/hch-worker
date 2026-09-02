@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Security.AccessControl;
@@ -70,7 +71,8 @@ public sealed class WindowsLegacyWorkerRuntimePreflight : ILegacyWorkerRuntimePr
         }
         catch (Exception error) when (error is Win32Exception or IOException
             or UnauthorizedAccessException or SecurityException or InvalidCastException
-            or OverflowException)
+            or OverflowException or ArgumentException or NotSupportedException
+            or PathTooLongException)
         {
             throw new LegacyMigrationException("legacy-runtime-preflight-unverifiable");
         }
@@ -114,6 +116,8 @@ public sealed class WindowsLegacyWorkerRuntimePreflight : ILegacyWorkerRuntimePr
         }
 
         string imagePath = RequiredRegistryString(key, "ImagePath");
+        string executablePath = ResolveServiceExecutable(imagePath);
+        (string executableVersion, string executableSha256) = CaptureExecutable(executablePath);
         string accountName = RequiredRegistryString(key, "ObjectName");
         int start = RequiredRegistryInteger(key, "Start");
         int type = RequiredRegistryInteger(key, "Type");
@@ -135,12 +139,99 @@ public sealed class WindowsLegacyWorkerRuntimePreflight : ILegacyWorkerRuntimePr
         return new LegacyServiceDefinitionReceipt(
             serviceName,
             imagePath,
+            executablePath,
+            executableVersion,
+            executableSha256,
             accountName,
             start,
             type,
             delayed,
             failureActionsHash,
             ReadServiceSecurityDescriptor(service));
+    }
+
+    private static string ResolveServiceExecutable(string imagePath)
+    {
+        ReadOnlySpan<char> command = imagePath.AsSpan().Trim();
+        if (command.IsEmpty)
+        {
+            throw new LegacyMigrationException("legacy-service-executable-invalid");
+        }
+
+        ReadOnlySpan<char> executable;
+        if (command[0] == '"')
+        {
+            int closingQuote = command[1..].IndexOf('"');
+            if (closingQuote < 0)
+            {
+                throw new LegacyMigrationException("legacy-service-executable-invalid");
+            }
+
+            closingQuote++;
+            executable = command[1..closingQuote];
+            ReadOnlySpan<char> arguments = command[(closingQuote + 1)..];
+            if (!arguments.IsEmpty && !char.IsWhiteSpace(arguments[0]))
+            {
+                throw new LegacyMigrationException("legacy-service-executable-invalid");
+            }
+        }
+        else
+        {
+            int firstWhitespace = command.IndexOfAny(" \t\r\n");
+            executable = firstWhitespace < 0 ? command : command[..firstWhitespace];
+        }
+
+        string candidate = executable.ToString();
+        if (!Path.IsPathFullyQualified(candidate)
+            || candidate.StartsWith("\\\\", StringComparison.Ordinal))
+        {
+            throw new LegacyMigrationException("legacy-service-executable-invalid");
+        }
+
+        string path = Path.GetFullPath(candidate);
+        if (!File.Exists(path)
+            || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0
+            || !Path.GetFileName(path).Equals(
+                "HchEditorialWorkerService.exe",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new LegacyMigrationException("legacy-service-executable-invalid");
+        }
+
+        return path;
+    }
+
+    private static (string Version, string Sha256) CaptureExecutable(string executablePath)
+    {
+        // Deny concurrent write/delete while reading both the Win32 version
+        // resource and the bytes whose hash is bound into migration evidence.
+        using var stream = new FileStream(
+            executablePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            128 * 1024,
+            FileOptions.SequentialScan);
+        FileVersionInfo version = FileVersionInfo.GetVersionInfo(executablePath);
+        if (version.FileMajorPart != 3
+            || version.FileMinorPart != 1
+            || version.FileBuildPart is not (0 or 1)
+            || version.FilePrivatePart != 0)
+        {
+            throw new LegacyMigrationException("legacy-source-version-unsupported");
+        }
+
+        byte[] digest = SHA256.HashData(stream);
+        try
+        {
+            return (
+                $"{version.FileMajorPart}.{version.FileMinorPart}.{version.FileBuildPart}",
+                Convert.ToHexStringLower(digest));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(digest);
+        }
     }
 
     private static string ReadServiceSecurityDescriptor(SafeServiceHandle service)

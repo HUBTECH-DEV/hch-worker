@@ -1,9 +1,12 @@
+using System.IO.Pipes;
 using Hch.Worker.Core;
 using Hch.Worker.Ollama;
 using Hch.Worker.Protocol;
+using Hch.Worker.Security;
 using Hch.Worker.Service;
 using Hch.Worker.Windows;
 using Hch.Worker.IPC.Contracts;
+using System.Text.Json;
 
 namespace Hch.Worker.Tests;
 
@@ -247,7 +250,12 @@ public sealed class ServiceRuntimeTests
         var control = new WorkerControlState();
         control.MarkReady();
         control.Start();
-        control.SetGrantedCapacity(1);
+        control.ApplyHeartbeatDecision(
+            grantedCapacity: 1,
+            claimAllowed: true,
+            recommendedClaimCount: 1,
+            claimAuthorizationValidUntil: DateTimeOffset.UtcNow.AddMinutes(2),
+            claimReason: "claim-recommended");
         var executor = new CancellationExecutor();
         var reporter = new FailureRecorder();
         await using var scheduler = new ConcurrentJobScheduler(
@@ -300,6 +308,112 @@ public sealed class ServiceRuntimeTests
     }
 
     [Fact]
+    public void NewerCompatibleTrustKeepsThePreviouslyAppliedReadyStateUsable()
+    {
+        var now = DateTimeOffset.Parse("2026-09-02T14:00:00Z");
+        using var root = Ed25519Identity.Generate();
+        var pins = new ManifestTrustPins(
+            "hch-root-v1",
+            root.Fingerprint,
+            root.ExportSubjectPublicKeyInfo());
+        WorkerConfiguration configuration = WorkerConfigurationStore.CreatePausedDefault(
+            "node-compatible-trust",
+            "worker-key:compatible-trust");
+        AppliedManifestState applied = AppliedState();
+        WorkerReadyStateRecord ready = ReadyState(applied, configuration, now);
+        ManifestTrustStateRecord trust = TrustState(
+            applied,
+            pins,
+            now,
+            applied.ManifestSequence + 1,
+            new string('5', 64));
+
+        Assert.True(WorkerRuntimeFactory.ReadyStateIsUsable(
+            ready,
+            trust,
+            applied,
+            configuration,
+            pins,
+            now));
+    }
+
+    [Fact]
+    public void NewerTrustCannotAuthorizeAChangedContentOrPolicyContract()
+    {
+        var now = DateTimeOffset.Parse("2026-09-02T14:00:00Z");
+        using var root = Ed25519Identity.Generate();
+        var pins = new ManifestTrustPins(
+            "hch-root-v1",
+            root.Fingerprint,
+            root.ExportSubjectPublicKeyInfo());
+        WorkerConfiguration configuration = WorkerConfigurationStore.CreatePausedDefault(
+            "node-incompatible-trust",
+            "worker-key:incompatible-trust");
+        AppliedManifestState applied = AppliedState();
+        WorkerReadyStateRecord ready = ReadyState(applied, configuration, now);
+
+        ManifestTrustStateRecord changedContent = TrustState(
+            applied,
+            pins,
+            now,
+            applied.ManifestSequence + 1,
+            new string('5', 64),
+            contentContractHash: new string('6', 64));
+        ManifestTrustStateRecord changedPolicy = TrustState(
+            applied,
+            pins,
+            now,
+            applied.ManifestSequence + 1,
+            new string('5', 64),
+            policyHash: new string('7', 64));
+
+        Assert.False(WorkerRuntimeFactory.ReadyStateIsUsable(
+            ready,
+            changedContent,
+            applied,
+            configuration,
+            pins,
+            now));
+        Assert.False(WorkerRuntimeFactory.ReadyStateIsUsable(
+            ready,
+            changedPolicy,
+            applied,
+            configuration,
+            pins,
+            now));
+    }
+
+    [Fact]
+    public void EqualSequenceWithDifferentManifestHashFailsClosed()
+    {
+        var now = DateTimeOffset.Parse("2026-09-02T14:00:00Z");
+        using var root = Ed25519Identity.Generate();
+        var pins = new ManifestTrustPins(
+            "hch-root-v1",
+            root.Fingerprint,
+            root.ExportSubjectPublicKeyInfo());
+        WorkerConfiguration configuration = WorkerConfigurationStore.CreatePausedDefault(
+            "node-equivocated-trust",
+            "worker-key:equivocated-trust");
+        AppliedManifestState applied = AppliedState();
+        WorkerReadyStateRecord ready = ReadyState(applied, configuration, now);
+        ManifestTrustStateRecord trust = TrustState(
+            applied,
+            pins,
+            now,
+            applied.ManifestSequence,
+            new string('5', 64));
+
+        Assert.False(WorkerRuntimeFactory.ReadyStateIsUsable(
+            ready,
+            trust,
+            applied,
+            configuration,
+            pins,
+            now));
+    }
+
+    [Fact]
     public async Task DashboardProgressPreservesPercentAndRealClaimBatchPosition()
     {
         var registry = new AssignmentRuntimeRegistry();
@@ -340,6 +454,253 @@ public sealed class ServiceRuntimeTests
 
         registry.Finish("assignment-a");
         registry.Finish("assignment-b");
+    }
+
+    [Fact]
+    public void DashboardMetricsUseObservedQueueOutcomesResourcesAndBoundedHistory()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-09-02T12:00:00Z"));
+        var state = new WorkerRuntimeState(clock, new FixedServiceStateProvider("Running"));
+        WorkerConfiguration configuration = WorkerConfigurationStore.CreatePausedDefault(
+            "node-dashboard-metrics",
+            "SHA256:" + new string('A', 43));
+        var metadata = new WorkerRuntimeMetadata(
+            availableVersion: "4.0.0",
+            updateAvailable: false,
+            updateCompatible: true,
+            manifestStatus: "applied-contract-valid",
+            manifestSequence: 1,
+            contentContractHash: new string('a', 64),
+            readyUntil: clock.GetUtcNow().AddHours(1),
+            trustStatus: "verified",
+            ollamaModel: "model:test");
+        var control = new WorkerControlState(timeProvider: clock);
+        control.MarkReady();
+        state.RecordHeartbeat(clock.GetUtcNow(), TimeSpan.FromMilliseconds(25), claimableQueueDepth: 7);
+        state.RecordTelemetry(new WindowsTelemetrySnapshot(
+            clock.GetUtcNow(),
+            Environment.ProcessId,
+            12.5,
+            32.5,
+            512,
+            1024,
+            16_384,
+            8_192,
+            100,
+            200,
+            300,
+            400,
+            42,
+            2_048,
+            "GPU test",
+            8_192,
+            AuxiliaryProcessCount: 1));
+        state.RecordCompleted(TimeSpan.FromSeconds(120));
+
+        WorkerSnapshotPayload initial = state.Snapshot(configuration, metadata, control.Snapshot, []);
+        Assert.Equal("Running", initial.ServiceState);
+        Assert.Equal(7, initial.QueueDepth);
+        Assert.Equal(120, initial.AverageDurationSeconds);
+        Assert.Null(initial.ThroughputJobsPerHour);
+        Assert.Equal("GPU test", initial.Resources.GpuName.Value);
+        Assert.Equal(8_192, initial.Resources.VramTotalBytes.Value);
+        Assert.Equal(1, initial.Resources.AuxiliaryProcessCount);
+
+        clock.Advance(TimeSpan.FromMinutes(10));
+        state.RecordHeartbeat(clock.GetUtcNow(), TimeSpan.FromMilliseconds(30), claimableQueueDepth: 4);
+        state.RecordOperationalSample(control.Snapshot);
+        WorkerSnapshotPayload later = state.Snapshot(configuration, metadata, control.Snapshot, []);
+
+        Assert.Equal(4, later.QueueDepth);
+        Assert.Equal(6, later.ThroughputJobsPerHour);
+        OperationalHistoryPointPayload history = Assert.Single(later.OperationalHistory);
+        Assert.Equal(4, history.QueueDepth);
+        Assert.Equal(1, history.CompletedJobs);
+        Assert.Equal(6, history.ThroughputJobsPerHour);
+
+        for (int index = 0; index < WorkerRuntimeState.MaximumOperationalHistoryPoints + 10; index++)
+        {
+            clock.Advance(WorkerRuntimeState.OperationalHistoryInterval);
+            state.RecordOperationalSample(control.Snapshot);
+        }
+
+        WorkerSnapshotPayload bounded = state.Snapshot(configuration, metadata, control.Snapshot, []);
+        Assert.Equal(WorkerRuntimeState.MaximumOperationalHistoryPoints, bounded.OperationalHistory.Count);
+        Assert.Null(bounded.QueueDepth);
+    }
+
+    [Theory]
+    [InlineData("{\"claimable\":9,\"generating\":2,\"futureTotal\":11,\"claimableByTier\":{\"minimum\":9}}", 9)]
+    [InlineData("{\"claimable\":null,\"generating\":0,\"futureTotal\":0,\"claimableByTier\":{\"minimum\":0}}", null)]
+    [InlineData("{\"claimable\":-1,\"generating\":0,\"futureTotal\":0,\"claimableByTier\":{\"minimum\":0}}", null)]
+    [InlineData("{\"claimable\":1,\"generating\":0,\"futureTotal\":0,\"claimableByTier\":{\"minimum\":1}}", null)]
+    [InlineData("{\"claimable\":1,\"generating\":0,\"futureTotal\":1,\"claimableByTier\":{\"minimum\":2}}", null)]
+    [InlineData("{\"claimable\":1,\"generating\":0,\"futureTotal\":1,\"claimableByTier\":{\"Minimum\":1}}", null)]
+    [InlineData("{}", null)]
+    public void QueueDepthComesOnlyFromAValidSignedHeartbeatWorkload(
+        string json,
+        int? expected)
+    {
+        JsonElement workload = JsonSerializer.Deserialize<JsonElement>(json);
+        Assert.Equal(expected, WorkerServiceRuntime.ReadQueueDepth(workload));
+    }
+
+    [Fact]
+    public void AssignmentDurationUsesTheObservedExecutionStart()
+    {
+        var clock = new ManualTimeProvider(DateTimeOffset.Parse("2026-09-02T12:00:00Z"));
+        var registry = new AssignmentRuntimeRegistry(clock);
+        _ = registry.Begin(Assignment("assignment-duration"));
+
+        clock.Advance(TimeSpan.FromSeconds(75));
+
+        Assert.Equal(TimeSpan.FromSeconds(75), registry.Elapsed("assignment-duration", clock.GetUtcNow()));
+        registry.Finish("assignment-duration");
+        Assert.Null(registry.Elapsed("assignment-duration", clock.GetUtcNow()));
+    }
+
+    [Fact]
+    public async Task InvalidAssignmentHeartbeatAbortsOnlyItsAssignment()
+    {
+        var registry = new AssignmentRuntimeRegistry();
+        AssignmentExecutionLease invalid = registry.Begin(Assignment("assignment-invalid-heartbeat"));
+        AssignmentExecutionLease healthy = registry.Begin(Assignment("assignment-healthy-heartbeat"));
+        var client = new SelectiveHeartbeatClient("assignment-invalid-heartbeat");
+
+        await registry.RunHeartbeatPassAsync(client, CancellationToken.None);
+
+        Assert.True(invalid.CancellationToken.IsCancellationRequested);
+        Assert.Equal("assignment-heartbeat-response-invalid", invalid.AbortReason);
+        Assert.False(healthy.CancellationToken.IsCancellationRequested);
+        Assert.Equal(2, client.HeartbeatCalls);
+        registry.Finish("assignment-invalid-heartbeat");
+        registry.Finish("assignment-healthy-heartbeat");
+    }
+
+    [Fact]
+    public async Task UnexpectedAssignmentHeartbeatFailureAbortsOnlyItsAssignment()
+    {
+        var registry = new AssignmentRuntimeRegistry();
+        AssignmentExecutionLease invalid = registry.Begin(Assignment("assignment-unexpected-heartbeat"));
+        AssignmentExecutionLease healthy = registry.Begin(Assignment("assignment-healthy-heartbeat"));
+        var client = new SelectiveHeartbeatClient(
+            "assignment-unexpected-heartbeat",
+            unexpectedFailure: true);
+
+        await registry.RunHeartbeatPassAsync(client, CancellationToken.None);
+
+        Assert.True(invalid.CancellationToken.IsCancellationRequested);
+        Assert.Equal("assignment-heartbeat-internal-error", invalid.AbortReason);
+        Assert.False(healthy.CancellationToken.IsCancellationRequested);
+        Assert.Equal(2, client.HeartbeatCalls);
+        registry.Finish("assignment-unexpected-heartbeat");
+        registry.Finish("assignment-healthy-heartbeat");
+    }
+
+    [Fact]
+    public async Task FinishingAssignmentDuringInFlightHeartbeatDoesNotBreakThePass()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var registry = new AssignmentRuntimeRegistry();
+        _ = registry.Begin(Assignment("assignment-finishing-heartbeat"));
+        AssignmentExecutionLease healthy = registry.Begin(Assignment("assignment-healthy-heartbeat"));
+        var client = new FinishingHeartbeatClient("assignment-finishing-heartbeat");
+
+        Task heartbeatPass = registry.RunHeartbeatPassAsync(client, timeout.Token);
+        await client.FinishingHeartbeatEntered.Task.WaitAsync(timeout.Token);
+        registry.Finish("assignment-finishing-heartbeat");
+        client.ReleaseFinishingHeartbeat.TrySetResult();
+
+        await heartbeatPass.WaitAsync(timeout.Token);
+
+        Assert.False(healthy.CancellationToken.IsCancellationRequested);
+        Assert.Equal(2, client.HeartbeatCalls);
+        registry.Finish("assignment-healthy-heartbeat");
+    }
+
+    [Fact]
+    public async Task ControlPipeContinuesServingAfterAClientNeverSendsAFrame()
+    {
+        string stateRoot = Path.Combine(
+            Path.GetTempPath(),
+            "hch-worker-pipe-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        var ownerSid = WindowsServiceIdentity.GetCurrentUserSid();
+        WorkerConfiguration configuration = WorkerConfigurationStore.CreatePausedDefault(
+            "node-pipe-timeout",
+            "SHA256:" + new string('A', 43)) with
+        {
+            StateRoot = stateRoot,
+            OwnerSid = ownerSid.Value,
+        };
+        var control = new WorkerControlState();
+        var controller = new WorkerOperationalController(control, (ConcurrentJobScheduler?)null);
+        var pipeServer = new WorkerControlPipeServer(
+            configuration,
+            controller,
+            () => throw new InvalidOperationException("snapshot-unused"),
+            new SanitizedLogStore(stateRoot),
+            enrollment: null,
+            postEnrollmentActivation: null,
+            requestReadTimeout: TimeSpan.FromMilliseconds(150),
+            commandTimeout: TimeSpan.FromSeconds(2),
+            responseWriteTimeout: TimeSpan.FromSeconds(2));
+        using var globalTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        try
+        {
+            string stalledName = $"hch-worker-stalled-{Guid.NewGuid():N}";
+            await using (var stalledServer = new NamedPipeServerStream(
+                stalledName,
+                PipeDirection.InOut,
+                1,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous))
+            await using (NamedPipeClientStream stalledClient = LocalNamedPipe.CreateClient(stalledName))
+            {
+                Task connected = stalledServer.WaitForConnectionAsync(globalTimeout.Token);
+                await stalledClient.ConnectAsync(globalTimeout.Token);
+                await connected;
+
+                await pipeServer.ProcessOneAsync(stalledServer, ownerSid, globalTimeout.Token)
+                    .WaitAsync(globalTimeout.Token);
+            }
+
+            string healthyName = $"hch-worker-healthy-{Guid.NewGuid():N}";
+            await using (var healthyServer = new NamedPipeServerStream(
+                healthyName,
+                PipeDirection.InOut,
+                1,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous))
+            await using (NamedPipeClientStream healthyClient = LocalNamedPipe.CreateClient(healthyName))
+            {
+                Task connected = healthyServer.WaitForConnectionAsync(globalTimeout.Token);
+                await healthyClient.ConnectAsync(globalTimeout.Token);
+                await connected;
+                Task processing = pipeServer.ProcessOneAsync(
+                    healthyServer,
+                    ownerSid,
+                    globalTimeout.Token);
+                IpcRequest request = IpcRequest.Create(
+                    IpcCommand.Pause,
+                    EmptyPayload.Value,
+                    DateTimeOffset.UtcNow);
+                await IpcFraming.WriteAsync(healthyClient, request, globalTimeout.Token);
+                IpcResponse response = await IpcFraming.ReadAsync<IpcResponse>(
+                    healthyClient,
+                    globalTimeout.Token);
+                await processing.WaitAsync(globalTimeout.Token);
+
+                Assert.True(response.Success);
+                Assert.Equal(request.RequestId, response.RequestId);
+            }
+        }
+        finally
+        {
+            Directory.Delete(stateRoot, recursive: true);
+        }
     }
 
     private static WorkerRuntimeProfile RuntimeProfile()
@@ -384,6 +745,82 @@ public sealed class ServiceRuntimeTests
             RuntimeProfileHash = HchDigest.Sha256Hex(JcsCanonicalizer.Serialize(core)),
         };
     }
+
+    private static AppliedManifestState AppliedState()
+    {
+        WorkerRuntimeProfile profile = RuntimeProfile();
+        return new AppliedManifestState
+        {
+            SchemaVersion = 1,
+            ManifestSequence = profile.ManifestSequence,
+            ManifestHash = profile.ManifestHash,
+            ContentContractHash = new string('9', 64),
+            PolicyHash = profile.PolicyHash,
+            PromptConfigHash = profile.PromptConfigHash,
+            Provider = profile.Provider,
+            EngineAdapter = profile.EngineAdapter,
+            EngineAdapterVersion = profile.EngineAdapterVersion,
+            Model = profile.Model,
+            ModelDigest = profile.ModelDigest[7..],
+            Protocol = profile.Protocol,
+            RuntimeProfileHash = profile.RuntimeProfileHash,
+            RuntimeProfile = profile,
+        };
+    }
+
+    private static WorkerReadyStateRecord ReadyState(
+        AppliedManifestState applied,
+        WorkerConfiguration configuration,
+        DateTimeOffset now) => new()
+        {
+            SchemaVersion = 1,
+            Ready = true,
+            NodeId = configuration.NodeId,
+            KeyId = configuration.KeyId,
+            ManifestSequence = applied.ManifestSequence,
+            ManifestHash = applied.ManifestHash,
+            ContentContractHash = applied.ContentContractHash,
+            PolicyHash = applied.PolicyHash,
+            Provider = applied.Provider,
+            EngineAdapter = applied.EngineAdapter,
+            EngineAdapterVersion = applied.EngineAdapterVersion,
+            WorkerRuntimeVersion = WorkerInstalledVersion.Current,
+            RuntimeProfileHash = applied.RuntimeProfileHash,
+            CapacityPolicyHash = new string('a', 64),
+            AdaptiveWorkPolicyHash = new string('b', 64),
+            RequestedCapacity = 0,
+            GrantedCapacity = 0,
+            CapacityClass = "drain",
+            CapacityReason = "drain-requested",
+            CapacityGrantedUntil = now.AddMinutes(10).ToString("O"),
+            BootstrapSessionId = Guid.NewGuid().ToString("D"),
+            ReadyUntil = now.AddHours(1).ToString("O"),
+            AttestedAt = now.ToString("O"),
+            TrustVerifiedAt = now.ToString("O"),
+        };
+
+    private static ManifestTrustStateRecord TrustState(
+        AppliedManifestState applied,
+        ManifestTrustPins pins,
+        DateTimeOffset now,
+        long manifestSequence,
+        string manifestHash,
+        string? contentContractHash = null,
+        string? policyHash = null) => new()
+        {
+            Schema = "hch.worker-trust-state/v1",
+            SchemaVersion = 1,
+            RootKeyId = pins.RootKeyId,
+            RootFingerprint = pins.RootPublicKeyFingerprint,
+            ReleaseKeyId = "release-v1",
+            DelegationSequence = 1,
+            DelegationHash = new string('c', 64),
+            ManifestSequence = manifestSequence,
+            ManifestHash = manifestHash,
+            ContentContractHash = contentContractHash ?? applied.ContentContractHash,
+            PolicyHash = policyHash ?? applied.PolicyHash,
+            VerifiedAt = now.ToString("O"),
+        };
 
     private static WorkerAssignment Assignment(string assignmentId) => new()
     {
@@ -452,5 +889,145 @@ public sealed class ServiceRuntimeTests
         : ILegacyWorkerCutoverProbe
     {
         public LegacyWorkerCutoverEvidence Capture(string serviceName) => evidence;
+    }
+
+    private sealed class SelectiveHeartbeatClient(
+        string invalidAssignmentId,
+        bool unexpectedFailure = false) : IOrchestratorClient
+    {
+        private int heartbeatCalls;
+
+        public int HeartbeatCalls => Volatile.Read(ref heartbeatCalls);
+
+        public Task<AssignmentHeartbeatResponse> HeartbeatAssignmentAsync(
+            WorkerAssignment assignment,
+            AssignmentProgress progress,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref heartbeatCalls);
+            if (assignment.AssignmentId == invalidAssignmentId)
+            {
+                if (unexpectedFailure)
+                {
+                    throw new InvalidOperationException("simulated unexpected assignment heartbeat failure");
+                }
+
+                throw new ProtocolValidationException(
+                    "orchestrator-heartbeat-assignment-mismatch",
+                    "simulated invalid signed heartbeat response");
+            }
+
+            return Task.FromResult(SuccessfulHeartbeat(assignment));
+        }
+
+        public Task<ClaimResponse> ClaimAsync(
+            int requestedCapacity,
+            CancellationToken cancellationToken,
+            string? requestId = null,
+            bool acceptExpiredAssignmentsForRecovery = false) => throw new NotSupportedException();
+
+        public Task<NodeHeartbeatResponse> HeartbeatNodeAsync(
+            int requestedCapacity,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<CompleteAssignmentResponse> CompleteAsync(
+            WorkerAssignment assignment,
+            object draft,
+            string requestId,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<FailAssignmentResponse> FailAsync(
+            WorkerAssignment assignment,
+            string errorCode,
+            string requestId,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class FinishingHeartbeatClient(string finishingAssignmentId) : IOrchestratorClient
+    {
+        private int heartbeatCalls;
+
+        public TaskCompletionSource FinishingHeartbeatEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource ReleaseFinishingHeartbeat { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int HeartbeatCalls => Volatile.Read(ref heartbeatCalls);
+
+        public async Task<AssignmentHeartbeatResponse> HeartbeatAssignmentAsync(
+            WorkerAssignment assignment,
+            AssignmentProgress progress,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref heartbeatCalls);
+            if (assignment.AssignmentId == finishingAssignmentId)
+            {
+                FinishingHeartbeatEntered.TrySetResult();
+                await ReleaseFinishingHeartbeat.Task.WaitAsync(cancellationToken);
+                throw new ProtocolValidationException(
+                    "orchestrator-heartbeat-assignment-mismatch",
+                    "simulated response arriving after assignment completion");
+            }
+
+            return SuccessfulHeartbeat(assignment);
+        }
+
+        public Task<ClaimResponse> ClaimAsync(
+            int requestedCapacity,
+            CancellationToken cancellationToken,
+            string? requestId = null,
+            bool acceptExpiredAssignmentsForRecovery = false) => throw new NotSupportedException();
+
+        public Task<NodeHeartbeatResponse> HeartbeatNodeAsync(
+            int requestedCapacity,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<CompleteAssignmentResponse> CompleteAsync(
+            WorkerAssignment assignment,
+            object draft,
+            string requestId,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<FailAssignmentResponse> FailAsync(
+            WorkerAssignment assignment,
+            string errorCode,
+            string requestId,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private static AssignmentHeartbeatResponse SuccessfulHeartbeat(WorkerAssignment assignment) => new()
+    {
+        AssignmentId = assignment.AssignmentId,
+        GenerationPlanHash = assignment.GenerationPlanHash,
+        LeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(10).ToString("O"),
+        Liveness = new AssignmentLiveness
+        {
+            State = "starting",
+            LastProgressAt = null,
+            StaleAfterSeconds = assignment.GenerationPlan.FirstProgressGraceSeconds,
+        },
+        WorkSizing = new AssignmentWorkSizing
+        {
+            CurrentTier = assignment.GenerationPlan.TierId,
+            CurrentRank = assignment.GenerationPlan.TierRank,
+            Reason = "within-window",
+        },
+        ServerTime = DateTimeOffset.UtcNow.ToString("O"),
+    };
+
+    private sealed class FixedServiceStateProvider(string state) : IWindowsServiceStateProvider
+    {
+        public WindowsServiceStatus Collect(string serviceName, int expectedProcessId) =>
+            new(state, true);
+    }
+
+    private sealed class ManualTimeProvider(DateTimeOffset current) : TimeProvider
+    {
+        private DateTimeOffset now = current;
+
+        public override DateTimeOffset GetUtcNow() => now;
+
+        public void Advance(TimeSpan duration) => now += duration;
     }
 }

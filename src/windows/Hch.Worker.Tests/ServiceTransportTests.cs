@@ -182,9 +182,9 @@ public sealed class ServiceTransportTests
                         Reason = "requested-capacity-granted",
                         GrantedUntil = Now.AddMinutes(2).ToString("O"),
                     },
-                    Workload = System.Text.Json.JsonSerializer.SerializeToElement(new { claimable = 1 }),
-                    WorkSizing = System.Text.Json.JsonSerializer.SerializeToElement(new { algorithmVersion = "hch-adaptive-work-v1" }),
-                    Claim = System.Text.Json.JsonSerializer.SerializeToElement(new { recommended = true }),
+                    Workload = HeartbeatWorkload(),
+                    WorkSizing = HeartbeatWorkSizing(),
+                    Claim = HeartbeatClaim(),
                     Update = new WorkerUpdateAvailability
                     {
                         InstalledWorkerVersion = "4.0.0",
@@ -211,6 +211,90 @@ public sealed class ServiceTransportTests
         Assert.True(response.Update.Compatible);
         Assert.False(response.Update.UpdateAvailable);
         Assert.Equal("none", response.Update.ContentImpact);
+    }
+
+    [Theory]
+    [InlineData(true, "generated-content", "advisory")]
+    [InlineData(true, "none", "mandatory")]
+    [InlineData(false, "none", "mandatory")]
+    [InlineData(false, "generated-content", "advisory")]
+    public void NodeHeartbeatRejectsContradictoryUpdateCompatibility(
+        bool compatible,
+        string contentImpact,
+        string updateMode)
+    {
+        string requestId = Guid.NewGuid().ToString("D");
+        var response = new NodeHeartbeatResponse
+        {
+            RequestId = requestId,
+            NodeId = "node-1",
+            HeartbeatAt = Now.ToString("O"),
+            NextHeartbeatSeconds = 60,
+            Capacity = new NodeHeartbeatCapacity
+            {
+                ConfiguredCapacity = 1,
+                RequestedCapacity = 1,
+                GrantedCapacity = 1,
+                ActiveAssignments = 0,
+                AvailableSlots = 1,
+                CapacityClass = "standard",
+                Reason = "requested-capacity-granted",
+                GrantedUntil = Now.AddMinutes(2).ToString("O"),
+            },
+            Workload = HeartbeatWorkload(),
+            WorkSizing = HeartbeatWorkSizing(),
+            Claim = HeartbeatClaim(),
+            Update = new WorkerUpdateAvailability
+            {
+                InstalledWorkerVersion = "4.0.0",
+                LatestAvailableWorkerVersion = "4.0.1",
+                UpdateAvailable = true,
+                UpdateMode = updateMode,
+                Compatible = compatible,
+                ContentImpact = contentImpact,
+            },
+            ServerTime = Now.ToString("O"),
+        };
+
+        WorkerServiceException error = Assert.Throws<WorkerServiceException>(() =>
+            OrchestratorContractValidator.Validate(response, requestId, "node-1", 1));
+
+        Assert.Equal("node-heartbeat-response-invalid", error.Code);
+    }
+
+    [Theory]
+    [InlineData("{\"allowed\":false,\"recommendedCount\":1,\"reason\":\"claim-recommended\"}")]
+    [InlineData("{\"allowed\":true,\"recommendedCount\":2,\"reason\":\"claim-recommended\"}")]
+    [InlineData("{\"allowed\":true,\"recommendedCount\":1,\"reason\":\"capacity-zero\"}")]
+    [InlineData("{\"allowed\":true,\"recommendedCount\":1,\"reason\":\"claim-recommended\",\"extra\":true}")]
+    public void NodeHeartbeatRejectsInvalidClaimDirective(string claimJson)
+    {
+        string requestId = Guid.NewGuid().ToString("D");
+        NodeHeartbeatResponse response = HeartbeatResponse(
+            requestId,
+            claim: System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(claimJson));
+
+        WorkerServiceException error = Assert.Throws<WorkerServiceException>(() =>
+            OrchestratorContractValidator.Validate(response, requestId, "node-1", 1));
+
+        Assert.Equal("node-heartbeat-response-invalid", error.Code);
+    }
+
+    [Fact]
+    public void NodeHeartbeatRejectsIncompleteWorkSizing()
+    {
+        string requestId = Guid.NewGuid().ToString("D");
+        NodeHeartbeatResponse response = HeartbeatResponse(
+            requestId,
+            workSizing: System.Text.Json.JsonSerializer.SerializeToElement(new
+            {
+                algorithmVersion = "hch-adaptive-work-v1",
+            }));
+
+        WorkerServiceException error = Assert.Throws<WorkerServiceException>(() =>
+            OrchestratorContractValidator.Validate(response, requestId, "node-1", 1));
+
+        Assert.Equal("node-heartbeat-response-invalid", error.Code);
     }
 
     [Fact]
@@ -287,6 +371,76 @@ public sealed class ServiceTransportTests
             RuntimeProfileHash = new string('0', 64),
         },
     };
+
+    private static NodeHeartbeatResponse HeartbeatResponse(
+        string requestId,
+        System.Text.Json.JsonElement? claim = null,
+        System.Text.Json.JsonElement? workSizing = null) => new()
+        {
+            RequestId = requestId,
+            NodeId = "node-1",
+            HeartbeatAt = Now.ToString("O"),
+            NextHeartbeatSeconds = 60,
+            Capacity = new NodeHeartbeatCapacity
+            {
+                ConfiguredCapacity = 1,
+                RequestedCapacity = 1,
+                GrantedCapacity = 1,
+                ActiveAssignments = 0,
+                AvailableSlots = 1,
+                CapacityClass = "standard",
+                Reason = "requested-capacity-granted",
+                GrantedUntil = Now.AddMinutes(2).ToString("O"),
+            },
+            Workload = HeartbeatWorkload(),
+            WorkSizing = workSizing ?? HeartbeatWorkSizing(),
+            Claim = claim ?? HeartbeatClaim(),
+            Update = new WorkerUpdateAvailability
+            {
+                InstalledWorkerVersion = "4.0.0",
+                LatestAvailableWorkerVersion = "4.0.0",
+                UpdateAvailable = false,
+                UpdateMode = "advisory",
+                Compatible = true,
+                ContentImpact = "none",
+            },
+            ServerTime = Now.ToString("O"),
+        };
+
+    private static System.Text.Json.JsonElement HeartbeatWorkload() =>
+        System.Text.Json.JsonSerializer.SerializeToElement(new
+        {
+            claimable = 1,
+            generating = 0,
+            futureTotal = 1,
+            claimableByTier = new { minimum = 1 },
+        });
+
+    private static System.Text.Json.JsonElement HeartbeatWorkSizing() =>
+        System.Text.Json.JsonSerializer.SerializeToElement(new
+        {
+            algorithmVersion = "hch-adaptive-work-v1",
+            currentTier = "minimum",
+            currentRank = 0,
+            maxOutputTokens = 512,
+            editorialProfile = "EDITORIAL_MINIMUM",
+            minimumUnit = true,
+            reason = "within-window",
+            updatedAt = Now.ToString("O"),
+            processingWindowSeconds = 600,
+            nearWindowSeconds = 480,
+            firstProgressGraceSeconds = 60,
+            stallAfterSeconds = 60,
+            finalizationGraceSeconds = 60,
+        });
+
+    private static System.Text.Json.JsonElement HeartbeatClaim() =>
+        System.Text.Json.JsonSerializer.SerializeToElement(new
+        {
+            allowed = true,
+            recommendedCount = 1,
+            reason = "claim-recommended",
+        });
 
     private static HttpResponseMessage Json<T>(T value, HttpStatusCode status = HttpStatusCode.OK) => new(status)
     {

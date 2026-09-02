@@ -8,6 +8,7 @@ namespace Hch.Worker.Tray;
 
 public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INotifyPropertyChanged
 {
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private WorkerSnapshotPayload? _snapshot;
     private string _statusMessage = "Conectando ao serviço…";
     private bool _busy;
@@ -15,6 +16,7 @@ public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INoti
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public ObservableCollection<JobProgressView> ActiveWork { get; } = [];
+    public ObservableCollection<OperationalHistoryPointView> OperationalHistory { get; } = [];
 
     public WorkerSnapshotPayload? Snapshot
     {
@@ -49,7 +51,9 @@ public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INoti
     public string CapacityDetail => Snapshot is null
         ? "Solicitada — · livre —"
         : $"Solicitada {Snapshot.MaxConcurrentJobs} · concedida {Snapshot.GrantedCapacity} · livre {Snapshot.AvailableSlots}";
-    public string QueueText => Snapshot?.QueueDepth.ToString(CultureInfo.InvariantCulture) ?? "—";
+    public string QueueText => Snapshot?.QueueDepth is { } queueDepth
+        ? queueDepth.ToString(CultureInfo.InvariantCulture)
+        : "Não disponível";
     public string CompletedText => Snapshot?.CompletedJobs.ToString(CultureInfo.InvariantCulture) ?? "—";
     public string FailedText => Snapshot?.FailedJobs.ToString(CultureInfo.InvariantCulture) ?? "—";
     public string RetryText => Snapshot?.RetryJobs.ToString(CultureInfo.InvariantCulture) ?? "—";
@@ -58,8 +62,20 @@ public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INoti
     public string MemoryText => Bytes(Snapshot?.Resources.WorkingSetBytes);
     public string AverageMemoryText => Bytes(Snapshot?.Resources.AverageWorkingSetBytes);
     public string PeakMemoryText => Bytes(Snapshot?.Resources.PeakWorkingSetBytes);
-    public string GpuText => Metric(Snapshot?.Resources.GpuPercent, "%", "F1");
-    public string VramText => Bytes(Snapshot?.Resources.VramUsedBytes);
+    public string GpuText
+    {
+        get
+        {
+            string name = TextMetric(Snapshot?.Resources.GpuName);
+            string utilization = Metric(Snapshot?.Resources.GpuPercent, "%", "F1");
+            return name == "Não disponível"
+                ? utilization
+                : utilization == "Não disponível" ? name : $"{name} · {utilization}";
+        }
+    }
+    public string VramText => Snapshot is null
+        ? "Não disponível"
+        : $"{Bytes(Snapshot.Resources.VramUsedBytes)} / {Bytes(Snapshot.Resources.VramTotalBytes)}";
     public string NetworkText => Snapshot is null
         ? "Não disponível"
         : $"↓ {Bytes(Snapshot.Resources.NetworkReceivedBytes)}  ↑ {Bytes(Snapshot.Resources.NetworkSentBytes)}";
@@ -69,6 +85,12 @@ public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INoti
     public string UptimeText => Snapshot is null
         ? "Não disponível"
         : TimeSpan.FromSeconds(Snapshot.Resources.UptimeSeconds).ToString("d'.'hh':'mm':'ss", CultureInfo.InvariantCulture);
+    public string AverageDurationText => Snapshot?.AverageDurationSeconds is { } seconds && double.IsFinite(seconds) && seconds >= 0
+        ? $"Duração média {FormatDuration(seconds)}"
+        : "Duração média não disponível";
+    public string ThroughputText => Snapshot?.ThroughputJobsPerHour is { } throughput && double.IsFinite(throughput) && throughput >= 0
+        ? $"{throughput:F1} trabalhos/h"
+        : "Não disponível";
     public string OllamaText => Snapshot is null
         ? "Não disponível"
         : Snapshot.OllamaAvailable
@@ -84,6 +106,13 @@ public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INoti
     public string ManifestText => Snapshot is null
         ? "Não disponível"
         : $"{Snapshot.ManifestStatus} · sequência {Snapshot.ManifestSequence?.ToString(CultureInfo.InvariantCulture) ?? "—"}";
+    public string ReadyUntilText => Snapshot?.ReadyUntil is { } readyUntil
+        ? readyUntil.ToLocalTime().ToString("G", CultureInfo.CurrentCulture)
+        : "Não disponível";
+    public string ContentContractText => string.IsNullOrWhiteSpace(Snapshot?.ContentContractHash)
+        ? "Não disponível"
+        : Snapshot.ContentContractHash;
+    public string LastErrorText => Snapshot?.LastSanitizedErrorCode ?? "Nenhum erro reportado";
     public string UpdateText => Snapshot is null
         ? "Não disponível"
         : Snapshot.UpdateAvailable
@@ -91,35 +120,80 @@ public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INoti
                 ? $"{Snapshot.AvailableVersion} disponível · compatível"
                 : $"{Snapshot.AvailableVersion} disponível · requer parada"
             : "Atualizado";
-    public string ServicesText => "1 serviço Windows instalado";
+    public string ServicesText => Snapshot is null
+        ? "Serviço Windows: não disponível"
+        : $"1 serviço Windows instalado · {Snapshot.ServiceState}";
     public string ProcessesText => Snapshot is null
-        ? "N processos auxiliares ativos"
+        ? "Processos auxiliares: não disponível"
         : $"{Snapshot.Resources.AuxiliaryProcessCount} processos auxiliares ativos";
     public string JobsText => Snapshot is null
-        ? "X/Y trabalhos em execução"
+        ? "Trabalhos em execução: não disponível"
         : $"{Snapshot.ActiveJobs}/{Snapshot.GrantedCapacity} trabalhos em execução";
-    public bool CanStart => !Busy && Snapshot is { Ready: true } &&
-        Snapshot.OperationalState is not "Running" and not "Stopping" and not "Updating";
+    public bool CanStart => !Busy && SnapshotReadinessValid && SnapshotTrusted && SnapshotManifestValid &&
+        Snapshot!.OperationalState is not "Running" and not "Stopping" and not "Updating";
     public bool CanPause => !Busy && Snapshot?.OperationalState is "Running";
     public bool CanStop => !Busy && Snapshot?.OperationalState is "Running" or "Pausing" or "Paused";
-    public bool NeedsOnboarding => Snapshot is null || !Snapshot.Ready ||
-        Snapshot.TrustStatus is not "ready" and not "trusted";
+    public bool NeedsOnboarding => Snapshot is null
+        || !SnapshotReadinessValid
+        || !SnapshotTrusted
+        || !SnapshotManifestValid;
 
-    public async Task RefreshAsync(CancellationToken cancellationToken = default)
+    private bool SnapshotTrusted => Snapshot is { } snapshot
+        && OnboardingCompletionPolicy.IsTrustValid(snapshot.TrustStatus);
+
+    private bool SnapshotManifestValid => Snapshot is { } snapshot
+        && OnboardingCompletionPolicy.IsManifestValid(snapshot.ManifestStatus);
+
+    private bool SnapshotReadinessValid => Snapshot is { } snapshot
+        && OnboardingCompletionPolicy.IsReadinessValid(snapshot, DateTimeOffset.UtcNow);
+
+    public async Task RefreshAsync(CancellationToken cancellationToken = default) =>
+        _ = await RefreshCoreAsync(waitForTurn: true, cancellationToken).ConfigureAwait(true);
+
+    internal Task<bool> TryRefreshAsync(CancellationToken cancellationToken = default) =>
+        RefreshCoreAsync(waitForTurn: false, cancellationToken);
+
+    private async Task<bool> RefreshCoreAsync(
+        bool waitForTurn,
+        CancellationToken cancellationToken)
     {
+        bool entered;
+        if (waitForTurn)
+        {
+            await _refreshGate.WaitAsync(cancellationToken).ConfigureAwait(true);
+            entered = true;
+        }
+        else
+        {
+            entered = _refreshGate.Wait(0);
+        }
+
+        if (!entered)
+        {
+            return false;
+        }
+
         try
         {
             var snapshot = await client.GetSnapshotAsync(cancellationToken).ConfigureAwait(true);
             Snapshot = snapshot;
             ReplaceActiveWork(snapshot.ActiveWork);
+            ReplaceOperationalHistory(snapshot.OperationalHistory);
             StatusMessage = snapshot.LastSanitizedErrorCode is null
                 ? "Estado sincronizado com o serviço."
                 : $"Atenção: {snapshot.LastSanitizedErrorCode}";
         }
-        catch (Exception error) when (error is IOException or TimeoutException or IpcContractException or WorkerControlClientException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or TimeoutException or IpcContractException or WorkerControlClientException)
         {
             StatusMessage = "Serviço indisponível. O tray permanece aberto e tentará novamente.";
         }
+        finally
+        {
+            _refreshGate.Release();
+        }
+
+        return true;
     }
 
     public Task StartAsync(CancellationToken cancellationToken = default) =>
@@ -140,6 +214,8 @@ public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INoti
         ExecuteAsync(token => client.SetClaimBatchSizeAsync(value, token),
             $"Tamanho máximo de claim definido como {value}.", cancellationToken);
 
+    public void ReportStatus(string message) => StatusMessage = message;
+
     private async Task ExecuteAsync<T>(
         Func<CancellationToken, Task<T>> operation,
         string successMessage,
@@ -156,7 +232,8 @@ public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INoti
         {
             StatusMessage = $"Comando recusado: {error.Code}";
         }
-        catch (Exception error) when (error is IOException or TimeoutException or IpcContractException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or TimeoutException or IpcContractException)
         {
             StatusMessage = "Não foi possível comunicar com o serviço.";
         }
@@ -175,16 +252,30 @@ public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INoti
         }
     }
 
+    private void ReplaceOperationalHistory(IReadOnlyList<OperationalHistoryPointPayload> values)
+    {
+        OperationalHistory.Clear();
+        foreach (var value in values.OrderByDescending(point => point.ObservedAt))
+        {
+            OperationalHistory.Add(new OperationalHistoryPointView(value));
+        }
+    }
+
     private static string Metric(MetricPayload<double>? metric, string suffix, string format) =>
         metric is { Available: true, Value: { } value }
             ? value.ToString(format, CultureInfo.CurrentCulture) + suffix
+            : "Não disponível";
+
+    private static string TextMetric(MetricPayload<string>? metric) =>
+        metric is { Available: true, Value: { Length: > 0 } value }
+            ? value
             : "Não disponível";
 
     private static string Bytes(MetricPayload<long>? metric) => metric is { Available: true, Value: { } value }
         ? FormatBytes(value)
         : "Não disponível";
 
-    private static string FormatBytes(long value)
+    internal static string FormatBytes(long value)
     {
         string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
         var size = Math.Max(0, value);
@@ -197,6 +288,21 @@ public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INoti
         }
 
         return $"{display:F1} {units[unit]}";
+    }
+
+    internal static string FormatDuration(double seconds)
+    {
+        if (!double.IsFinite(seconds) || seconds < 0)
+        {
+            return "Não disponível";
+        }
+
+        TimeSpan duration = TimeSpan.FromSeconds(seconds);
+        return duration.TotalHours >= 1
+            ? duration.ToString("h\\:mm\\:ss", CultureInfo.CurrentCulture)
+            : duration.TotalMinutes >= 1
+                ? duration.ToString("m\\:ss", CultureInfo.CurrentCulture)
+                : $"{duration.TotalSeconds:F1} s";
     }
 
     private static string FormatAge(TimeSpan age) => age.TotalSeconds < 60
@@ -215,7 +321,9 @@ public sealed class WorkerOptionsViewModel(NamedPipeWorkerClient client) : INoti
             nameof(MemoryText), nameof(AverageMemoryText), nameof(PeakMemoryText), nameof(GpuText),
             nameof(VramText), nameof(NetworkText), nameof(DiskText), nameof(UptimeText), nameof(OllamaText),
             nameof(HeartbeatText), nameof(LatencyText), nameof(TrustText), nameof(ManifestText),
-            nameof(UpdateText), nameof(ServicesText), nameof(ProcessesText), nameof(JobsText),
+            nameof(ReadyUntilText), nameof(ContentContractText), nameof(LastErrorText),
+            nameof(AverageDurationText), nameof(ThroughputText), nameof(UpdateText),
+            nameof(ServicesText), nameof(ProcessesText), nameof(JobsText),
             nameof(CanStart), nameof(CanPause), nameof(CanStop), nameof(NeedsOnboarding),
         })
         {
@@ -233,6 +341,7 @@ public sealed record JobProgressView(JobProgressPayload Value)
     public string Phase => Value.Phase;
     public int Attempt => Value.Attempt;
     public long ContentBytes => Value.ContentBytes;
+    public string ContentBytesText => WorkerOptionsViewModel.FormatBytes(Value.ContentBytes);
     public double ItemPercent => Math.Clamp(Value.Percent ?? 0, 0, 100);
     public string ItemPercentText => Value.Percent is { } percent ? $"{percent:F0}%" : "—";
     public double BatchPercent => Value.BatchTotal > 0
@@ -241,4 +350,21 @@ public sealed record JobProgressView(JobProgressPayload Value)
     public string BatchText => Value.BatchTotal > 0
         ? $"{Value.ItemIndex}/{Value.BatchTotal}"
         : "—/—";
+    public string ObservedText => Value.ObservedAt.ToLocalTime().ToString("G", CultureInfo.CurrentCulture);
+}
+
+public sealed record OperationalHistoryPointView(OperationalHistoryPointPayload Value)
+{
+    public string ObservedText => Value.ObservedAt.ToLocalTime().ToString("G", CultureInfo.CurrentCulture);
+    public int ActiveJobs => Value.ActiveJobs;
+    public long CompletedJobs => Value.CompletedJobs;
+    public long FailedJobs => Value.FailedJobs;
+    public long RetryJobs => Value.RetryJobs;
+    public string QueueText => Value.QueueDepth?.ToString(CultureInfo.InvariantCulture) ?? "Não disponível";
+    public string ThroughputText => Value.ThroughputJobsPerHour is { } throughput && double.IsFinite(throughput) && throughput >= 0
+        ? $"{throughput:F1}/h"
+        : "Não disponível";
+    public string AverageDurationText => Value.AverageDurationSeconds is { } seconds && double.IsFinite(seconds) && seconds >= 0
+        ? WorkerOptionsViewModel.FormatDuration(seconds)
+        : "Não disponível";
 }

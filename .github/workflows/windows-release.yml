@@ -19,20 +19,6 @@ on:
         description: 'Exact immutable signed candidate artifact name'
         required: true
         type: string
-      compatibility:
-        description: 'Runtime/protocol compatibility declared in the release notes'
-        required: true
-        type: choice
-        options:
-          - compatible
-          - incompatible
-      content_impact:
-        description: 'Whether incompatibility changes generated content'
-        required: true
-        type: choice
-        options:
-          - none
-          - generated-content
 
 permissions:
   contents: read
@@ -62,8 +48,6 @@ jobs:
       RELEASE_SOURCE_COMMIT: ${{ inputs.source_commit }}
       CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
       CANDIDATE_ARTIFACT_NAME: ${{ inputs.candidate_artifact_name }}
-      RELEASE_COMPATIBILITY: ${{ inputs.compatibility }}
-      RELEASE_CONTENT_IMPACT: ${{ inputs.content_impact }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -77,18 +61,12 @@ jobs:
           $sourceCommit = $env:RELEASE_SOURCE_COMMIT
           $runId = $env:CANDIDATE_RUN_ID
           $artifactName = $env:CANDIDATE_ARTIFACT_NAME
-          $compatibility = $env:RELEASE_COMPATIBILITY
-          $contentImpact = $env:RELEASE_CONTENT_IMPACT
           $tag = "windows-v$version"
           if ($version -notmatch '^\d+\.\d+\.\d+$' `
               -or $sourceCommit -notmatch '^[0-9a-f]{40}$' `
               -or $runId -notmatch '^[1-9][0-9]*$' `
               -or $artifactName -notmatch "^hch-worker-windows-signed-$([regex]::Escape($version))-$sourceCommit-[1-9][0-9]*$") {
             throw 'Promotion inputs are not exact candidate identifiers.'
-          }
-          if (($compatibility -cne 'compatible' -or $contentImpact -cne 'none') `
-              -and ($compatibility -cne 'incompatible' -or $contentImpact -cne 'generated-content')) {
-            throw 'Compatibility and content-impact declarations are not an allowed exact pair.'
           }
           if ($env:GITHUB_REF -cne 'refs/heads/main' `
               -or '${{ github.ref_protected }}' -cne 'true' `
@@ -159,6 +137,11 @@ jobs:
           if ($probeExit -eq 0) { throw 'This Windows version already has an official GitHub release.' }
           if ($probeText -notmatch 'HTTP 404') { throw "Could not prove that the release tag is unused: $probeText" }
 
+      - name: Verify production onboarding contracts
+        shell: pwsh
+        run: |
+          ./scripts/windows/Test-HchWorkerOnboardingEndpoints.ps1
+
       - name: Verify immutable 3.1.1 bridge and independently attested fleet transition
         shell: pwsh
         run: |
@@ -167,7 +150,7 @@ jobs:
           $fleetEvidencePath = 'release-evidence/fleet/3.1.1/fleet-transition-evidence.json'
           $fleetSignaturePath = 'release-evidence/fleet/3.1.1/fleet-transition-evidence.p7s'
           if (-not (Test-Path -LiteralPath $bridgeProducerWorkflow -PathType Leaf)) {
-            throw 'The reviewed 3.1.1 bridge producer workflow is not implemented on protected main.'
+            throw 'The reviewed 3.1.1 bridge producer workflow is unavailable on protected main.'
           }
           foreach ($pin in @(
               $env:HCH_SIGNER_THUMBPRINT,
@@ -267,6 +250,16 @@ jobs:
           if ($provenance.source.commit -cne $sourceCommit) {
             throw 'Downloaded candidate provenance does not match the selected source commit.'
           }
+          $compatibility = Get-Content -LiteralPath (Join-Path $releaseRoot 'release-compatibility.json') -Raw |
+            ConvertFrom-Json -Depth 20
+          if ($compatibility.schema -cne 'hch.worker-windows-release-compatibility/v1' `
+              -or $compatibility.version -cne $version `
+              -or (($compatibility.compatibility -cne 'compatible' -or $compatibility.contentImpact -cne 'none') `
+                -and ($compatibility.compatibility -cne 'incompatible' -or $compatibility.contentImpact -cne 'generated-content'))) {
+            throw 'Signed candidate compatibility declaration is invalid.'
+          }
+          "RELEASE_COMPATIBILITY=$($compatibility.compatibility)" >> $env:GITHUB_ENV
+          "RELEASE_CONTENT_IMPACT=$($compatibility.contentImpact)" >> $env:GITHUB_ENV
 
           gh attestation verify $msi `
             --repo $env:GITHUB_REPOSITORY `
@@ -308,12 +301,20 @@ jobs:
           $notes = @(
             "Official Windows package promoted from the exact signed candidate built at $sourceCommit."
             'Gates: disposable MSI lifecycle, Defender, signed checksums, GitHub artifact attestation,'
-            'sustained canary at parallelism 1, complete/fail, restart in Paused/Drain, and recoverable rollback to 3.1.0.'
+            'sustained canary at parallelism 1, complete/fail, restart in Paused/Drain, and recoverable rollback to 3.1.1.'
             ''
             "HCH-Worker-Compatibility: $env:RELEASE_COMPATIBILITY"
             "HCH-Worker-Content-Impact: $env:RELEASE_CONTENT_IMPACT"
           ) -join "`n"
-          gh release create $tag $msi $checksums $signature $canary $canarySignature `
+          $releaseAssets = @(Get-ChildItem -LiteralPath $releaseRoot -File | Sort-Object Name |
+            ForEach-Object { $_.FullName })
+          if ($releaseAssets.Count -lt 10 -or
+              $releaseAssets -notcontains $msi -or
+              $releaseAssets -notcontains $checksums -or
+              $releaseAssets -notcontains $signature) {
+            throw 'Final public release inventory is incomplete.'
+          }
+          gh release create $tag @releaseAssets $canary $canarySignature `
             --verify-tag `
             --latest=false `
             --title "HCH Worker Windows $version" `

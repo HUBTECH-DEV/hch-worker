@@ -316,6 +316,71 @@ function Assert-ReceiptSha256 {
     Add-UniqueValue $ReceiptHashes $Value $Path
 }
 
+function Get-MsiIdentity {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not $IsWindows) {
+        throw 'Canary MSI identity verification requires Windows Installer on Windows.'
+    }
+    if ([IO.Path]::GetExtension($Path) -cne '.msi') {
+        throw 'MsiPath must have the exact .msi extension.'
+    }
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($stream.Length -lt 4096) { throw 'MsiPath is too small to be a Windows Installer database.' }
+        $header = [byte[]]::new(8)
+        if ($stream.Read($header, 0, $header.Length) -ne $header.Length `
+            -or [Convert]::ToHexString($header) -cne 'D0CF11E0A1B11AE1') {
+            throw 'MsiPath is not an OLE compound Windows Installer database.'
+        }
+    } finally {
+        $stream.Dispose()
+    }
+
+    $installer = $null
+    $database = $null
+    $summary = $null
+    try {
+        $installer = New-Object -ComObject WindowsInstaller.Installer
+        $database = $installer.OpenDatabase($Path, 0)
+        $properties = [ordered]@{}
+        foreach ($name in 'ProductCode', 'ProductVersion', 'ProductName', 'Manufacturer') {
+            $view = $null
+            try {
+                $view = $database.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property``='$name'")
+                [void]$view.Execute()
+                $record = $view.Fetch()
+                if ($null -eq $record) { throw "MSI property is missing: $name." }
+                $properties[$name] = [string]$record.StringData(1)
+            } finally {
+                if ($null -ne $view) { [void]$view.Close() }
+            }
+        }
+        $summary = $database.SummaryInformation(0)
+        $packageCode = [string]$summary.Property(9)
+    } catch {
+        throw "MsiPath is not a readable Windows Installer database: $($_.Exception.Message)"
+    } finally {
+        if ($null -ne $summary) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($summary) }
+        if ($null -ne $database) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($database) }
+        if ($null -ne $installer) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer) }
+    }
+    $productGuid = [Guid]::Empty
+    $packageGuid = [Guid]::Empty
+    if (-not [Guid]::TryParseExact($properties.ProductCode, 'B', [ref]$productGuid) `
+        -or -not [Guid]::TryParseExact($packageCode, 'B', [ref]$packageGuid) `
+        -or $productGuid -eq [Guid]::Empty -or $packageGuid -eq [Guid]::Empty `
+        -or $properties.ProductVersion -cne $Version `
+        -or $properties.ProductName -cne 'HCH Worker' `
+        -or $properties.Manufacturer -cne 'HubTech') {
+        throw 'MSI identity does not match the expected HCH Worker candidate.'
+    }
+    return [pscustomobject]@{
+        ProductCode = $productGuid.ToString('B').ToUpperInvariant()
+        PackageCode = $packageGuid.ToString('B').ToUpperInvariant()
+    }
+}
+
 $resolvedEvidence = (Resolve-Path -LiteralPath $EvidencePath).Path
 $resolvedSignature = (Resolve-Path -LiteralPath $EvidenceSignaturePath).Path
 $resolvedMsi = (Resolve-Path -LiteralPath $MsiPath).Path
@@ -426,6 +491,96 @@ $pkcs9SigningTime = [Security.Cryptography.Pkcs.Pkcs9SigningTime]::new(
 $signingTime = [DateTimeOffset]$pkcs9SigningTime.SigningTime.ToUniversalTime()
 
 $msiSha256 = (Get-FileHash -LiteralPath $resolvedMsi -Algorithm SHA256).Hash.ToLowerInvariant()
+$msiIdentity = Get-MsiIdentity $resolvedMsi
+$msiLifecyclePath = Join-Path (Split-Path -Parent $resolvedMsi) 'msi-disposable-e2e.json'
+if (-not (Test-Path -LiteralPath $msiLifecyclePath -PathType Leaf) `
+    -or ((Get-Item -LiteralPath $msiLifecyclePath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'The exact candidate is missing non-reparse disposable MSI lifecycle evidence.'
+}
+$msiLifecycleBytes = [IO.File]::ReadAllBytes($msiLifecyclePath)
+$msiLifecycleRaw = $strictUtf8.GetString($msiLifecycleBytes)
+if ($msiLifecycleRaw.Length -eq 0 -or $msiLifecycleRaw[0] -eq [char]0xFEFF) {
+    throw 'Disposable MSI lifecycle evidence must be UTF-8 without BOM.'
+}
+$msiLifecycleDocument = [Text.Json.JsonDocument]::Parse($msiLifecycleRaw)
+try {
+    if ($msiLifecycleDocument.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+        throw 'Disposable MSI lifecycle evidence root must be a JSON object.'
+    }
+    Assert-NoDuplicateJsonPropertyNames $msiLifecycleDocument.RootElement '$.msiLifecycle'
+} finally {
+    $msiLifecycleDocument.Dispose()
+}
+$msiLifecycle = $msiLifecycleRaw | ConvertFrom-Json -Depth 50
+Assert-NoSensitivePropertyNames $msiLifecycle '$.msiLifecycle'
+Assert-ExactPropertyNames $msiLifecycle @(
+    'schema',
+    'status',
+    'version',
+    'productCode',
+    'packageCode',
+    'msiSha256',
+    'msiLengthBytes',
+    'signerThumbprint',
+    'signerCertificateSha256',
+    'environmentKind',
+    'machineName',
+    'rollbackExitCode',
+    'extractedFirstPartySignedFiles',
+    'extractedPayloads',
+    'installedService',
+    'pausedDrainEvidence',
+    'repairPreservedState',
+    'uninstallPreservedState',
+    'logs',
+    'completedAtUtc') '$.msiLifecycle'
+if ((Get-RequiredProperty $msiLifecycle 'schema' '$.msiLifecycle') -cne 'hch.worker-windows-msi-e2e/v1' `
+    -or (Get-RequiredProperty $msiLifecycle 'status' '$.msiLifecycle') -cne 'passed' `
+    -or (Get-RequiredProperty $msiLifecycle 'version' '$.msiLifecycle') -cne $Version `
+    -or (Get-RequiredProperty $msiLifecycle 'productCode' '$.msiLifecycle') -cne $msiIdentity.ProductCode `
+    -or (Get-RequiredProperty $msiLifecycle 'packageCode' '$.msiLifecycle') -cne $msiIdentity.PackageCode `
+    -or (Get-RequiredProperty $msiLifecycle 'msiSha256' '$.msiLifecycle') -cne $msiSha256 `
+    -or (Get-ExactInteger (Get-RequiredProperty $msiLifecycle 'msiLengthBytes' '$.msiLifecycle') '$.msiLifecycle.msiLengthBytes') -ne (Get-Item -LiteralPath $resolvedMsi).Length `
+    -or (Get-ExactInteger (Get-RequiredProperty $msiLifecycle 'rollbackExitCode' '$.msiLifecycle') '$.msiLifecycle.rollbackExitCode') -ne 1603 `
+    -or -not (Get-ExactBoolean (Get-RequiredProperty $msiLifecycle 'repairPreservedState' '$.msiLifecycle') '$.msiLifecycle.repairPreservedState') `
+    -or -not (Get-ExactBoolean (Get-RequiredProperty $msiLifecycle 'uninstallPreservedState' '$.msiLifecycle') '$.msiLifecycle.uninstallPreservedState')) {
+    throw 'Disposable MSI lifecycle evidence does not match the exact candidate.'
+}
+$msiLifecycleSha256 = [Convert]::ToHexString(
+    [Security.Cryptography.SHA256]::HashData($msiLifecycleBytes)).ToLowerInvariant()
+$lifecyclePayloads = Get-RequiredProperty $msiLifecycle 'extractedPayloads' '$.msiLifecycle'
+Assert-ExactPropertyNames $lifecyclePayloads @('service', 'tray', 'installer') '$.msiLifecycle.extractedPayloads'
+foreach ($payloadName in 'service', 'tray', 'installer') {
+    $payload = Get-RequiredProperty $lifecyclePayloads $payloadName '$.msiLifecycle.extractedPayloads'
+    Assert-ExactPropertyNames $payload @('relativePath', 'sha256', 'sizeBytes') "$.msiLifecycle.extractedPayloads.$payloadName"
+    Assert-Sha256 (Get-RequiredProperty $payload 'sha256' "$.msiLifecycle.extractedPayloads.$payloadName") `
+        "$.msiLifecycle.extractedPayloads.$payloadName.sha256"
+}
+$lifecycleInstalledService = Get-RequiredProperty $msiLifecycle 'installedService' '$.msiLifecycle'
+Assert-ExactPropertyNames $lifecycleInstalledService @(
+    'serviceName',
+    'displayName',
+    'scmState',
+    'scmStartMode',
+    'scmDelayedAutomaticStart',
+    'scmAccountName',
+    'scmImagePath',
+    'scmProcessId',
+    'processImagePath',
+    'processStartedAtUtc',
+    'bootStartedAtUtc',
+    'serviceExecutableSha256',
+    'trayExecutablePath',
+    'trayExecutableSha256',
+    'observedAtUtc') '$.msiLifecycle.installedService'
+$lifecycleServiceSha256 = Get-RequiredProperty $lifecyclePayloads.service 'sha256' '$.msiLifecycle.extractedPayloads.service'
+$lifecycleTraySha256 = Get-RequiredProperty $lifecyclePayloads.tray 'sha256' '$.msiLifecycle.extractedPayloads.tray'
+if ((Get-RequiredProperty $lifecycleInstalledService 'serviceName' '$.msiLifecycle.installedService') -cne 'HchWorker' `
+    -or (Get-RequiredProperty $lifecycleInstalledService 'scmState' '$.msiLifecycle.installedService') -cne 'Running' `
+    -or (Get-RequiredProperty $lifecycleInstalledService 'serviceExecutableSha256' '$.msiLifecycle.installedService') -cne $lifecycleServiceSha256 `
+    -or (Get-RequiredProperty $lifecycleInstalledService 'trayExecutableSha256' '$.msiLifecycle.installedService') -cne $lifecycleTraySha256) {
+    throw 'Disposable MSI lifecycle payload correlation is invalid.'
+}
 Assert-ExactPropertyNames $evidence @(
     'schema',
     'status',
@@ -433,6 +588,7 @@ Assert-ExactPropertyNames $evidence @(
     'version',
     'sourceCommit',
     'msiSha256',
+    'installationReceipt',
     'startedAtUtc',
     'completedAtUtc',
     'gates',
@@ -500,6 +656,7 @@ foreach ($legacyGate in @(
     'completedPendingEditorialReview',
     'failedAssignmentReported',
     'rollbackTo310',
+    'rollbackTo311',
     'rollbackHeartbeat')) {
     if ($null -ne $evidence.gates.PSObject.Properties[$legacyGate]) {
         throw "Canary schema v2 forbids legacy self-declared gate: $legacyGate."
@@ -509,6 +666,111 @@ foreach ($legacyGate in @(
 $requestIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $receiptHashes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $assignmentIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$installation = Get-RequiredProperty $evidence 'installationReceipt' '$'
+Assert-ExactPropertyNames $installation @(
+    'msiLifecycleEvidenceSha256',
+    'productCode',
+    'packageCode',
+    'serviceName',
+    'serviceImagePath',
+    'serviceExecutableSha256',
+    'trayExecutablePath',
+    'trayExecutableSha256',
+    'installed',
+    'restart',
+    'receiptSha256') '$.installationReceipt'
+$installationLifecycleSha256 = Get-RequiredProperty $installation 'msiLifecycleEvidenceSha256' '$.installationReceipt'
+$installationProductCode = Get-RequiredProperty $installation 'productCode' '$.installationReceipt'
+$installationPackageCode = Get-RequiredProperty $installation 'packageCode' '$.installationReceipt'
+$installationServiceName = Get-RequiredProperty $installation 'serviceName' '$.installationReceipt'
+$installationServiceImagePath = Get-RequiredProperty $installation 'serviceImagePath' '$.installationReceipt'
+$installationServiceSha256 = Get-RequiredProperty $installation 'serviceExecutableSha256' '$.installationReceipt'
+$installationTrayPath = Get-RequiredProperty $installation 'trayExecutablePath' '$.installationReceipt'
+$installationTraySha256 = Get-RequiredProperty $installation 'trayExecutableSha256' '$.installationReceipt'
+Assert-Sha256 $installationLifecycleSha256 '$.installationReceipt.msiLifecycleEvidenceSha256'
+Assert-Sha256 $installationServiceSha256 '$.installationReceipt.serviceExecutableSha256'
+Assert-Sha256 $installationTraySha256 '$.installationReceipt.trayExecutableSha256'
+if ($installationLifecycleSha256 -cne $msiLifecycleSha256 `
+    -or $installationProductCode -cne $msiIdentity.ProductCode `
+    -or $installationPackageCode -cne $msiIdentity.PackageCode `
+    -or $installationServiceName -cne 'HchWorker' `
+    -or $installationServiceSha256 -cne $lifecycleServiceSha256 `
+    -or $installationTraySha256 -cne $lifecycleTraySha256 `
+    -or $installationServiceImagePath -isnot [string] `
+    -or $installationTrayPath -isnot [string] `
+    -or -not [string]::Equals(
+        $installationServiceImagePath,
+        (Get-RequiredProperty $lifecycleInstalledService 'scmImagePath' '$.msiLifecycle.installedService'),
+        [StringComparison]::OrdinalIgnoreCase) `
+    -or -not [string]::Equals(
+        $installationTrayPath,
+        (Get-RequiredProperty $lifecycleInstalledService 'trayExecutablePath' '$.msiLifecycle.installedService'),
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Canary installation receipt does not bind the MSI lifecycle ProductCode, PackageCode, ImagePath and payload hashes.'
+}
+$installedTransition = Get-RequiredProperty $installation 'installed' '$.installationReceipt'
+$restartTransition = Get-RequiredProperty $installation 'restart' '$.installationReceipt'
+foreach ($entry in @(
+        [pscustomobject]@{ Value = $installedTransition; Path = '$.installationReceipt.installed' },
+        [pscustomobject]@{ Value = $restartTransition; Path = '$.installationReceipt.restart' })) {
+    Assert-ExactPropertyNames $entry.Value @(
+        'bootStartedAtUtc',
+        'processStartedAtUtc',
+        'observedAtUtc',
+        'processId') $entry.Path
+}
+$installedBootStartedAt = ConvertTo-UtcTimestamp (
+    Get-RequiredProperty $installedTransition 'bootStartedAtUtc' '$.installationReceipt.installed') `
+    '$.installationReceipt.installed.bootStartedAtUtc'
+$installedProcessStartedAt = ConvertTo-UtcTimestamp (
+    Get-RequiredProperty $installedTransition 'processStartedAtUtc' '$.installationReceipt.installed') `
+    '$.installationReceipt.installed.processStartedAtUtc'
+$installedObservedAt = ConvertTo-UtcTimestamp (
+    Get-RequiredProperty $installedTransition 'observedAtUtc' '$.installationReceipt.installed') `
+    '$.installationReceipt.installed.observedAtUtc'
+$installedProcessId = Get-ExactInteger (
+    Get-RequiredProperty $installedTransition 'processId' '$.installationReceipt.installed') `
+    '$.installationReceipt.installed.processId'
+$restartBootStartedAt = ConvertTo-UtcTimestamp (
+    Get-RequiredProperty $restartTransition 'bootStartedAtUtc' '$.installationReceipt.restart') `
+    '$.installationReceipt.restart.bootStartedAtUtc'
+$restartProcessStartedAt = ConvertTo-UtcTimestamp (
+    Get-RequiredProperty $restartTransition 'processStartedAtUtc' '$.installationReceipt.restart') `
+    '$.installationReceipt.restart.processStartedAtUtc'
+$restartObservedAt = ConvertTo-UtcTimestamp (
+    Get-RequiredProperty $restartTransition 'observedAtUtc' '$.installationReceipt.restart') `
+    '$.installationReceipt.restart.observedAtUtc'
+$restartProcessId = Get-ExactInteger (
+    Get-RequiredProperty $restartTransition 'processId' '$.installationReceipt.restart') `
+    '$.installationReceipt.restart.processId'
+if ($installedProcessId -le 0 -or $restartProcessId -le 0 -or $installedProcessId -eq $restartProcessId `
+    -or $installedBootStartedAt -ge $installedProcessStartedAt `
+    -or $installedProcessStartedAt -gt $installedObservedAt `
+    -or $restartBootStartedAt -le $installedObservedAt `
+    -or $restartBootStartedAt -ge $restartProcessStartedAt `
+    -or $restartProcessStartedAt -gt $restartObservedAt) {
+    throw 'Canary installation receipt does not prove a new boot and a distinct SCM process.'
+}
+Assert-ReceiptSha256 (
+    Get-RequiredProperty $installation 'receiptSha256' '$.installationReceipt') 'install-restart' @(
+        "msiSha256=$msiSha256",
+        "msiLifecycleEvidenceSha256=$installationLifecycleSha256",
+        "productCode=$installationProductCode",
+        "packageCode=$installationPackageCode",
+        "serviceName=$installationServiceName",
+        "serviceImagePath=$installationServiceImagePath",
+        "serviceExecutableSha256=$installationServiceSha256",
+        "trayExecutablePath=$installationTrayPath",
+        "trayExecutableSha256=$installationTraySha256",
+        "installed.bootStartedAtUnixMs=$(Get-CanonicalTimestampValue $installedBootStartedAt)",
+        "installed.processStartedAtUnixMs=$(Get-CanonicalTimestampValue $installedProcessStartedAt)",
+        "installed.observedAtUnixMs=$(Get-CanonicalTimestampValue $installedObservedAt)",
+        "installed.processId=$($installedProcessId.ToString([Globalization.CultureInfo]::InvariantCulture))",
+        "restart.bootStartedAtUnixMs=$(Get-CanonicalTimestampValue $restartBootStartedAt)",
+        "restart.processStartedAtUnixMs=$(Get-CanonicalTimestampValue $restartProcessStartedAt)",
+        "restart.observedAtUnixMs=$(Get-CanonicalTimestampValue $restartObservedAt)",
+        "restart.processId=$($restartProcessId.ToString([Globalization.CultureInfo]::InvariantCulture))") `
+    '$.installationReceipt.receiptSha256' $receiptHashes
 $heartbeatSamples = @(Get-RequiredProperty $evidence 'heartbeatSamples' '$')
 if ($heartbeatSamples.Count -lt $minimumHeartbeatCount) {
     throw "Canary evidence must contain at least $minimumHeartbeatCount unique heartbeat samples."
@@ -1000,13 +1262,17 @@ Assert-CanonicalUuid $rollbackReceiptId '$.rollbackReceipt.receiptId'
 $rollbackServerTime = ConvertTo-UtcTimestamp (
     Get-RequiredProperty $rollback 'serverTime' '$.rollbackReceipt') '$.rollbackReceipt.serverTime'
 Assert-TimestampInSession $rollbackServerTime '$.rollbackReceipt.serverTime' $startedAt $completedAt
-if ($rollbackServerTime -lt $previousHeartbeatTime `
+if ($installedObservedAt -ge $firstHeartbeatTime `
+    -or $restartBootStartedAt -le $previousHeartbeatTime `
+    -or $restartObservedAt -le $latestOutcomeTime `
+    -or $restartObservedAt -gt $rollbackServerTime `
+    -or $rollbackServerTime -lt $previousHeartbeatTime `
     -or $rollbackServerTime -lt $latestOutcomeTime `
-    -or (Get-RequiredProperty $rollback 'targetVersion' '$.rollbackReceipt') -cne '3.1.0' `
+    -or (Get-RequiredProperty $rollback 'targetVersion' '$.rollbackReceipt') -cne '3.1.1' `
     -or -not (Get-ExactBoolean (
         Get-RequiredProperty $rollback 'v4ServiceDisabled' '$.rollbackReceipt') '$.rollbackReceipt.v4ServiceDisabled') `
     -or (Get-RequiredProperty $rollback 'legacyServiceStartMode' '$.rollbackReceipt') -cne 'AutomaticDelayed') {
-    throw 'Canary rollback receipt does not prove a completed recovery to 3.1.0.'
+    throw 'Canary rollback receipt does not prove a completed recovery to 3.1.1.'
 }
 foreach ($hashName in 'backupSha256', 'previousServiceDefinitionSha256', 'restoredServiceDefinitionSha256') {
     Assert-Sha256 (Get-RequiredProperty $rollback $hashName '$.rollbackReceipt') "$.rollbackReceipt.$hashName"
@@ -1078,11 +1344,11 @@ if ($null -ne $legacyGrantedUntilRaw) {
         '$.rollbackReceipt.legacyHeartbeat.capacity.grantedUntil'
     $legacyGrantedUntilCanonical = Get-CanonicalTimestampValue $legacyGrantedUntil
 }
-if ($legacyHeartbeatTime -lt $rollbackServerTime `
+if ($legacyHeartbeatTime -le $rollbackServerTime `
     -or $legacyHeartbeatAt -gt $legacyHeartbeatTime `
     -or ($legacyHeartbeatTime - $legacyHeartbeatAt) -gt $maximumHeartbeatServerSkew `
     -or $legacyNodeId -cne $canaryNodeId `
-    -or (Get-RequiredProperty $legacyHeartbeat 'workerVersion' '$.rollbackReceipt.legacyHeartbeat') -cne '3.1.0' `
+    -or (Get-RequiredProperty $legacyHeartbeat 'workerVersion' '$.rollbackReceipt.legacyHeartbeat') -cne '3.1.1' `
     -or $legacyNextHeartbeatSeconds -ne 60 `
     -or $legacyConfigured -lt 1 -or $legacyConfigured -gt 64 `
     -or $legacyRequested -lt 0 -or $legacyRequested -gt 64 `
@@ -1096,7 +1362,7 @@ if ($legacyHeartbeatTime -lt $rollbackServerTime `
 Assert-ReceiptSha256 (
     Get-RequiredProperty $legacyHeartbeat 'receiptSha256' '$.rollbackReceipt.legacyHeartbeat') `
     'legacy-node-heartbeat' @(
-        'workerVersion=3.1.0',
+        'workerVersion=3.1.1',
         "requestId=$legacyRequestId",
         "nodeId=$legacyNodeId",
         "heartbeatAtUnixMs=$(Get-CanonicalTimestampValue $legacyHeartbeatAt)",
@@ -1123,7 +1389,7 @@ Assert-ReceiptSha256 (
     Get-RequiredProperty $rollback 'receiptSha256' '$.rollbackReceipt') 'rollback' @(
         "receiptId=$rollbackReceiptId",
         "serverTimeUnixMs=$(Get-CanonicalTimestampValue $rollbackServerTime)",
-        'targetVersion=3.1.0',
+        'targetVersion=3.1.1',
         'v4ServiceDisabled=true',
         'legacyServiceStartMode=AutomaticDelayed',
         "backupSha256=$rollbackBackupSha256",

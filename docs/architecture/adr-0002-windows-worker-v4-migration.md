@@ -1,17 +1,19 @@
-# ADR-0002: Migração e rollback do Worker Windows 3.1.0
+# ADR-0002: Migração e rollback do Worker Windows 3.1.x
 
 - Status: Aceito
 - Data: 2026-09-01
 
 ## Decisão
 
-O 4.0.0 será instalado lado a lado com o 3.1.0. Quando existir
+O 4.0.0 será instalado lado a lado com o 3.1.x. O fluxo oficial promove primeiro
+toda a frota para a ponte 3.1.1, mas a migração direta de 3.1.0 permanece
+suportada. Quando existir
 `C:\ProgramData\HCH\EditorialWorker`, o instalador não pode gerar outro
 `nodeId` nem outra identidade. Ele executa uma migração transacional que
 preserva exatamente o `nodeId`, a identidade operacional Ed25519 e os limites
 locais, sem apagar, mover ou alterar qualquer arquivo da origem.
 
-Estado assinado do runtime 3.1.0 não vira prontidão 4.x. `trust-state.json`,
+Estado assinado do runtime 3.1.x não vira prontidão 4.x. `trust-state.json`,
 `applied-manifest.json`, `ready.json`, enrollment legado, pending operations,
 journals e evidências de update são retidos no backup imutável e descritos no
 journal de migração. O único material de trust projetado no destino é o PEM
@@ -22,8 +24,12 @@ atestação pelo protocolo atual, sempre em `Paused/Drain` e capacidade zero.
 Antes da troca, o instalador deve:
 
 1. derivar o nome SCM legado a partir do `nodeId` com o mesmo algoritmo do
-   3.1.0 e comprovar que o serviço está `Stopped`, sem PID e com os locks de
-   escrita disponíveis;
+   3.1.x e comprovar que o serviço está `Stopped`, sem PID e com os locks de
+   escrita disponíveis; a versão de origem deve ser obtida do executável real
+   referenciado pelo `ImagePath` capturado no SCM, limitada exatamente a 3.1.0
+   ou 3.1.1, e seu caminho, versão e SHA-256 devem permanecer iguais nos dois
+   preflights; um valor esperado informado pelo chamador é apenas uma restrição
+   adicional e nunca substitui essa evidência;
 2. bloquear se houver `active-batch.json`, capacidade/progresso ativo, journal
    não terminal ou qualquer operação pendente — em especial `complete-*` e
    `fail-*`; apenas reconciliação confirmada no orquestrador libera a troca;
@@ -40,7 +46,7 @@ Antes da troca, o instalador deve:
 7. converter a privada PKCS#8 somente em memória para PKCS#8 normalizado
    protegido por DPAPI `LocalMachine`, zerando os buffers temporários;
 8. mapear `lastNonZeroParallelism` para `LastNonZeroMaxConcurrentJobs` e, pela
-   semântica agregada do 3.1.0, também para o `ClaimBatchSize` inicial; publicar
+   semântica agregada do 3.1.x, também para o `ClaimBatchSize` inicial; publicar
    o controle como `Paused/Drain`, nunca como `Running`;
 9. publicar identidade, PEM público raiz e por último `config.json`, com journal
    durável antes de cada rename atômico;
@@ -55,13 +61,14 @@ O rollback consulta o journal e remove somente os artefatos que o migrador
 registrou como inexistentes antes da transação e cujo hash ainda coincide. Um
 arquivo alterado depois da migração bloqueia o rollback em vez de ser apagado.
 Backup e journal permanecem como evidência; arquivos não relacionados e toda a
-origem 3.1.0 permanecem intactos. O rollback não regenera trabalho, não apaga a
+origem 3.1.x permanecem intactos. O rollback não regenera trabalho, não apaga a
 chave legada e não ignora commit ambíguo. Somente uma reconciliação concluída
 pode liberar a troca de versão.
 
 ## Critério de promoção histórica
 
-O 3.1.0 só recebe a classificação de versão histórica depois de um canário 4.0.0
+O 3.1.0 só recebe a classificação de versão histórica depois que a frota tiver
+passado pela ponte 3.1.1 e um canário 4.0.0
 com paralelismo 1 comprovar enrollment, bootstrap, heartbeat, claim, progresso,
 complete/fail, restart e rollback. Histórico significa não recomendado para nova
 instalação, nunca removido como opção de recuperação.

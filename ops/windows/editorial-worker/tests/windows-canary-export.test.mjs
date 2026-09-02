@@ -17,6 +17,7 @@ import test from "node:test";
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(testDirectory, "../../../..");
 const exporter = join(repositoryRoot, "scripts", "windows", "Export-HchWorkerCanaryEvidence.ps1");
+const lifecycleHarness = join(repositoryRoot, "scripts", "windows", "Invoke-HchWorkerMsiDisposableTest.ps1");
 const sourceCommit = "a".repeat(40);
 const version = "4.0.0";
 
@@ -27,6 +28,12 @@ const failedPlanHash = hash("failed-generation-plan");
 const nodeId = "windows-canary-node-0001";
 const workerKeyId = "worker-key-canary-0001";
 const startedMs = Date.parse("2026-08-31T12:00:00.000Z");
+const productCode = "{11111111-1111-4111-8111-111111111111}";
+const packageCode = "{22222222-2222-4222-8222-222222222222}";
+const serviceImagePath = "C:\\Program Files\\HubTech\\HCH Worker\\4\\Service\\Hch.Worker.Service.exe";
+const trayExecutablePath = "C:\\Program Files\\HubTech\\HCH Worker\\4\\Tray\\Hch.Worker.Tray.exe";
+const serviceExecutableSha256 = hash("service-executable");
+const trayExecutableSha256 = hash("tray-executable");
 
 const pwshProbe = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], {
   encoding: "utf8",
@@ -56,7 +63,7 @@ test("exports deterministic unsigned v2 evidence only from a complete real-captu
 
   const evidence = JSON.parse(firstBytes.toString("utf8"));
   assert.deepEqual(Object.keys(evidence), [
-    "schema", "status", "sanitized", "version", "sourceCommit", "msiSha256",
+    "schema", "status", "sanitized", "version", "sourceCommit", "msiSha256", "installationReceipt",
     "startedAtUtc", "completedAtUtc", "gates", "heartbeatSamples", "progressSamples",
     "completions", "failures", "rollbackReceipt",
   ]);
@@ -66,6 +73,12 @@ test("exports deterministic unsigned v2 evidence only from a complete real-captu
   assert.equal(evidence.version, version);
   assert.equal(evidence.sourceCommit, sourceCommit);
   assert.equal(evidence.msiSha256, hashBytes(readFileSync(fixture.msiPath)));
+  assert.equal(evidence.installationReceipt.productCode, productCode);
+  assert.equal(evidence.installationReceipt.packageCode, packageCode);
+  assert.equal(evidence.installationReceipt.receiptSha256, installationReceiptSha256(
+    evidence.installationReceipt,
+    evidence.msiSha256,
+  ));
   assert.equal(evidence.heartbeatSamples.length, 10);
   assert.equal(evidence.progressSamples.length, 2);
   assert.equal(evidence.completions.length, 1);
@@ -170,6 +183,54 @@ test("rejects a paused-state probe captured from a different candidate build", (
   assert.match(`${result.stdout}\n${result.stderr}`, /does not bind the candidate identity or state/);
 });
 
+test("rejects a text file renamed to .msi before trusting any canary probe", (context) => {
+  if (pwshProbe.error || pwshProbe.status !== 0) return context.skip("PowerShell 7 is unavailable");
+
+  const directory = mkdtempSync(join(tmpdir(), "hch-worker-canary-export-fake-msi-"));
+  context.after(() => rmSync(directory, { recursive: true, force: true }));
+  const fixture = createCaptureBundle(directory);
+  writeFileSync(fixture.msiPath, "not a Windows Installer database\n", "utf8");
+
+  const result = runExporter(fixture.captureDirectory, join(directory, "canary-evidence.json"), fixture.msiPath);
+  assert.notEqual(result.status, 0, "A text file renamed to .msi was accepted");
+  assert.match(`${result.stdout}\n${result.stderr}`, /too small|not an OLE compound Windows Installer database/);
+});
+
+test("rejects a self-declared probe without independent SCM and process observations", (context) => {
+  if (pwshProbe.error || pwshProbe.status !== 0) return context.skip("PowerShell 7 is unavailable");
+
+  const directory = mkdtempSync(join(tmpdir(), "hch-worker-canary-export-synthetic-probe-"));
+  context.after(() => rmSync(directory, { recursive: true, force: true }));
+  const fixture = createCaptureBundle(directory);
+  const probePath = join(fixture.captureDirectory, "probes", "installed-state.json");
+  const probe = JSON.parse(readFileSync(probePath, "utf8"));
+  delete probe.scmProcessId;
+  writeJson(probePath, probe);
+
+  const result = runExporter(fixture.captureDirectory, join(directory, "canary-evidence.json"), fixture.msiPath);
+  assert.notEqual(result.status, 0, "A reduced self-declared paused probe was accepted");
+  assert.match(`${result.stdout}\n${result.stderr}`, /exact permitted property set/);
+});
+
+test("requires restart to prove a new boot and a distinct SCM process", (context) => {
+  if (pwshProbe.error || pwshProbe.status !== 0) return context.skip("PowerShell 7 is unavailable");
+
+  const directory = mkdtempSync(join(tmpdir(), "hch-worker-canary-export-boot-transition-"));
+  context.after(() => rmSync(directory, { recursive: true, force: true }));
+  const fixture = createCaptureBundle(directory);
+  const installedPath = join(fixture.captureDirectory, "probes", "installed-state.json");
+  const restartPath = join(fixture.captureDirectory, "probes", "restart-state.json");
+  const installed = JSON.parse(readFileSync(installedPath, "utf8"));
+  const restart = JSON.parse(readFileSync(restartPath, "utf8"));
+  restart.scmProcessId = installed.scmProcessId;
+  restart.processId = installed.processId;
+  writeJson(restartPath, restart);
+
+  const result = runExporter(fixture.captureDirectory, join(directory, "canary-evidence.json"), fixture.msiPath);
+  assert.notEqual(result.status, 0, "A restart without a distinct SCM process was accepted");
+  assert.match(`${result.stdout}\n${result.stderr}`, /does not prove a new boot and a new SCM process/);
+});
+
 test("requires the accepted legacy heartbeat strictly after rollback", (context) => {
   if (pwshProbe.error || pwshProbe.status !== 0) return context.skip("PowerShell 7 is unavailable");
 
@@ -210,26 +271,61 @@ test("source documents the runtime persistence gap and performs no signing", () 
   assert.match(source, /Current runtime limitation:/);
   assert.match(source, /does not yet persist accepted node-heartbeat/);
   assert.match(source, /Missing sources fail closed/);
-  assert.doesNotMatch(source, /Sign-HchWorkerCanaryEvidence|SignedCms|CmsSigner|Certificate/i);
+  assert.doesNotMatch(source, /Sign-HchWorkerCanaryEvidence|SignedCms|CmsSigner|Get-AuthenticodeSignature/i);
   assert.doesNotMatch(source, /Get-Date|UtcNow|DateTimeOffset\]::Now/i);
+});
+
+test("disposable MSI lifecycle evidence records package, payload and SCM/process identity", () => {
+  const source = readFileSync(lifecycleHarness, "utf8");
+  for (const required of [
+    "Get-MsiPackageCode",
+    "ProductInfo($productCode, 'PackageCode')",
+    "Get-ExtractedPayloadEvidence 'Hch.Worker.Service.exe' 'Service'",
+    "Get-ExtractedPayloadEvidence 'Hch.Worker.Tray.exe' 'Tray'",
+    "Get-CimInstance Win32_Service",
+    "Get-CimInstance Win32_OperatingSystem",
+    "SCM and process ImagePath observations do not identify the same executable",
+    "Installed service/tray hashes do not match the exact MSI administrative image",
+    "packageCode = $packageCode",
+    "installedService = $installedService",
+  ]) {
+    assert.equal(source.includes(required), true, `Lifecycle evidence is missing ${required}`);
+  }
 });
 
 function createCaptureBundle(directory) {
   const captureDirectory = join(directory, "capture");
   const msiPath = join(directory, "HCH-Worker-4.0.0-win-x64.msi");
   mkdirSync(captureDirectory, { recursive: true });
-  writeFileSync(msiPath, Buffer.from("fixed canary MSI candidate bytes\n", "utf8"));
+  createStructuralMsi(directory, msiPath);
   const msiSha256 = hashBytes(readFileSync(msiPath));
+
+  const lifecycleEvidence = createMsiLifecycleEvidence(msiPath, msiSha256);
+  const lifecyclePath = join(captureDirectory, "probes", "msi-disposable-e2e.json");
+  writeJson(lifecyclePath, lifecycleEvidence);
+  const lifecycleSha256 = hashBytes(readFileSync(lifecyclePath));
 
   writeJson(join(captureDirectory, "probes", "installed-state.json"), pausedProbe(
     "installed-paused-drain",
     iso(startedMs - 30_000),
     msiSha256,
+    lifecycleSha256,
+    {
+      bootStartedAtUtc: iso(startedMs - 3_600_000),
+      processStartedAtUtc: iso(startedMs - 40_000),
+      processId: 4100,
+    },
   ));
   writeJson(join(captureDirectory, "probes", "restart-state.json"), pausedProbe(
     "restart-paused-drain",
-    iso(startedMs + 600_000),
+    iso(startedMs + 920_000),
     msiSha256,
+    lifecycleSha256,
+    {
+      bootStartedAtUtc: iso(startedMs + 905_000),
+      processStartedAtUtc: iso(startedMs + 910_000),
+      processId: 4200,
+    },
   ));
   writeJson(join(captureDirectory, "probes", "legacy-before-start.json"), {
     schema: "hch.worker-windows-scm-capture/v1",
@@ -389,7 +485,7 @@ function createCaptureBundle(directory) {
   const backupPayload = {
     schemaVersion: 1,
     migrationId: "80000000-0000-4000-8000-000000000001",
-    sourceVersion: "3.1.0",
+    sourceVersion: "3.1.1",
     sourceProductRoot: "C:\\ProgramData\\HCH\\EditorialWorker",
     sourceSnapshotSha256: hash("legacy-source-snapshot"),
     nodeId,
@@ -410,13 +506,13 @@ function createCaptureBundle(directory) {
     validatedAtUtc: iso(startedMs + 950_250),
     receiptId: "60000000-0000-4000-8000-000000000001",
     serverTime: iso(startedMs + 950_000),
-    targetVersion: "3.1.0",
+    targetVersion: "3.1.1",
     v4ServiceDisabled: true,
     legacyServiceStartMode: "AutomaticDelayed",
     legacyBackupReceiptRelativePath: "rollback/backup-receipt.json",
     restoredServiceDefinition: serviceDefinition,
     legacyHeartbeat: {
-      workerVersion: "3.1.0",
+      workerVersion: "3.1.1",
       requestId: "50000000-0000-4000-8000-000000000001",
       nodeId,
       heartbeatAt: iso(legacyHeartbeatServerTime - 1_000),
@@ -438,14 +534,120 @@ function createCaptureBundle(directory) {
   return { captureDirectory, msiPath };
 }
 
-function pausedProbe(capture, observedAtUtc, msiSha256) {
+function createMsiLifecycleEvidence(msiPath, msiSha256) {
   return {
-    schema: "hch.worker-windows-state-capture/v1",
+    schema: "hch.worker-windows-msi-e2e/v1",
+    status: "passed",
+    version,
+    productCode,
+    packageCode,
+    msiSha256,
+    msiLengthBytes: readFileSync(msiPath).length,
+    signerThumbprint: "A".repeat(40),
+    signerCertificateSha256: "B".repeat(64),
+    environmentKind: "GitHubHosted",
+    machineName: "CANARY-TEST-HOST",
+    rollbackExitCode: 1603,
+    extractedFirstPartySignedFiles: 3,
+    extractedPayloads: {
+      service: {
+        relativePath: "Program Files/HubTech/HCH Worker/4/Service/Hch.Worker.Service.exe",
+        sha256: serviceExecutableSha256,
+        sizeBytes: 8192,
+      },
+      tray: {
+        relativePath: "Program Files/HubTech/HCH Worker/4/Tray/Hch.Worker.Tray.exe",
+        sha256: trayExecutableSha256,
+        sizeBytes: 8192,
+      },
+      installer: {
+        relativePath: "Program Files/HubTech/HCH Worker/4/Installer/Hch.Worker.Installer.exe",
+        sha256: hash("installer-executable"),
+        sizeBytes: 8192,
+      },
+    },
+    installedService: {
+      serviceName: "HchWorker",
+      displayName: "HCH Worker",
+      scmState: "Running",
+      scmStartMode: "Automatic",
+      scmDelayedAutomaticStart: true,
+      scmAccountName: "LocalSystem",
+      scmImagePath: serviceImagePath,
+      scmProcessId: 3100,
+      processImagePath: serviceImagePath,
+      processStartedAtUtc: iso(startedMs - 240_000),
+      bootStartedAtUtc: iso(startedMs - 7_200_000),
+      serviceExecutableSha256,
+      trayExecutablePath,
+      trayExecutableSha256,
+      observedAtUtc: iso(startedMs - 230_000),
+    },
+    pausedDrainEvidence: "ready-state-requested-and-granted-capacity-zero",
+    repairPreservedState: true,
+    uninstallPreservedState: true,
+    logs: ["administrative-extract", "forced-rollback", "clean-install", "repair", "uninstall"].map((name) => ({
+      name: `${name}.log`,
+      sha256: hash(name),
+    })),
+    completedAtUtc: iso(startedMs - 220_000),
+  };
+}
+
+function createStructuralMsi(directory, msiPath) {
+  const scriptPath = join(directory, `create-msi-${Date.now()}-${Math.random().toString(16).slice(2)}.ps1`);
+  const script = [
+    "param([Parameter(Mandatory)][string]$Path)",
+    "$ErrorActionPreference = 'Stop'",
+    "$installer = New-Object -ComObject WindowsInstaller.Installer",
+    "$database = $installer.OpenDatabase($Path, 3)",
+    "$view = $database.OpenView('CREATE TABLE `Property` (`Property` CHAR(72) NOT NULL, `Value` CHAR(0) LOCALIZABLE PRIMARY KEY `Property`)')",
+    "$view.Execute(); $view.Close()",
+    `foreach ($pair in @(@('ProductCode','${productCode}'),@('ProductVersion','${version}'),@('ProductName','HCH Worker'),@('Manufacturer','HubTech'))) {`,
+    "  $view = $database.OpenView(\"INSERT INTO ``Property`` (``Property``,``Value``) VALUES ('$($pair[0])','$($pair[1])')\")",
+    "  $view.Execute(); $view.Close()",
+    "}",
+    "$summary = $database.SummaryInformation(20)",
+    `$summary.Property(9) = '${packageCode}'`,
+    "$summary.Persist(); $database.Commit()",
+  ].join("\n");
+  writeFileSync(scriptPath, script, "utf8");
+  try {
+    const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-File", scriptPath, "-Path", msiPath], {
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+  } finally {
+    unlinkSync(scriptPath);
+  }
+}
+
+function pausedProbe(capture, observedAtUtc, msiSha256, msiLifecycleEvidenceSha256, transition) {
+  return {
+    schema: "hch.worker-windows-state-capture/v2",
+    collector: "windows-scm-cim-process/v1",
     capture,
     workerVersion: version,
     sourceCommit,
     msiSha256,
-    serviceState: "Running",
+    msiLifecycleEvidenceSha256,
+    productCode,
+    packageCode,
+    serviceName: "HchWorker",
+    scmState: "Running",
+    scmStartMode: "Automatic",
+    scmDelayedAutomaticStart: true,
+    scmAccountName: "LocalSystem",
+    scmImagePath: serviceImagePath,
+    scmProcessId: transition.processId,
+    processId: transition.processId,
+    processImagePath: serviceImagePath,
+    processStartedAtUtc: transition.processStartedAtUtc,
+    bootStartedAtUtc: transition.bootStartedAtUtc,
+    serviceExecutableSha256,
+    trayExecutablePath,
+    trayExecutableSha256,
     operationalState: "Paused",
     acceptingClaims: false,
     maxConcurrentJobs: 0,
@@ -627,6 +829,28 @@ function rollbackReceiptSha256(sample) {
     `previousServiceDefinitionSha256=${sample.previousServiceDefinitionSha256}`,
     `restoredServiceDefinitionSha256=${sample.restoredServiceDefinitionSha256}`,
     `legacyHeartbeatReceiptSha256=${sample.legacyHeartbeat.receiptSha256}`,
+  ]);
+}
+
+function installationReceiptSha256(sample, msiSha256) {
+  return receiptHash("install-restart", [
+    `msiSha256=${msiSha256}`,
+    `msiLifecycleEvidenceSha256=${sample.msiLifecycleEvidenceSha256}`,
+    `productCode=${sample.productCode}`,
+    `packageCode=${sample.packageCode}`,
+    `serviceName=${sample.serviceName}`,
+    `serviceImagePath=${sample.serviceImagePath}`,
+    `serviceExecutableSha256=${sample.serviceExecutableSha256}`,
+    `trayExecutablePath=${sample.trayExecutablePath}`,
+    `trayExecutableSha256=${sample.trayExecutableSha256}`,
+    `installed.bootStartedAtUnixMs=${timeValue(sample.installed.bootStartedAtUtc)}`,
+    `installed.processStartedAtUnixMs=${timeValue(sample.installed.processStartedAtUtc)}`,
+    `installed.observedAtUnixMs=${timeValue(sample.installed.observedAtUtc)}`,
+    `installed.processId=${sample.installed.processId}`,
+    `restart.bootStartedAtUnixMs=${timeValue(sample.restart.bootStartedAtUtc)}`,
+    `restart.processStartedAtUnixMs=${timeValue(sample.restart.processStartedAtUtc)}`,
+    `restart.observedAtUnixMs=${timeValue(sample.restart.observedAtUtc)}`,
+    `restart.processId=${sample.restart.processId}`,
   ]);
 }
 

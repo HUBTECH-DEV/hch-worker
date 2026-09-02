@@ -6,7 +6,7 @@
 
 ## Contexto
 
-O Worker Windows 3.1.0 registra um serviço no SCM, mas o host ainda supervisiona
+O Worker Windows 3.1.x registra um serviço no SCM, mas o host ainda supervisiona
 PowerShell e Node.js. Isso exige runtime auxiliar instalado, amplia a superfície
 de atualização e dificulta obter um serviço realmente independente de terminal.
 
@@ -35,9 +35,10 @@ claims automaticamente.
 
 ## Consequências
 
-- PowerShell e Node.js continuam apenas na linha histórica 3.1.0 e em ferramentas
+- PowerShell e Node.js continuam apenas na linha legada 3.1.x e em ferramentas
   de desenvolvimento; não fazem parte do runtime instalado 4.0.0.
 - O tray é um processo de sessão, não um segundo serviço.
 - O port somente pode ser promovido quando os vetores criptográficos e o ciclo
   editorial forem equivalentes ao protocolo atual.
-- A versão 3.1.0 permanece recuperável durante o canário e a janela de rollback.
+- A ponte 3.1.1 permanece recuperável durante o canário e a janela de rollback;
+  a 3.1.0 não é classificada como histórica antes da promoção comprovada.

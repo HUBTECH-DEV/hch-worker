@@ -6,9 +6,9 @@ namespace Hch.Worker.IPC.Contracts;
 
 public static class IpcProtocol
 {
-    public const int Version = 1;
+    public const int Version = 2;
     public const int MaximumFrameBytes = 1024 * 1024;
-    public const string PipePrefix = "Hch.Worker.Control.v1";
+    public const string PipePrefix = "Hch.Worker.Control.v2";
 
     public static string PipeName(string nodeId)
     {
@@ -165,14 +165,31 @@ public sealed record WorkerSnapshotPayload(
     bool UpdateCompatible,
     string? OllamaModel,
     bool OllamaAvailable,
-    int QueueDepth,
+    int? QueueDepth,
     long CompletedJobs,
     long FailedJobs,
     long RetryJobs,
     double? AverageDurationSeconds,
+    double? ThroughputJobsPerHour,
     IReadOnlyList<JobProgressPayload> ActiveWork,
+    IReadOnlyList<OperationalHistoryPointPayload> OperationalHistory,
     ResourceSnapshotPayload Resources,
     string? LastSanitizedErrorCode);
+
+/// <summary>
+/// Bounded, aggregate-only operational history. Assignment identifiers,
+/// content, lease material and credentials are deliberately excluded.
+/// </summary>
+public sealed record OperationalHistoryPointPayload(
+    DateTimeOffset ObservedAt,
+    int ActiveJobs,
+    int ReservedJobs,
+    int? QueueDepth,
+    long CompletedJobs,
+    long FailedJobs,
+    long RetryJobs,
+    double? ThroughputJobsPerHour,
+    double? AverageDurationSeconds);
 
 public sealed record JobProgressPayload(
     string AssignmentId,

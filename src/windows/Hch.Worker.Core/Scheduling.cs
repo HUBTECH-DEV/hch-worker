@@ -138,9 +138,15 @@ public sealed class ConcurrentJobScheduler : IAsyncDisposable
                 return;
             }
 
-            var requested = Math.Min(snapshot.AvailableSlots, snapshot.ClaimBatchSize);
+            int recommended = _control.CurrentRecommendedClaimCount();
+            if (recommended < 1)
+            {
+                return;
+            }
+
+            var requested = Math.Min(recommended, snapshot.ClaimBatchSize);
             var reserved = 0;
-            while (reserved < requested && _control.TryReserveSlot())
+            while (reserved < requested && _control.TryReserveClaimSlot())
             {
                 reserved++;
             }

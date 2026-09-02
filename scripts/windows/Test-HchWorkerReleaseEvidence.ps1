@@ -88,6 +88,9 @@ if (Get-ChildItem -LiteralPath $releaseRoot -File -Recurse |
     Where-Object { $_.Extension -in '.pfx', '.p12', '.key', '.snk' }) {
     throw 'Release directory contains private-key-shaped material.'
 }
+if (Get-ChildItem -LiteralPath $releaseRoot -Directory -Force) {
+    throw 'Final public release inventory must be flat so every checksummed file can be published with the same name.'
+}
 
 $declared = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
 foreach ($line in Get-Content -LiteralPath $checksumPath) {
@@ -157,8 +160,10 @@ try {
 
 $provenance = Read-RequiredJson (Join-Path $releaseRoot 'build-provenance.json')
 $signingStatus = Read-RequiredJson (Join-Path $releaseRoot 'signing-status.json')
-$dependency = Read-RequiredJson (Join-Path $releaseRoot 'security\dependency-vulnerability-scan.json')
-$defender = Read-RequiredJson (Join-Path $releaseRoot 'security\defender-signed-release-scan.json')
+$releaseCompatibilityPath = Join-Path $releaseRoot 'release-compatibility.json'
+$releaseCompatibility = Read-RequiredJson $releaseCompatibilityPath
+$dependency = Read-RequiredJson (Join-Path $releaseRoot 'dependency-vulnerability-scan.json')
+$defender = Read-RequiredJson (Join-Path $releaseRoot 'defender-signed-release-scan.json')
 $msiSha256 = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($provenance.schema -ne 'hch.worker-windows-provenance/v3' `
     -or $provenance.version -ne $Version `
@@ -168,16 +173,33 @@ if ($provenance.schema -ne 'hch.worker-windows-provenance/v3' `
     -or $provenance.trust.signerCertificateSha256 -ne $expectedSignerCertificateSha256) {
     throw 'Build provenance does not match final MSI and signer policy.'
 }
+$compatibilitySha256 = (Get-FileHash -LiteralPath $releaseCompatibilityPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$compatibilityProperties = @($releaseCompatibility.PSObject.Properties.Name | Sort-Object)
+$expectedCompatibilityProperties = @('basis', 'compatibility', 'contentImpact', 'previousSupportedVersion', 'schema', 'version')
+if (($compatibilityProperties -join "`n") -cne (($expectedCompatibilityProperties | Sort-Object) -join "`n") `
+    -or $releaseCompatibility.schema -cne 'hch.worker-windows-release-compatibility/v1' `
+    -or $releaseCompatibility.version -cne $Version `
+    -or $releaseCompatibility.previousSupportedVersion -cne '3.1.1' `
+    -or (($releaseCompatibility.compatibility -cne 'compatible' -or $releaseCompatibility.contentImpact -cne 'none') `
+        -and ($releaseCompatibility.compatibility -cne 'incompatible' -or $releaseCompatibility.contentImpact -cne 'generated-content')) `
+    -or $provenance.compatibility.declarationSha256 -cne $compatibilitySha256 `
+    -or $provenance.compatibility.previousSupportedVersion -cne $releaseCompatibility.previousSupportedVersion `
+    -or $provenance.compatibility.compatibility -cne $releaseCompatibility.compatibility `
+    -or $provenance.compatibility.contentImpact -cne $releaseCompatibility.contentImpact) {
+    throw 'Release compatibility evidence is invalid or detached from provenance.'
+}
 if ($signingStatus.schema -ne 'hch.worker-windows-signing-status/v2' `
     -or -not $signingStatus.signed `
     -or $signingStatus.signerThumbprint -ne $expectedSignerThumbprint `
     -or $signingStatus.signerCertificateSha256 -ne $expectedSignerCertificateSha256 `
-    -or $dependency.status -ne 'passed') {
+    -or $dependency.status -ne 'passed' `
+    -or $signingStatus.releaseCompatibility -cne $releaseCompatibility.compatibility `
+    -or $signingStatus.releaseContentImpact -cne $releaseCompatibility.contentImpact) {
     throw 'Signing or dependency policy evidence is invalid.'
 }
 
 if ($RequireCandidate) {
-    $e2e = Read-RequiredJson (Join-Path $releaseRoot 'security\msi-disposable-e2e.json')
+    $e2e = Read-RequiredJson (Join-Path $releaseRoot 'msi-disposable-e2e.json')
     if ($signingStatus.releaseIntent -ne 'candidate' `
         -or $signingStatus.releasable `
         -or -not $signingStatus.rootTrustPinned `

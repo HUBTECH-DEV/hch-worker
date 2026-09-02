@@ -29,7 +29,6 @@ $artifactRoot = Join-Path $repositoryRoot 'artifacts\windows-v4'
 $workRoot = Join-Path $artifactRoot 'work'
 $releaseRoot = Join-Path $artifactRoot 'release'
 $securityWork = Join-Path $workRoot 'security'
-$securityRelease = Join-Path $releaseRoot 'security'
 $preparationPath = Join-Path $workRoot 'package-preparation.json'
 $payloadReceiptPath = Join-Path $workRoot 'signed-payloads.json'
 $unsignedMsiReceiptPath = Join-Path $workRoot 'unsigned-msi.json'
@@ -55,6 +54,36 @@ function Read-RequiredJson {
         throw "Required release receipt is missing: $Path"
     }
     return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -Depth 100
+}
+
+function Read-ReleaseCompatibility {
+    $path = Join-Path $windowsRoot 'release-compatibility.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'Windows release compatibility declaration is missing.'
+    }
+    $item = Get-Item -LiteralPath $path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $item.Length -le 0 -or $item.Length -gt 16KB) {
+        throw 'Windows release compatibility declaration is not a bounded regular file.'
+    }
+    $bytes = [IO.File]::ReadAllBytes($path)
+    $value = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) | ConvertFrom-Json
+    $expectedProperties = @('basis', 'compatibility', 'contentImpact', 'previousSupportedVersion', 'schema', 'version')
+    if ((@($value.PSObject.Properties.Name | Sort-Object) -join "`n") -cne
+            (($expectedProperties | Sort-Object) -join "`n") -or
+        $value.schema -cne 'hch.worker-windows-release-compatibility/v1' -or
+        $value.version -cne $Version -or
+        $value.previousSupportedVersion -cne '3.1.1' -or
+        (($value.compatibility -cne 'compatible' -or $value.contentImpact -cne 'none') -and
+            ($value.compatibility -cne 'incompatible' -or $value.contentImpact -cne 'generated-content')) -or
+        $value.basis -isnot [string] -or $value.basis.Length -lt 32 -or $value.basis.Length -gt 1000) {
+        throw 'Windows release compatibility declaration is invalid.'
+    }
+    return [pscustomobject]@{
+        Path = $path
+        Sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+        Value = $value
+    }
 }
 
 function Resolve-PreparedPath {
@@ -116,6 +145,7 @@ foreach ($secretName in 'HCH_SIGN_PFX_BASE64', 'HCH_SIGN_PFX_PASSWORD', 'HCH_SIG
 }
 
 $preparation = Read-RequiredJson $preparationPath
+$releaseCompatibility = Read-ReleaseCompatibility
 $payloadReceipt = Read-RequiredJson $payloadReceiptPath
 $unsignedMsiReceipt = Read-RequiredJson $unsignedMsiReceiptPath
 $signedMsiReceipt = Read-RequiredJson $signedMsiReceiptPath
@@ -128,6 +158,12 @@ if ($preparation.schema -ne 'hch.worker-windows-package-preparation/v1' `
     -or $unsignedMsiReceipt.schema -ne 'hch.worker-windows-unsigned-msi/v1' `
     -or $signedMsiReceipt.schema -ne 'hch.worker-windows-signed-msi/v1') {
     throw 'Release receipts do not describe the requested product, version and intent.'
+}
+if ($preparation.releaseCompatibilitySha256 -cne $releaseCompatibility.Sha256 -or
+    $preparation.releaseCompatibility.previousSupportedVersion -cne $releaseCompatibility.Value.previousSupportedVersion -or
+    $preparation.releaseCompatibility.compatibility -cne $releaseCompatibility.Value.compatibility -or
+    $preparation.releaseCompatibility.contentImpact -cne $releaseCompatibility.Value.contentImpact) {
+    throw 'Release compatibility declaration changed after package preparation.'
 }
 
 $preparationSha256 = (Get-FileHash -LiteralPath $preparationPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -243,12 +279,13 @@ if (-not $candidateReady) {
     throw 'Signed candidate policy is not satisfied.'
 }
 
-New-Item -ItemType Directory -Path $securityRelease -Force | Out-Null
-Copy-Item -LiteralPath $dependencyEvidencePath -Destination (Join-Path $securityRelease 'dependency-vulnerability-scan.json')
-Copy-Item -LiteralPath $defenderEvidencePath -Destination (Join-Path $securityRelease 'defender-signed-release-scan.json')
+Copy-Item -LiteralPath $releaseCompatibility.Path -Destination (Join-Path $releaseRoot 'release-compatibility.json')
+
+Copy-Item -LiteralPath $dependencyEvidencePath -Destination (Join-Path $releaseRoot 'dependency-vulnerability-scan.json')
+Copy-Item -LiteralPath $defenderEvidencePath -Destination (Join-Path $releaseRoot 'defender-signed-release-scan.json')
 if ($null -ne $e2eEvidence) {
     $e2eEvidence | ConvertTo-Json -Depth 100 |
-        Set-Content -LiteralPath (Join-Path $securityRelease 'msi-disposable-e2e.json') -Encoding utf8NoBOM
+        Set-Content -LiteralPath (Join-Path $releaseRoot 'msi-disposable-e2e.json') -Encoding utf8NoBOM
 }
 
 $provenance = [ordered]@{
@@ -280,6 +317,12 @@ $provenance = [ordered]@{
         signerThumbprint = $expectedSignerThumbprint
         signerCertificateSha256 = $expectedSignerCertificateSha256
         timestampUrl = $TimestampUrl
+    }
+    compatibility = [ordered]@{
+        declarationSha256 = $releaseCompatibility.Sha256
+        previousSupportedVersion = $releaseCompatibility.Value.previousSupportedVersion
+        compatibility = $releaseCompatibility.Value.compatibility
+        contentImpact = $releaseCompatibility.Value.contentImpact
     }
     gates = [ordered]@{
         dependencyVulnerabilityScan = $dependencyEvidence.status
@@ -313,6 +356,8 @@ $provenance | ConvertTo-Json -Depth 12 |
     disposableMsiLifecycle = if ($null -eq $e2eEvidence) { 'not-run' } else { $e2eEvidence.status }
     detachedChecksumSignature = 'required-companion-SHA256SUMS.p7s'
     githubArtifactAttestation = 'workflow-required-before-canary'
+    releaseCompatibility = $releaseCompatibility.Value.compatibility
+    releaseContentImpact = $releaseCompatibility.Value.contentImpact
     releasable = $false
 } | ConvertTo-Json -Depth 8 |
     Set-Content -LiteralPath (Join-Path $releaseRoot 'signing-status.json') -Encoding utf8NoBOM
@@ -332,6 +377,21 @@ Invoke-Checked -FilePath dotnet -ArgumentList @(
     '-b', $releaseRoot,
     '-o', (Join-Path $releaseRoot 'sbom-validation.json'),
     '-mi', 'SPDX:2.2')
+
+$generatedSbomRoot = Join-Path $releaseRoot '_manifest\spdx_2.2'
+$generatedSbom = Join-Path $generatedSbomRoot 'manifest.spdx.json'
+$generatedSbomHash = Join-Path $generatedSbomRoot 'manifest.spdx.json.sha256'
+foreach ($path in $generatedSbom, $generatedSbomHash) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'SBOM tool did not produce its expected signed-candidate outputs.'
+    }
+}
+Move-Item -LiteralPath $generatedSbom -Destination (Join-Path $releaseRoot 'sbom.spdx.json')
+Move-Item -LiteralPath $generatedSbomHash -Destination (Join-Path $releaseRoot 'sbom.spdx.json.sha256')
+$generatedManifestRoot = Join-Path $releaseRoot '_manifest'
+if (Test-Path -LiteralPath $generatedManifestRoot) {
+    Remove-Item -LiteralPath $generatedManifestRoot -Recurse -Force
+}
 
 $hashLines = Get-ChildItem -LiteralPath $releaseRoot -File -Recurse |
     Where-Object { $_.Name -notin 'SHA256SUMS.txt', 'SHA256SUMS.p7s' } |

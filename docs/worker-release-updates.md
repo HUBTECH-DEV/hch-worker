@@ -93,38 +93,51 @@ Não se deve editar silenciosamente uma release histórica, criar um alias
 durante a janela. O fallback genérico existe para a ponte multiplataforma, não
 para voltar a misturar os canais por sistema.
 
-### Estado atual da ponte: bloqueada para produção
+### Estado atual da ponte: produtor implementado; ativação administrativa pendente
 
-O contrato acima é o alvo de promoção, não uma declaração de que a ponte já
-pode ser publicada. No estado atual:
+O produtor versionado agora existe em `.github/workflows/bridge-package.yml`.
+Ele testa a fonte portátil, cria arquivos Linux/macOS determinísticos, executa
+smoke test real em Linux e macOS, gera o Setup Windows com versão injetada,
+assina o EXE e o `SHA256SUMS.txt`, atesta os três pacotes e publica somente os
+bytes exatos já validados. `push` e `pull_request` executam apenas os testes de
+fonte; assinatura/publicação só existem em `workflow_dispatch` com
+`publish=true`, `main` protegida e dois environments separados.
 
-- `.github/workflows/bridge-package.yml` ainda não existe; o workflow de
-  promoção verifica essa ausência e falha fechado antes de confiar em uma
-  attestation;
+Isso conclui a automação de desenvolvimento, mas não declara que a ponte já
+pode ser publicada. Ainda dependem de controles ou evidências externas:
+
 - a imutabilidade de releases ainda não está registrada como política
-  administrativa do repositório; proteger apenas a tag não torna imutáveis os
-  assets da ponte;
-- o contrato da ponte usa o EXE que o produtor Windows legado suporta; o MSI
-  nativo existente pertence à linha 4.x e não pode ser renomeado como ponte
-  3.1;
-- Linux e macOS não possuem produtores versionados dos arquivos `.tar.gz`;
-- os limites atuais validam o tamanho comprimido publicado, mas o produtor
-  futuro ainda precisa impor limite de tamanho descomprimido e tempo máximo de
-  inspeção, além dos smoke tests nos sistemas reais;
+  administrativa do repositório. O workflow exige
+  `RELEASE_IMMUTABILITY_ENFORCED=true`, tag anotada protegida e revisão do
+  environment antes de publicar; proteger apenas a tag não protege os assets;
+- os environments `bridge-release-signing` e `bridge-release-promotion`, seus
+  revisores, os pins públicos, a raiz pública e o segredo do certificado ainda
+  precisam ser configurados no GitHub;
+- a tag anotada `v3.1.1` ainda precisa ser criada sobre o commit exato da
+  `main` somente depois que os checks obrigatórios passarem;
+- o contrato da ponte continua usando o EXE legado, propositalmente. O MSI
+  nativo pertence à linha Windows 4.x e nunca é renomeado como ponte 3.1;
+- os pacotes impõem limites comprimidos e descomprimidos e smoke tests nos
+  sistemas reais do CI; a execução sustentada em hosts da frota continua sendo
+  evidência operacional, não evidência de build;
 - as instalações 3.1 não configuram o backend administrativo chamado por
   `hch-worker-update.mjs`, portanto a release isolada mostra o aviso, mas não
   aplica a atualização;
 - o runtime/orquestrador ainda não persiste uma prova auditável de
   `releaseDiscoveryProtocol=platform-release-list/v1` associada aos heartbeats;
-- os marcadores da release Windows ainda são inputs humanos. O runtime valida
-  compatibilidade de conteúdo pelo `contentContractHash` do manifesto assinado,
-  mas o workflow de release ainda não correlaciona esse manifesto, ou um
-  relatório assinado equivalente, ao `source_commit` e ao MSI candidato.
+- a declaração Windows 4.0.0 agora é versionada em
+  `src/windows/release-compatibility.json`, incorporada ao conjunto de checksums
+  e ao provenance do MSI. O workflow de promoção deriva os marcadores da
+  release desse arquivo, sem aceitar um valor manual no `workflow_dispatch`.
+  O arquivo é metadado humano revisado, protegido pelos hashes e assinaturas do
+  conjunto; ele não prova sozinho a compatibilidade semântica. A promoção exige
+  também o relatório de compatibilidade, o canário e a correlação operacional,
+  enquanto o `contentContractHash` do manifesto assinado continua sendo a
+  autoridade em runtime para uma mudança que afete conteúdo.
 
-Essas lacunas precisam ser implementadas e testadas antes da criação de
-`v3.1.1`. Não se deve criar assets manuais para contornar o produtor, alterar o
-inventário do gate, tratar input humano como prova de compatibilidade ou declarar
-migração de frota sem a telemetria derivável.
+Os controles externos precisam ser concluídos antes da criação de `v3.1.1`.
+Não se deve criar assets manuais para contornar o produtor, alterar o inventário
+do gate ou declarar migração de frota sem a telemetria derivável.
 
 A consulta ao GitHub é somente descoberta. Ela não autoriza a execução do
 conteúdo publicado. O clique usa o mesmo endpoint local protegido por loopback,

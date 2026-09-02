@@ -111,6 +111,131 @@ function Get-MsiProperty {
     }
 }
 
+function Get-MsiPackageCode {
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $database = $null
+    $summary = $null
+    try {
+        $database = $installer.OpenDatabase($resolvedMsi, 0)
+        $summary = $database.SummaryInformation(0)
+        $raw = [string]$summary.Property(9)
+        $parsed = [Guid]::Empty
+        if (-not [Guid]::TryParseExact($raw, 'B', [ref]$parsed) -or $parsed -eq [Guid]::Empty) {
+            throw 'MSI PackageCode is missing or invalid.'
+        }
+        return $parsed.ToString('B').ToUpperInvariant()
+    } finally {
+        if ($null -ne $summary) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($summary) }
+        if ($null -ne $database) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($database) }
+        if ($null -ne $installer) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer) }
+    }
+}
+
+function Resolve-ScmExecutablePath {
+    param([Parameter(Mandatory)][string]$ImagePath)
+
+    $expanded = [Environment]::ExpandEnvironmentVariables($ImagePath).Trim()
+    if ($expanded.StartsWith('"', [StringComparison]::Ordinal)) {
+        if ($expanded -notmatch '^"([^"\r\n]+)"$') {
+            throw 'HchWorker ImagePath contains arguments or malformed quoting.'
+        }
+        $expanded = $Matches[1]
+    }
+    if (-not [IO.Path]::IsPathFullyQualified($expanded) -or $expanded.IndexOfAny([char[]]"`r`n") -ge 0) {
+        throw 'HchWorker ImagePath is not a fully-qualified executable path.'
+    }
+    return [IO.Path]::GetFullPath($expanded)
+}
+
+function Get-ExtractedPayloadEvidence {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$ExpectedParentName
+    )
+
+    $matches = @(Get-ChildItem -LiteralPath $extractRoot -File -Recurse -Filter $Name |
+        Where-Object { $_.Directory.Name -ceq $ExpectedParentName })
+    if ($matches.Count -ne 1) {
+        throw "Administrative image did not contain exactly one $ExpectedParentName/$Name payload."
+    }
+    $item = $matches[0]
+    return [ordered]@{
+        relativePath = ([IO.Path]::GetRelativePath($extractRoot, $item.FullName) -replace '\\', '/')
+        sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        sizeBytes = [int64]$item.Length
+    }
+}
+
+function Get-InstalledServiceSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$ExpectedServiceSha256,
+        [Parameter(Mandatory)][string]$ExpectedTraySha256
+    )
+
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+    $service = $null
+    do {
+        $service = Get-CimInstance Win32_Service -Filter "Name='HchWorker'" -ErrorAction Stop
+        if ($null -ne $service -and $service.State -eq 'Running' -and [uint32]$service.ProcessId -gt 0) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    if ($null -eq $service -or $service.State -ne 'Running' -or [uint32]$service.ProcessId -le 0) {
+        throw 'HchWorker did not reach a running SCM state with a process ID.'
+    }
+
+    $expectedServicePath = [IO.Path]::GetFullPath((Join-Path $programFilesRoot '4\Service\Hch.Worker.Service.exe'))
+    $expectedTrayPath = [IO.Path]::GetFullPath((Join-Path $programFilesRoot '4\Tray\Hch.Worker.Tray.exe'))
+    $serviceImagePath = Resolve-ScmExecutablePath ([string]$service.PathName)
+    if (-not [string]::Equals($serviceImagePath, $expectedServicePath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'SCM ImagePath does not point to the installed HCH Worker v4 service payload.'
+    }
+    $process = Get-Process -Id ([int]$service.ProcessId) -ErrorAction Stop
+    try {
+        $processImagePath = [IO.Path]::GetFullPath($process.Path)
+        $processStartedAt = [DateTimeOffset]$process.StartTime.ToUniversalTime()
+    } finally {
+        $process.Dispose()
+    }
+    if (-not [string]::Equals($processImagePath, $serviceImagePath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'SCM and process ImagePath observations do not identify the same executable.'
+    }
+    $serviceSha256 = Get-RequiredHash $serviceImagePath
+    $traySha256 = Get-RequiredHash $expectedTrayPath
+    if ($serviceSha256 -cne $ExpectedServiceSha256 -or $traySha256 -cne $ExpectedTraySha256) {
+        throw 'Installed service/tray hashes do not match the exact MSI administrative image.'
+    }
+    $delayedAutoStart = Get-ItemPropertyValue `
+        -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\HchWorker' `
+        -Name DelayedAutostart `
+        -ErrorAction Stop
+    $bootStartedAt = [DateTimeOffset](Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+    $observedAt = [DateTimeOffset]::UtcNow
+    if ($service.StartMode -ne 'Auto' `
+        -or [int]$delayedAutoStart -ne 1 `
+        -or $service.StartName -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM') `
+        -or $bootStartedAt.ToUniversalTime() -ge $processStartedAt `
+        -or $processStartedAt -gt $observedAt) {
+        throw 'Installed HchWorker SCM/process/boot state is inconsistent.'
+    }
+    return [ordered]@{
+        serviceName = [string]$service.Name
+        displayName = [string]$service.DisplayName
+        scmState = [string]$service.State
+        scmStartMode = 'Automatic'
+        scmDelayedAutomaticStart = $true
+        scmAccountName = 'LocalSystem'
+        scmImagePath = $serviceImagePath
+        scmProcessId = [int64]$service.ProcessId
+        processImagePath = $processImagePath
+        processStartedAtUtc = $processStartedAt.ToUniversalTime().ToString('O')
+        bootStartedAtUtc = $bootStartedAt.ToUniversalTime().ToString('O')
+        serviceExecutableSha256 = $serviceSha256
+        trayExecutablePath = $expectedTrayPath
+        trayExecutableSha256 = $traySha256
+        observedAtUtc = $observedAt.ToUniversalTime().ToString('O')
+    }
+}
+
 function Test-ProductRegistered {
     param([Parameter(Mandatory)][string]$ProductCode)
 
@@ -251,15 +376,19 @@ Assert-DisposableEnvironment
 New-Item -ItemType Directory -Path $testRoot, $extractRoot, $logsRoot, $evidenceDirectory -Force | Out-Null
 
 $productCode = Get-MsiProperty 'ProductCode'
+$productGuid = [Guid]::Empty
+$packageCode = Get-MsiPackageCode
 $productVersion = Get-MsiProperty 'ProductVersion'
 $productName = Get-MsiProperty 'ProductName'
 $manufacturer = Get-MsiProperty 'Manufacturer'
-if ($productCode -notmatch '^\{[A-Fa-f0-9-]{36}\}$' `
+if (-not [Guid]::TryParseExact($productCode, 'B', [ref]$productGuid) `
+    -or $productGuid -eq [Guid]::Empty `
     -or $productVersion -ne $Version `
     -or $productName -ne 'HCH Worker' `
     -or $manufacturer -ne 'HubTech') {
     throw 'MSI identity does not match the expected HCH Worker product and version.'
 }
+$productCode = $productGuid.ToString('B').ToUpperInvariant()
 Assert-NoInstalledProduct $productCode
 
 $msiHash = (Get-FileHash -LiteralPath $resolvedMsi -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -290,6 +419,11 @@ try {
         throw 'Administrative image did not contain the expected first-party signed payloads.'
     }
     foreach ($file in $extractedSignables) { Assert-SignedFile $file.FullName }
+    $extractedPayloads = [ordered]@{
+        service = Get-ExtractedPayloadEvidence 'Hch.Worker.Service.exe' 'Service'
+        tray = Get-ExtractedPayloadEvidence 'Hch.Worker.Tray.exe' 'Tray'
+        installer = Get-ExtractedPayloadEvidence 'Hch.Worker.Installer.exe' 'Installer'
+    }
 
     $rollbackLog = Join-Path $logsRoot 'forced-rollback.log'
     [void](Invoke-MsiExec @(
@@ -309,6 +443,20 @@ try {
     $createdProductData = Test-Path -LiteralPath $programDataRoot
     if (-not (Test-ProductRegistered $productCode)) { throw 'Clean install did not register the MSI product.' }
     if (-not (Get-Service -Name HchWorker -ErrorAction SilentlyContinue)) { throw 'Clean install did not create HchWorker service.' }
+    $windowsInstaller = New-Object -ComObject WindowsInstaller.Installer
+    try {
+        $installedPackageCode = [string]$windowsInstaller.ProductInfo($productCode, 'PackageCode')
+    } finally {
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($windowsInstaller)
+    }
+    $installedPackageGuid = [Guid]::Empty
+    if (-not [Guid]::TryParseExact($installedPackageCode, 'B', [ref]$installedPackageGuid) `
+        -or $installedPackageGuid.ToString('B').ToUpperInvariant() -cne $packageCode) {
+        throw 'Registered MSI PackageCode does not match the installed candidate.'
+    }
+    $installedService = Get-InstalledServiceSnapshot `
+        -ExpectedServiceSha256 $extractedPayloads.service.sha256 `
+        -ExpectedTraySha256 $extractedPayloads.tray.sha256
 
     $configPath = Join-Path $programDataRoot 'config.json'
     $identityPath = Join-Path $programDataRoot 'state\identity\worker-ed25519.pkcs8.dpapi'
@@ -366,13 +514,17 @@ try {
         status = 'passed'
         version = $Version
         productCode = $productCode
+        packageCode = $packageCode
         msiSha256 = $msiHash
+        msiLengthBytes = [int64](Get-Item -LiteralPath $resolvedMsi).Length
         signerThumbprint = $expectedSignerThumbprint
         signerCertificateSha256 = $expectedSignerCertificateSha256
         environmentKind = $EnvironmentKind
         machineName = [Environment]::MachineName
         rollbackExitCode = 1603
         extractedFirstPartySignedFiles = $extractedSignables.Count
+        extractedPayloads = $extractedPayloads
+        installedService = $installedService
         pausedDrainEvidence = $pausedDrainEvidence
         repairPreservedState = $true
         uninstallPreservedState = $true

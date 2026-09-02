@@ -16,9 +16,11 @@ internal sealed class TrayController : IDisposable
     private readonly WinForms.ToolStripMenuItem pauseResumeItem;
     private readonly WinForms.ToolStripMenuItem stopItem;
     private readonly DispatcherTimer refreshTimer;
+    private readonly SemaphoreSlim refreshGate = new(1, 1);
     private Icon? currentIcon;
     private WorkerSnapshotPayload? snapshot;
     private bool onboardingVisible;
+    private bool onboardingDismissedForSession;
     private bool disposed;
 
     public TrayController()
@@ -26,11 +28,11 @@ internal sealed class TrayController : IDisposable
         client = new NamedPipeWorkerClient(TrayConfiguration.ResolveNodeId());
         optionsWindow = new MainWindow(client);
 
-        startItem = new WinForms.ToolStripMenuItem("Start", null, async (_, _) => await RunCommandAsync(client.StartAsync));
-        pauseResumeItem = new WinForms.ToolStripMenuItem("Pause", null, async (_, _) => await PauseOrResumeAsync());
-        stopItem = new WinForms.ToolStripMenuItem("Stop", null, async (_, _) => await StopAsync());
-        var optionsItem = new WinForms.ToolStripMenuItem("Options", null, (_, _) => ShowOptions());
-        var exitTrayItem = new WinForms.ToolStripMenuItem("Fechar somente o tray", null, (_, _) => ExitTray());
+        startItem = new WinForms.ToolStripMenuItem("&Start", null, async (_, _) => await RunCommandAsync(client.StartAsync));
+        pauseResumeItem = new WinForms.ToolStripMenuItem("&Pause", null, async (_, _) => await PauseOrResumeAsync());
+        stopItem = new WinForms.ToolStripMenuItem("S&top", null, async (_, _) => await StopAsync());
+        var optionsItem = new WinForms.ToolStripMenuItem("&Options", null, (_, _) => ShowOptions());
+        var exitTrayItem = new WinForms.ToolStripMenuItem("&Fechar somente o tray", null, (_, _) => ExitTray());
 
         var menu = new WinForms.ContextMenuStrip();
         menu.Items.AddRange([
@@ -54,7 +56,7 @@ internal sealed class TrayController : IDisposable
         refreshTimer = new DispatcherTimer(
             TimeSpan.FromSeconds(5),
             DispatcherPriority.Background,
-            async (_, _) => await RefreshAsync(),
+            async (_, _) => await TryRefreshAsync(),
             System.Windows.Application.Current.Dispatcher);
     }
 
@@ -82,18 +84,44 @@ internal sealed class TrayController : IDisposable
         optionsWindow.CloseForApplicationExit();
     }
 
-    private async Task RefreshAsync()
+    private Task RefreshAsync() => RefreshCoreAsync(waitForTurn: true);
+
+    private Task TryRefreshAsync() => RefreshCoreAsync(waitForTurn: false);
+
+    private async Task RefreshCoreAsync(bool waitForTurn)
     {
+        bool entered;
+        if (waitForTurn)
+        {
+            await refreshGate.WaitAsync().ConfigureAwait(true);
+            entered = true;
+        }
+        else
+        {
+            entered = refreshGate.Wait(0);
+        }
+
+        if (!entered)
+        {
+            return;
+        }
+
         try
         {
             snapshot = await client.GetSnapshotAsync().ConfigureAwait(true);
             UpdatePresentation(snapshot);
-            if ((!snapshot.Ready || snapshot.TrustStatus is not "ready" and not "trusted") && !onboardingVisible)
+            bool trusted = OnboardingCompletionPolicy.IsTrustValid(snapshot.TrustStatus);
+            bool manifestValid = OnboardingCompletionPolicy.IsManifestValid(snapshot.ManifestStatus);
+            bool readinessValid = OnboardingCompletionPolicy.IsReadinessValid(snapshot, DateTimeOffset.UtcNow);
+            if ((!readinessValid || !trusted || !manifestValid)
+                && !onboardingVisible
+                && !onboardingDismissedForSession)
             {
                 _ = System.Windows.Application.Current.Dispatcher.BeginInvoke(ShowOnboarding);
             }
         }
-        catch (Exception error) when (error is IOException or TimeoutException or IpcContractException or WorkerControlClientException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or TimeoutException or IpcContractException or WorkerControlClientException)
         {
             snapshot = null;
             startItem.Enabled = false;
@@ -102,20 +130,31 @@ internal sealed class TrayController : IDisposable
             notifyIcon.Text = "HCH Worker · serviço indisponível";
             SetIcon(TrayGlyph.Attention, updateAvailable: false);
         }
+        finally
+        {
+            refreshGate.Release();
+        }
     }
 
     private void UpdatePresentation(WorkerSnapshotPayload value)
     {
         bool running = string.Equals(value.OperationalState, "Running", StringComparison.OrdinalIgnoreCase);
-        bool paused = value.OperationalState is "Paused" or "Pausing";
-        bool changing = value.OperationalState is "Stopping" or "Updating";
+        bool paused = string.Equals(value.OperationalState, "Paused", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value.OperationalState, "Pausing", StringComparison.OrdinalIgnoreCase);
+        bool changing = string.Equals(value.OperationalState, "Stopping", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value.OperationalState, "Updating", StringComparison.OrdinalIgnoreCase);
+        bool trusted = OnboardingCompletionPolicy.IsTrustValid(value.TrustStatus);
+        bool manifestValid = OnboardingCompletionPolicy.IsManifestValid(value.ManifestStatus);
+        bool readinessValid = OnboardingCompletionPolicy.IsReadinessValid(value, DateTimeOffset.UtcNow);
 
-        startItem.Enabled = value.Ready && !running && !changing;
+        startItem.Enabled = readinessValid && trusted && manifestValid && !running && !changing;
         pauseResumeItem.Text = running ? "Pause" : "Resume";
-        pauseResumeItem.Enabled = value.Ready && (running || paused) && !changing;
-        stopItem.Enabled = value.Ready && !changing && value.OperationalState is "Running" or "Pausing" or "Paused";
+        pauseResumeItem.Enabled = !changing
+            && (running || (readinessValid && trusted && manifestValid && paused));
+        stopItem.Enabled = !changing && (running || paused);
 
-        TrayGlyph glyph = !value.Ready || value.ServiceState is not "Running"
+        TrayGlyph glyph = !readinessValid || !trusted || !manifestValid
+            || !string.Equals(value.ServiceState, "Running", StringComparison.OrdinalIgnoreCase)
             ? TrayGlyph.Attention
             : running
                 ? TrayGlyph.Running
@@ -133,7 +172,7 @@ internal sealed class TrayController : IDisposable
 
     private async Task PauseOrResumeAsync()
     {
-        if (snapshot?.OperationalState is "Running")
+        if (string.Equals(snapshot?.OperationalState, "Running", StringComparison.OrdinalIgnoreCase))
         {
             await RunCommandAsync(client.PauseAsync).ConfigureAwait(true);
         }
@@ -167,7 +206,8 @@ internal sealed class TrayController : IDisposable
         {
             _ = await command(CancellationToken.None).ConfigureAwait(true);
         }
-        catch (Exception error) when (error is IOException or TimeoutException or IpcContractException or WorkerControlClientException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or TimeoutException or IpcContractException or WorkerControlClientException)
         {
             notifyIcon.ShowBalloonTip(
                 4_000,
@@ -210,8 +250,15 @@ internal sealed class TrayController : IDisposable
         {
             Owner = optionsWindow,
         };
-        onboarding.Closed += (_, _) => onboardingVisible = false;
-        _ = onboarding.ShowDialog();
+        bool? result = onboarding.ShowDialog();
+        onboardingVisible = false;
+        if (result != true)
+        {
+            // Cancellation keeps the Worker paused and suppresses an immediate
+            // reopen loop. The wizard is offered again at the next tray start
+            // and remains available manually from Options.
+            onboardingDismissedForSession = true;
+        }
     }
 
     private void ExitTray()

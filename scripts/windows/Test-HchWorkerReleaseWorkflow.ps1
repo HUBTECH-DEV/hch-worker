@@ -8,17 +8,21 @@ $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).
 $ciPath = Join-Path $repositoryRoot '.github\workflows\ci.yml'
 $candidatePath = Join-Path $repositoryRoot '.github\workflows\windows-package.yml'
 $promotionPath = Join-Path $repositoryRoot '.github\workflows\windows-release.yml'
+$bridgeWorkflowPath = Join-Path $repositoryRoot '.github\workflows\bridge-package.yml'
 $canaryValidator = Join-Path $repositoryRoot 'scripts\windows\Test-HchWorkerCanaryEvidence.ps1'
 $canaryExporter = Join-Path $repositoryRoot 'scripts\windows\Export-HchWorkerCanaryEvidence.ps1'
 $canarySigner = Join-Path $repositoryRoot 'scripts\windows\Sign-HchWorkerCanaryEvidence.ps1'
 $bridgeReleaseValidator = Join-Path $repositoryRoot 'scripts\windows\Test-HchWorkerBridgeRelease.ps1'
+$bridgeArchiveBuilder = Join-Path $repositoryRoot 'scripts\windows\Build-HchWorkerBridgeArchives.ps1'
+$bridgeCompleteScript = Join-Path $repositoryRoot 'scripts\windows\Complete-HchWorkerBridgePackage.ps1'
 $fleetValidator = Join-Path $repositoryRoot 'scripts\windows\Test-HchWorkerFleetTransitionEvidence.ps1'
 $fleetSigner = Join-Path $repositoryRoot 'scripts\windows\Sign-HchWorkerFleetTransitionEvidence.ps1'
 $releaseMonitorPath = Join-Path $repositoryRoot 'ops\worker-dashboard\lib\releases.mjs'
 $buildScript = Join-Path $repositoryRoot 'scripts\windows\Build-HchWorkerPackage.ps1'
 $completeScript = Join-Path $repositoryRoot 'scripts\windows\Complete-HchWorkerReleaseEvidence.ps1'
 $releaseEvidenceScript = Join-Path $repositoryRoot 'scripts\windows\Test-HchWorkerReleaseEvidence.ps1'
-foreach ($path in $ciPath, $candidatePath, $promotionPath, $canaryValidator, $canaryExporter, $canarySigner, $bridgeReleaseValidator, $fleetValidator, $fleetSigner, $releaseMonitorPath, $buildScript, $completeScript, $releaseEvidenceScript) {
+$onboardingProbe = Join-Path $repositoryRoot 'scripts\windows\Test-HchWorkerOnboardingEndpoints.ps1'
+foreach ($path in $ciPath, $candidatePath, $promotionPath, $bridgeWorkflowPath, $canaryValidator, $canaryExporter, $canarySigner, $bridgeReleaseValidator, $bridgeArchiveBuilder, $bridgeCompleteScript, $fleetValidator, $fleetSigner, $releaseMonitorPath, $buildScript, $completeScript, $releaseEvidenceScript, $onboardingProbe) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Windows release gate file is missing: $path"
     }
@@ -27,10 +31,13 @@ foreach ($path in $ciPath, $candidatePath, $promotionPath, $canaryValidator, $ca
 $ci = Get-Content -LiteralPath $ciPath -Raw
 $candidate = Get-Content -LiteralPath $candidatePath -Raw
 $promotion = Get-Content -LiteralPath $promotionPath -Raw
+$bridgeWorkflow = Get-Content -LiteralPath $bridgeWorkflowPath -Raw
 $canary = Get-Content -LiteralPath $canaryValidator -Raw
 $canaryExport = Get-Content -LiteralPath $canaryExporter -Raw
 $canarySigning = Get-Content -LiteralPath $canarySigner -Raw
 $bridgeRelease = Get-Content -LiteralPath $bridgeReleaseValidator -Raw
+$bridgeArchive = Get-Content -LiteralPath $bridgeArchiveBuilder -Raw
+$bridgeComplete = Get-Content -LiteralPath $bridgeCompleteScript -Raw
 $fleet = Get-Content -LiteralPath $fleetValidator -Raw
 $fleetSigning = Get-Content -LiteralPath $fleetSigner -Raw
 $releaseMonitor = Get-Content -LiteralPath $releaseMonitorPath -Raw
@@ -165,8 +172,10 @@ foreach ($required in @(
     '-ExpectedAttesterThumbprint $env:HCH_CANARY_ATTESTER_THUMBPRINT',
     '-ExpectedAttesterCertificateSha256 $env:HCH_CANARY_ATTESTER_CERTIFICATE_SHA256',
     'Verify immutable 3.1.1 bridge and independently attested fleet transition',
+    'Verify production onboarding contracts',
+    './scripts/windows/Test-HchWorkerOnboardingEndpoints.ps1',
     "'.github/workflows/bridge-package.yml'",
-    'The reviewed 3.1.1 bridge producer workflow is not implemented on protected main.',
+    'The reviewed 3.1.1 bridge producer workflow is unavailable on protected main.',
     'Test-HchWorkerBridgeRelease.ps1',
     '-BridgeSourceCommit $bridgeSourceCommit',
     '-CmsSignerSha1 $env:HCH_SIGNER_THUMBPRINT',
@@ -180,12 +189,16 @@ foreach ($required in @(
     'Fleet telemetry authority must be distinct from artifact and canary signers.',
     'Fleet transition window cannot begin before the verified bridge was published.',
     'canary-evidence.p7s',
-    'type: choice',
-    'RELEASE_COMPATIBILITY: ${{ inputs.compatibility }}',
-    'RELEASE_CONTENT_IMPACT: ${{ inputs.content_impact }}',
-    'Compatibility and content-impact declarations are not an allowed exact pair.',
+    'release-compatibility.json',
+    'hch.worker-windows-release-compatibility/v1',
+    'Signed candidate compatibility declaration is invalid.',
+    'RELEASE_COMPATIBILITY=$($compatibility.compatibility)',
+    'RELEASE_CONTENT_IMPACT=$($compatibility.contentImpact)',
     'HCH-Worker-Compatibility: $env:RELEASE_COMPATIBILITY',
     'HCH-Worker-Content-Impact: $env:RELEASE_CONTENT_IMPACT',
+    '$releaseAssets = @(Get-ChildItem -LiteralPath $releaseRoot -File',
+    'Final public release inventory is incomplete.',
+    'gh release create $tag @releaseAssets',
     'Official Windows tag changed after validation; publication is refused.',
     '--latest=false',
     'gh release create')) {
@@ -204,6 +217,87 @@ if ($promotion -match 'Compress-Archive|evidenceZip') {
 }
 if ($promotion -match '(?i)skip.?bridge|skip.?fleet|continue-on-error|\bTestMode\b') {
     throw 'Official promotion must not expose a bridge/fleet bypass.'
+}
+if ($promotion -match 'inputs\.compatibility|inputs\.content_impact') {
+    throw 'Official promotion must derive compatibility from checksummed candidate evidence, not operator inputs.'
+}
+
+foreach ($required in @(
+    'workflow_dispatch:',
+    'inputs.publish == true',
+    "BRIDGE_VERSION: '3.1.1'",
+    'environment: bridge-release-signing',
+    'environment: bridge-release-promotion',
+    'Build-HchWorkerBridgeArchives.ps1',
+    'Build-HchWorkerService.ps1',
+    'Build-HchWorkerSetup.ps1',
+    'Complete-HchWorkerBridgePackage.ps1',
+    'Test-HchWorkerBridgeRelease.ps1',
+    '-CandidateMode',
+    'actions/attest-build-provenance@',
+    'gh attestation verify',
+    'RELEASE_IMMUTABILITY_ENFORCED',
+    'gh release create v3.1.1',
+    'HCH-Worker-Compatibility: compatible',
+    'HCH-Worker-Content-Impact: none')) {
+    if (-not $bridgeWorkflow.Contains($required, [StringComparison]::Ordinal)) {
+        throw "Compatibility bridge producer gate is missing: $required"
+    }
+}
+
+foreach ($required in @(
+    'release-compatibility.json',
+    'hch.worker-windows-release-compatibility/v1',
+    'releaseCompatibilitySha256',
+    'previousSupportedVersion',
+    'ExpectedInformationalVersion',
+    'ProductVersion -cne $ExpectedInformationalVersion',
+    'sbom.spdx.json',
+    'dependency-vulnerability-scan.json',
+    'msi-disposable-e2e.json')) {
+    if (-not $buildAndComplete.Contains($required, [StringComparison]::Ordinal)) {
+        throw "Windows compatibility preparation gate is missing: $required"
+    }
+}
+if ([regex]::Matches($buildAndComplete, [regex]::Escape('-p:IncludeSourceRevisionInInformationalVersion=false')).Count -lt 2) {
+    throw 'Every native Windows publish must suppress the SDK source-revision suffix after setting the exact informational version.'
+}
+foreach ($required in @(
+    'release-compatibility.json',
+    'Release compatibility evidence is invalid or detached from provenance.',
+    'releaseCompatibility',
+    'releaseContentImpact',
+    'Final public release inventory must be flat')) {
+    if (-not (Get-Content -LiteralPath $releaseEvidenceScript -Raw).Contains($required, [StringComparison]::Ordinal)) {
+        throw "Windows compatibility verification gate is missing: $required"
+    }
+}
+if ($bridgeWorkflow -match 'pull_request_target|continue-on-error|--clobber' -or
+    $bridgeWorkflow -notmatch "(?s)publish-immutable-bridge:.*inputs\.publish") {
+    throw 'Compatibility bridge producer exposes an unsafe publication path.'
+}
+foreach ($required in @(
+    "if (`$Version -cne '3.1.1')",
+    'bridge-archive-reproducible-build-requires-linux',
+    'GNU tar',
+    '--sort=name',
+    '--mtime=@$sourceEpoch',
+    'bridge-archive-expanded-size-limit-exceeded',
+    'sourceCommit = $SourceCommit')) {
+    if (-not $bridgeArchive.Contains($required, [StringComparison]::Ordinal)) {
+        throw "Compatibility bridge archive builder gate is missing: $required"
+    }
+}
+foreach ($required in @(
+    'SHA256SUMS.txt',
+    'SHA256SUMS.p7s',
+    '[Security.Cryptography.Pkcs.SignedCms]',
+    '[Security.Cryptography.Pkcs.Pkcs9SigningTime]',
+    'bridge-package-signer-sha256-mismatch',
+    'HasPrivateKey')) {
+    if (-not $bridgeComplete.Contains($required, [StringComparison]::Ordinal)) {
+        throw "Compatibility bridge signing gate is missing: $required"
+    }
 }
 
 foreach ($required in @(
@@ -235,6 +329,16 @@ foreach ($required in @(
     '--deny-self-hosted-runners')) {
     if (-not $bridgeRelease.Contains($required, [StringComparison]::Ordinal)) {
         throw "Compatibility bridge release gate is missing: $required"
+    }
+}
+foreach ($required in @(
+    '[switch]$CandidateMode',
+    'bridge-release-candidate-input-invalid',
+    'bridge-release-candidate-actions-source-invalid',
+    'Assert-WindowsPackageAuthenticode',
+    'Assert-CmsSignature')) {
+    if (-not $bridgeRelease.Contains($required, [StringComparison]::Ordinal)) {
+        throw "Compatibility bridge candidate gate is missing: $required"
     }
 }
 
@@ -305,6 +409,7 @@ Assert-CanaryExactPropertyShape $canary @(
     'version',
     'sourceCommit',
     'msiSha256',
+    'installationReceipt',
     'startedAtUtc',
     'completedAtUtc',
     'gates',
@@ -313,6 +418,23 @@ Assert-CanaryExactPropertyShape $canary @(
     'completions',
     'failures',
     'rollbackReceipt') 'canary evidence root'
+Assert-CanaryExactPropertyShape $canary @(
+    'msiLifecycleEvidenceSha256',
+    'productCode',
+    'packageCode',
+    'serviceName',
+    'serviceImagePath',
+    'serviceExecutableSha256',
+    'trayExecutablePath',
+    'trayExecutableSha256',
+    'installed',
+    'restart',
+    'receiptSha256') 'canary installation receipt'
+Assert-CanaryExactPropertyShape $canary @(
+    'bootStartedAtUtc',
+    'processStartedAtUtc',
+    'observedAtUtc',
+    'processId') 'canary installation transition'
 Assert-CanaryExactPropertyShape $canary @(
     'installedPausedDrain',
     'legacyServiceStoppedDisabled',
