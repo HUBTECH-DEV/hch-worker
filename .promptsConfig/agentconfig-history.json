@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0",
   "projectName": "HCH Worker",
-  "currentVersion": 3,
+  "currentVersion": 4,
   "versions": [
     {
       "version": 1,
@@ -34,6 +34,17 @@
       "previousVersion": 2,
       "newVersion": 3,
       "snapshotFile": "history/v0003.json",
+      "rollback": null
+    },
+    {
+      "version": 4,
+      "timestamp": "2026-09-01T18:58:20-03:00",
+      "changedBy": "user",
+      "reason": "Autorizar a reescrita nativa do Worker Windows e condicionar a promoção oficial à validação operacional.",
+      "summary": "Registra o candidato Windows 4.0.0 em C# nativo, Paused/Drain, autenticação HIH por PKCE, identidades Ed25519 distintas, canário com paralelismo 1 e transição do 3.1.0 para histórico somente após evidência sustentada.",
+      "previousVersion": 3,
+      "newVersion": 4,
+      "snapshotFile": "history/v0004.json",
       "rollback": null
     }
   ]

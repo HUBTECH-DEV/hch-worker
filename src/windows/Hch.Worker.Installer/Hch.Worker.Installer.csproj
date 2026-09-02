@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Hch.Worker.Installer</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <PublishSingleFile>true</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Hch.Worker.IPC.Contracts\Hch.Worker.IPC.Contracts.csproj" />
+    <ProjectReference Include="..\Hch.Worker.Persistence\Hch.Worker.Persistence.csproj" />
+    <ProjectReference Include="..\Hch.Worker.Security\Hch.Worker.Security.csproj" />
+    <ProjectReference Include="..\Hch.Worker.Windows\Hch.Worker.Windows.csproj" />
+  </ItemGroup>
+
+</Project>

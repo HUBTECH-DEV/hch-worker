@@ -59,9 +59,11 @@
     "trust": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "rootKeyId", "releaseKeyId", "manifestSequence", "manifestHash", "contentContractHash", "policyHash", "lastVerifiedAt", "errorCode"],
+      "required": ["status", "cryptographicStatus", "freshnessStatus", "rootKeyId", "releaseKeyId", "manifestSequence", "manifestHash", "contentContractHash", "policyHash", "lastVerifiedAt", "errorCode"],
       "properties": {
         "status": { "enum": ["pending", "verified", "expired", "error"] },
+        "cryptographicStatus": { "enum": ["pending", "verified", "error"] },
+        "freshnessStatus": { "enum": ["unknown", "fresh", "freshness-degraded"] },
         "rootKeyId": { "type": ["string", "null"] },
         "releaseKeyId": { "type": ["string", "null"] },
         "manifestSequence": { "type": ["integer", "null"], "minimum": 1 },

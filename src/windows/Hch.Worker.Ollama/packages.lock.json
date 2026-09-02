@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "hch.worker.core": {
+        "type": "Project"
+      },
+      "hch.worker.protocol": {
+        "type": "Project"
+      }
+    },
+    "net10.0/win-x64": {}
+  }
+}

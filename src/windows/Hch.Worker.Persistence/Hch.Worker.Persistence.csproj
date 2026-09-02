@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Hch.Worker.Core\Hch.Worker.Core.csproj" />
+    <ProjectReference Include="..\Hch.Worker.Protocol\Hch.Worker.Protocol.csproj" />
+    <ProjectReference Include="..\Hch.Worker.Security\Hch.Worker.Security.csproj" />
+  </ItemGroup>
+
+</Project>

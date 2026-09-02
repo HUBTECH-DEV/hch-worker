@@ -1,0 +1,189 @@
+name: Promote Windows candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact Windows version to promote'
+        required: true
+        type: string
+      source_commit:
+        description: 'Protected-main commit used to build the signed candidate'
+        required: true
+        type: string
+      candidate_run_id:
+        description: 'Successful Windows package workflow run id'
+        required: true
+        type: string
+      candidate_artifact_name:
+        description: 'Exact immutable signed candidate artifact name'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  promote-exact-candidate:
+    runs-on: windows-latest
+    environment: windows-release-promotion
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HCH_SIGNER_THUMBPRINT: ${{ vars.HCH_SIGNER_THUMBPRINT }}
+      HCH_SIGNER_CERTIFICATE_SHA256: ${{ vars.HCH_SIGNER_CERTIFICATE_SHA256 }}
+      WINDOWS_RELEASE_TAG_RULESET_ENFORCED: ${{ vars.WINDOWS_RELEASE_TAG_RULESET_ENFORCED }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_SOURCE_COMMIT: ${{ inputs.source_commit }}
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+      CANDIDATE_ARTIFACT_NAME: ${{ inputs.candidate_artifact_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove protected-main source, candidate run and protected annotated tag
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_VERSION
+          $sourceCommit = $env:RELEASE_SOURCE_COMMIT
+          $runId = $env:CANDIDATE_RUN_ID
+          $artifactName = $env:CANDIDATE_ARTIFACT_NAME
+          $tag = "windows-v$version"
+          if ($version -notmatch '^\d+\.\d+\.\d+$' `
+              -or $sourceCommit -notmatch '^[0-9a-f]{40}$' `
+              -or $runId -notmatch '^[1-9][0-9]*$' `
+              -or $artifactName -notmatch "^hch-worker-windows-signed-$([regex]::Escape($version))-$sourceCommit-[1-9][0-9]*$") {
+            throw 'Promotion inputs are not exact candidate identifiers.'
+          }
+          if ($env:GITHUB_REF -cne 'refs/heads/main' `
+              -or '${{ github.ref_protected }}' -cne 'true' `
+              -or '${{ github.event.repository.default_branch }}' -cne 'main') {
+            throw 'Promotion must run from protected default main.'
+          }
+          if ($env:WINDOWS_RELEASE_TAG_RULESET_ENFORCED -cne 'true') {
+            throw 'Repository administrators must attest that the windows-v* tag ruleset is enforced.'
+          }
+
+          $rulesets = @(gh api "repos/$env:GITHUB_REPOSITORY/rulesets?includes_parents=true" |
+            ConvertFrom-Json -Depth 50)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read repository tag rulesets.' }
+          $protectedTagRuleset = $null
+          foreach ($summary in @($rulesets | Where-Object { $_.target -eq 'tag' -and $_.enforcement -eq 'active' })) {
+            $detail = gh api "repos/$env:GITHUB_REPOSITORY/rulesets/$($summary.id)" |
+              ConvertFrom-Json -Depth 50
+            if ($LASTEXITCODE -ne 0) { throw 'Could not inspect an active repository tag ruleset.' }
+            if (@($detail.conditions.ref_name.include) -contains 'refs/tags/windows-v*' `
+                -and @($detail.rules.type) -contains 'creation' `
+                -and @($detail.rules.type) -contains 'update' `
+                -and @($detail.rules.type) -contains 'deletion') {
+              $protectedTagRuleset = $detail
+              break
+            }
+          }
+          if ($null -eq $protectedTagRuleset) {
+            throw 'No active immutable ruleset protects refs/tags/windows-v*.'
+          }
+
+          git fetch origin main --tags --force
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch protected main and release tags.' }
+          git merge-base --is-ancestor $sourceCommit origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate source is not an ancestor of current protected main.' }
+          if ((git cat-file -t "refs/tags/$tag") -cne 'tag') {
+            throw 'Official Windows tag must be an existing annotated tag.'
+          }
+          if ((git rev-parse "refs/tags/$tag^{commit}") -cne $sourceCommit) {
+            throw 'Official Windows tag does not resolve to the exact candidate source commit.'
+          }
+
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$runId" | ConvertFrom-Json -Depth 20
+          if ($LASTEXITCODE -ne 0 `
+              -or $run.event -ne 'workflow_dispatch' `
+              -or $run.conclusion -ne 'success' `
+              -or $run.head_branch -ne 'main' `
+              -or $run.head_sha -cne $sourceCommit `
+              -or [string]$run.path -notmatch '(?:^|/)\.github/workflows/windows-package\.yml(?:@.*)?$') {
+            throw 'Candidate run is not a successful signed-candidate run from exact protected main.'
+          }
+
+          $probeError = Join-Path $env:RUNNER_TEMP 'release-probe.stderr'
+          & gh api --silent "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2> $probeError
+          $probeExit = $LASTEXITCODE
+          $probeText = if (Test-Path -LiteralPath $probeError) { Get-Content -LiteralPath $probeError -Raw } else { '' }
+          if ($probeExit -eq 0) { throw 'This Windows version already has an official GitHub release.' }
+          if ($probeText -notmatch 'HTTP 404') { throw "Could not prove that the release tag is unused: $probeText" }
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ inputs.candidate_artifact_name }}
+          path: artifacts/windows-v4/release
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+
+      - name: Verify exact signed candidate, artifact attestation and committed canary rollback
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_VERSION
+          $sourceCommit = $env:RELEASE_SOURCE_COMMIT
+          $releaseRoot = (Resolve-Path -LiteralPath 'artifacts/windows-v4/release').Path
+          $msi = Join-Path $releaseRoot "HCH-Worker-$version-win-x64.msi"
+          ./scripts/windows/Test-HchWorkerReleaseEvidence.ps1 `
+            -ReleasePath $releaseRoot `
+            -Version $version `
+            -ExpectedSignerThumbprint $env:HCH_SIGNER_THUMBPRINT `
+            -ExpectedSignerCertificateSha256 $env:HCH_SIGNER_CERTIFICATE_SHA256 `
+            -RequireCandidate
+
+          $provenance = Get-Content -LiteralPath (Join-Path $releaseRoot 'build-provenance.json') -Raw |
+            ConvertFrom-Json -Depth 100
+          if ($provenance.source.commit -cne $sourceCommit) {
+            throw 'Downloaded candidate provenance does not match the selected source commit.'
+          }
+
+          gh attestation verify $msi `
+            --repo $env:GITHUB_REPOSITORY `
+            --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/windows-package.yml" `
+            --source-digest $sourceCommit `
+            --source-ref refs/heads/main `
+            --deny-self-hosted-runners
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub artifact attestation verification failed.' }
+
+          $canaryPath = "release-evidence/windows/$version/canary-evidence.json"
+          ./scripts/windows/Test-HchWorkerCanaryEvidence.ps1 `
+            -EvidencePath $canaryPath `
+            -Version $version `
+            -SourceCommit $sourceCommit `
+            -MsiPath $msi
+
+      - name: Publish exact candidate without rebuilding or rewriting it
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_VERSION
+          $sourceCommit = $env:RELEASE_SOURCE_COMMIT
+          $tag = "windows-v$version"
+          $releaseRoot = (Resolve-Path -LiteralPath 'artifacts/windows-v4/release').Path
+          $msi = Join-Path $releaseRoot "HCH-Worker-$version-win-x64.msi"
+          $checksums = Join-Path $releaseRoot 'SHA256SUMS.txt'
+          $signature = Join-Path $releaseRoot 'SHA256SUMS.p7s'
+          $canary = Resolve-Path -LiteralPath "release-evidence/windows/$version/canary-evidence.json"
+          $evidenceZip = Join-Path $env:RUNNER_TEMP "HCH-Worker-$version-win-x64-evidence.zip"
+          Compress-Archive -Path (Join-Path $releaseRoot '*') -DestinationPath $evidenceZip -CompressionLevel Optimal
+          $notes = @"
+          Official Windows package promoted from the exact signed candidate built at $sourceCommit.
+          Gates: disposable MSI lifecycle, Defender, signed checksums, GitHub artifact attestation,
+          canary at parallelism 1, restart in Paused/Drain, and recoverable rollback to 3.1.0.
+          "@
+          gh release create $tag $msi $checksums $signature $canary $evidenceZip `
+            --verify-tag `
+            --title "HCH Worker Windows $version" `
+            --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw 'Official GitHub release publication failed.' }

@@ -1,0 +1,60 @@
+{
+  "version": 4,
+  "createdAt": "2026-09-01T18:58:20-03:00",
+  "agentConfigurationPrompt": "Manter o repositório HUBTECH-DEV/hch-worker como fonte canônica do Worker HCH e evoluir o Worker Windows 4.0.0 nativo em C# como candidato, com rollout reversível, Paused/Drain por padrão e evidência operacional antes de qualquer promoção de versão.",
+  "agentProfile": "Principal Implementation Engineer / Deployment Engineer; Principal Git Engineer",
+  "projectRules": [
+    "HUBTECH-DEV/hch-worker é o repositório específico e a fonte canônica do Worker HCH.",
+    "Uma versão nova somente pode ser reconhecida depois de uma implantação concluída com sucesso.",
+    "Antes da validação completa, qualquer número de versão deve ser tratado somente como candidato, não como release estável.",
+    "Preservar aprovação e publicação automáticas desabilitadas.",
+    "Detectar releases estáveis automaticamente, mas exigir ação explícita do operador para atualizar o runtime.",
+    "Todo desenvolvimento deve ocorrer na branch derivada do nome do dispositivo; merge ou push em main exige autorização separada.",
+    "O runtime instalado do Worker Windows 4.x deve ser nativo em C#, self-contained e não depender de PowerShell, Node.js ou terminal aberto.",
+    "Serviço, tray, onboarding e instalador compõem um único produto, assinado e versionado em conjunto.",
+    "A chave SSH Ed25519 do usuário e a identidade operacional Ed25519 do Worker são identidades distintas, vinculadas e revogáveis de forma independente.",
+    "O Worker Windows 3.1.0 somente pode ser classificado como histórico depois de um canário 4.0.0 sustentado com paralelismo 1 e rollback comprovado."
+  ],
+  "communicationRules": [
+    "Responder em português.",
+    "Distinguir candidato de fix, versão implantada, release publicada e versão histórica com evidências explícitas.",
+    "Não anunciar a 4.0.0 como estável nem a 3.1.0 como histórica antes da conclusão dos gates operacionais."
+  ],
+  "technicalRules": [
+    "Executar testes antes da implantação.",
+    "Aplicar drain, backup e rollback verificável antes de substituir o runtime ativo.",
+    "Exigir bootstrap, validação de confiança, heartbeat, claim e conclusão de assignment para promover uma nova versão.",
+    "Não criar tag ou release antes da validação operacional completa.",
+    "Atualizações de runtime devem usar executor local fixo, drain, verificação do artefato, validação pós-instalação e rollback.",
+    "Ao concluir mudanças autorizadas, testar, commitar e fazer push sem force para a branch do dispositivo; parar diante de divergência remota.",
+    "Instalação, atualização e recuperação do Worker Windows 4.x devem iniciar em Paused/Drain, com capacidade zero e sem claims automáticos.",
+    "A autenticação nativa deve usar o navegador do sistema com Authorization Code e PKCE; senha do HIH nunca deve chegar ao serviço Windows, ao orquestrador, aos logs ou à persistência do Worker.",
+    "Chaves privadas devem permanecer no host que as gerou; o enrollment publica apenas material público e exige prova de posse por nonce assinado.",
+    "O pacote Windows deve ser construído de fonte versionada, com restauração bloqueada, testes, SCA, SBOM, hashes, Authenticode com timestamp e evidência reproduzível.",
+    "O canário de promoção deve operar com MaxConcurrentJobs=1 e comprovar enrollment, bootstrap, heartbeat, claim, progresso, complete/fail, restart e rollback.",
+    "Preservar o serviço e os dados 3.1.0 como rollback até a conclusão e reconciliação do canário 4.0.0."
+  ],
+  "customInstructions": [
+    "Usar o HGC como interface central de configuração e o HubICG Enterprise como governança ativa.",
+    "Preservar chaves privadas, tokens de enrollment e configurações específicas do host fora do repositório.",
+    "Neste notebook Windows, usar a branch NB-PE0FHWM9 para desenvolvimento e promover main somente sob autorização expressa.",
+    "Tratar o 4.0.0 como candidato até instalação em Paused/Drain e validação do canário; não criar tag ou release antecipadamente."
+  ],
+  "metadata": {
+    "githubRepository": "HUBTECH-DEV/hch-worker",
+    "canonicalPath": "${USERPROFILE}/codex/projects/hch-worker",
+    "stableVersionAtCreation": "3.0.0",
+    "stableWindowsVersion": "3.1.0",
+    "candidateWindowsVersion": "4.0.0",
+    "candidateFramework": "net10.0-windows",
+    "promotionState": "windows-4.0.0-candidate-awaiting-canary",
+    "historicalVersionCandidate": "3.1.0",
+    "historicalTransitionGate": "sustained-canary-parallelism-1-with-rollback-proof",
+    "nativeAuthentication": "HIH-system-browser-authorization-code-pkce",
+    "identityModel": "distinct-user-ssh-and-worker-operational-ed25519",
+    "releaseUpdateMode": "automatic-discovery-manual-apply",
+    "deviceBranch": "NB-PE0FHWM9",
+    "deviceBranchPublication": "automatic-no-force",
+    "mainPromotion": "explicit-authorization-required"
+  }
+}

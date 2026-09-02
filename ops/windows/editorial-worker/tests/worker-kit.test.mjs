@@ -40,6 +40,12 @@ test("assignment and manifest schemas require immutable engine identity", () => 
   const attestation = JSON.parse(
     readFileSync(join(kitRoot, "schemas", "worker-bootstrap-attestation-v2.schema.json"), "utf8"),
   );
+  const status = JSON.parse(
+    readFileSync(join(kitRoot, "schemas", "worker-status-v1.schema.json"), "utf8"),
+  );
+  const trustState = JSON.parse(
+    readFileSync(join(kitRoot, "schemas", "worker-trust-state-v1.schema.json"), "utf8"),
+  );
   for (const field of ["provider", "engineAdapter", "engineAdapterVersion"]) {
     assert.ok(assignment.properties.runtimeProfile.required.includes(field));
     assert.ok(assignment.properties.runtimeProfile.properties[field]);
@@ -71,6 +77,12 @@ test("assignment and manifest schemas require immutable engine identity", () => 
   assert.ok(attestation.required.includes("contentContractHash"));
   assert.equal(attestation.required.includes("engineVersion"), false);
   assert.equal(attestation.properties.engineVersion, undefined);
+  for (const field of ["cryptographicStatus", "freshnessStatus"]) {
+    assert.ok(status.properties.trust.required.includes(field));
+    assert.ok(status.properties.trust.properties[field]);
+    assert.ok(trustState.required.includes(field));
+    assert.ok(trustState.properties[field]);
+  }
 });
 
 test("helper generates a unique Ed25519 identity and signs raw bytes", () => {
@@ -158,11 +170,15 @@ test("helper verifies the canonical root to release to manifest chain", async ()
     createHash("sha256").update(canonicalizeJson(delegation)).digest("hex"),
   );
   assert.equal(result.manifestHash, hash);
+  assert.equal(result.cryptographicStatus, "verified");
+  assert.equal(result.cryptographicallyValid, true);
+  assert.equal(result.freshnessStatus, "fresh");
+  assert.equal(result.expiredFallback, false);
   assert.equal(result.contentContractHash, await manifestContentContractHash(payload));
   assert.deepEqual(JSON.parse(readFileSync(outputPath, "utf8")), payload);
 });
 
-test("helper refuses an unapplied manifest when only the delegation is expired", async () => {
+test("helper accepts an expired chain only when every persisted pin is exact", async () => {
   const directory = mkdtempSync(join(tmpdir(), "hch-worker-expired-chain-"));
   const root = generateKeyPairSync("ed25519");
   const release = generateKeyPairSync("ed25519");
@@ -212,22 +228,291 @@ test("helper refuses an unapplied manifest when only the delegation is expired",
     rootKeyId,
     rootPublicKeyFingerprint: await workerPublicKeyFingerprint(rootPublic),
   }));
-
+  const delegationHash = createHash("sha256")
+    .update(canonicalizeJson(delegation))
+    .digest("hex");
+  const exactPin = [
+    "--pinned-manifest-sequence", String(payload.sequence),
+    "--pinned-manifest-hash", hash,
+    "--pinned-delegation-sequence", "8",
+    "--pinned-delegation-hash", delegationHash,
+    "--pinned-release-key-id", releaseKeyId,
+  ];
   assert.throws(
     () => runHelper(
       "verify-chain", "--root", rootPath, "--envelope", envelopePath,
-      "--output", join(directory, "rejected.json"), "--clock-skew", "60",
-      "--allow-expired-hash", "f".repeat(64),
+      "--output", join(directory, "unpinned.json"), "--clock-skew", "60",
     ),
-    /manifest-expired-update-refused/,
+    /manifest-chain-invalid:(?:(?:delegation|manifest)-)?expired/,
+  );
+  assert.throws(
+    () => runHelper(
+      "verify-chain", "--root", rootPath, "--envelope", envelopePath,
+      "--output", join(directory, "partial-pin.json"), "--clock-skew", "60",
+      "--pinned-manifest-hash", hash,
+    ),
+    /pinned-expired-state-incomplete/,
   );
   const accepted = runHelper(
     "verify-chain", "--root", rootPath, "--envelope", envelopePath,
     "--output", join(directory, "accepted.json"), "--clock-skew", "60",
-    "--allow-expired-hash", hash,
+    ...exactPin,
   );
   assert.equal(accepted.expiredFallback, true);
+  assert.equal(accepted.cryptographicStatus, "verified");
+  assert.equal(accepted.cryptographicallyValid, true);
+  assert.equal(accepted.freshnessStatus, "freshness-degraded");
   assert.equal(accepted.manifestHash, hash);
+
+  for (const [argument, replacement, expectedField] of [
+    ["--pinned-manifest-sequence", "7", "manifest-sequence"],
+    ["--pinned-manifest-hash", "f".repeat(64), "manifest-hash"],
+    ["--pinned-delegation-sequence", "7", "delegation-sequence"],
+    ["--pinned-delegation-hash", "e".repeat(64), "delegation-hash"],
+    ["--pinned-release-key-id", "different-release-key", "release-key-id"],
+  ]) {
+    const mismatchedPin = [...exactPin];
+    mismatchedPin[mismatchedPin.indexOf(argument) + 1] = replacement;
+    assert.throws(
+      () => runHelper(
+        "verify-chain", "--root", rootPath, "--envelope", envelopePath,
+        "--output", join(directory, `mismatch-${expectedField}.json`),
+        "--clock-skew", "60", ...mismatchedPin,
+      ),
+      new RegExp(`manifest-expired-pin-mismatch:${expectedField}`),
+    );
+  }
+
+  const nextUnsignedPayload = {
+    ...unsignedPayload,
+    sequence: 9,
+    releaseId: "test.expired.9",
+  };
+  const nextHash = createHash("sha256")
+    .update(canonicalizeJson(nextUnsignedPayload))
+    .digest("hex");
+  const nextManifest = await signManifestEnvelope(
+    { ...nextUnsignedPayload, hashAlgorithm: "sha256", hash: nextHash },
+    releasePrivate,
+    { keyId: releaseKeyId, created: now - 500, expires: now - 350 },
+  );
+  const nextEnvelopePath = join(directory, "next-envelope.json");
+  writeFileSync(nextEnvelopePath, JSON.stringify({
+    manifest: nextManifest,
+    delegation,
+    rootKeyId,
+    rootPublicKeyFingerprint: await workerPublicKeyFingerprint(rootPublic),
+  }));
+  assert.throws(
+    () => runHelper(
+      "verify-chain", "--root", rootPath, "--envelope", nextEnvelopePath,
+      "--output", join(directory, "new-expired.json"), "--clock-skew", "60",
+      ...exactPin,
+    ),
+    /manifest-expired-pin-mismatch:manifest-sequence/,
+  );
+
+  const invalidEnvelope = JSON.parse(readFileSync(envelopePath, "utf8"));
+  invalidEnvelope.manifest.signature = `${
+    invalidEnvelope.manifest.signature.startsWith("A") ? "B" : "A"
+  }${invalidEnvelope.manifest.signature.slice(1)}`;
+  const invalidEnvelopePath = join(directory, "invalid-signature.json");
+  writeFileSync(invalidEnvelopePath, JSON.stringify(invalidEnvelope));
+  assert.throws(
+    () => runHelper(
+      "verify-chain", "--root", rootPath, "--envelope", invalidEnvelopePath,
+      "--output", join(directory, "invalid-signature-output.json"),
+      "--clock-skew", "60", ...exactPin,
+    ),
+    /manifest-chain-invalid:(?:invalid-signature|signature-invalid)/,
+  );
+});
+
+test("PowerShell revalidates an exact expired pin as freshness-degraded without closing claims", async (context) => {
+  if (process.platform !== "win32") return context.skip("Windows PowerShell integration test");
+  const directory = mkdtempSync(join(tmpdir(), "hch-worker-expired-pin-powershell-"));
+  const stateRoot = join(directory, "state");
+  const installRoot = join(directory, "runtime");
+  const root = generateKeyPairSync("ed25519");
+  const release = generateKeyPairSync("ed25519");
+  const rootPrivate = root.privateKey.export({ type: "pkcs8", format: "pem" });
+  const rootPublic = root.publicKey.export({ type: "spki", format: "pem" });
+  const releasePrivate = release.privateKey.export({ type: "pkcs8", format: "pem" });
+  const releasePublic = release.publicKey.export({ type: "spki", format: "pem" });
+  const rootPath = join(directory, "root.pem");
+  const envelopePath = join(directory, "expired-envelope.json");
+  const rootKeyId = "hch-root-expired-pin-powershell";
+  const releaseKeyId = "hch-release-expired-pin-powershell";
+  const workerKeyId = `SHA256:${"A".repeat(43)}`;
+  const now = Math.floor(Date.now() / 1000);
+  writeFileSync(rootPath, rootPublic);
+
+  const capacityPolicy = adaptiveCapacityPolicy();
+  const workPolicy = adaptiveWorkPolicy();
+  const unsignedPayload = {
+    schemaVersion: "2.0",
+    sequence: 12,
+    releaseId: "expired-pinned-powershell.12",
+    issuedAt: new Date((now - 1200) * 1000).toISOString(),
+    expiresAt: new Date((now - 300) * 1000).toISOString(),
+    previousManifestHash: "a".repeat(64),
+    minimumAcceptedSequence: 1,
+    runtime: { workerVersion: "3.1.0" },
+    engine: {
+      provider: "vps-local",
+      adapter: "ollama",
+      adapterVersion: "1.0.0",
+      model: "qwen2.5:1.5b-instruct",
+      modelDigest: "d".repeat(64),
+      protocol: "ollama-chat",
+    },
+    generation: { temperature: 0.2, contextWindow: 8192, maxOutputTokens: 2048 },
+    capacityPolicy,
+    adaptiveWorkPolicy: workPolicy,
+    editorial: {
+      policyHash: "b".repeat(64),
+      promptConfigHash: "c".repeat(64),
+      pipelineVersion: "2.0.0",
+    },
+    actions: [],
+    rootActionCapabilities: [],
+    artifacts: [],
+    endpoints: {},
+    security: { authorizationByIp: false, arbitraryRemoteCommands: false },
+    safety: {},
+  };
+  const manifestHash = createHash("sha256")
+    .update(canonicalizeJson(unsignedPayload))
+    .digest("hex");
+  const payload = { ...unsignedPayload, hashAlgorithm: "sha256", hash: manifestHash };
+  const delegation = await signReleaseKeyDelegation(releasePublic, rootPrivate, {
+    rootKeyId,
+    releaseKeyId,
+    created: now - 1300,
+    notBefore: now - 1300,
+    expires: now - 200,
+    sequence: 19,
+  });
+  const manifest = await signManifestEnvelope(payload, releasePrivate, {
+    keyId: releaseKeyId,
+    created: now - 1200,
+    expires: now - 300,
+  });
+  const rootFingerprint = await workerPublicKeyFingerprint(rootPublic);
+  const delegationHash = createHash("sha256")
+    .update(canonicalizeJson(delegation))
+    .digest("hex");
+  const contentContractHash = await manifestContentContractHash(payload);
+  const capacityPolicyHash = createHash("sha256")
+    .update(canonicalizeJson(capacityPolicy))
+    .digest("hex");
+  const adaptiveWorkPolicyHash = createHash("sha256")
+    .update(canonicalizeJson(workPolicy))
+    .digest("hex");
+  writeFileSync(envelopePath, JSON.stringify({
+    manifest,
+    delegation,
+    rootKeyId,
+    rootPublicKeyFingerprint: rootFingerprint,
+  }));
+
+  const escapePs = (value) => value.replaceAll("'", "''");
+  const script = `
+    $m=Import-Module '${escapePs(modulePath)}' -Force -PassThru
+    $config=@{
+      NodeId='windows-worker-expired-pin'
+      StateRoot='${escapePs(stateRoot)}'
+      InstallRoot='${escapePs(installRoot)}'
+      RootPublicKeyPath='${escapePs(rootPath)}'
+      NodePath='${escapePs(process.execPath)}'
+      MinimumNodeMajor=22
+      ClockSkewSeconds=60
+    }
+    $result=& $m { param($c,$envelopePath,$workerKeyId)
+      Write-HchJsonAtomic -Path (Join-Path $c.StateRoot 'applied-manifest.json') -Value ([ordered]@{
+        schemaVersion=2;sequence=12;manifestHash='${manifestHash}'
+        contentContractHash='${contentContractHash}';policyHash='${"b".repeat(64)}'
+        capacityPolicyHash='${capacityPolicyHash}';adaptiveWorkPolicyHash='${adaptiveWorkPolicyHash}'
+        rootKeyId='${rootKeyId}';releaseKeyId='${releaseKeyId}'
+        delegationSequence=19;delegationHash='${delegationHash}'
+      })
+      Write-HchJsonAtomic -Path (Join-Path $c.StateRoot 'trust-state.json') -Value ([ordered]@{
+        schema='hch.worker-trust-state/v1';schemaVersion=1
+        rootKeyId='${rootKeyId}';rootFingerprint='${rootFingerprint}'
+        releaseKeyId='${releaseKeyId}';delegationSequence=19;delegationHash='${delegationHash}'
+        manifestSequence=12;manifestHash='${manifestHash}'
+        contentContractHash='${contentContractHash}';policyHash='${"b".repeat(64)}'
+        verifiedAt=[DateTimeOffset]::UtcNow.AddHours(-1).ToString('o')
+      })
+      $verified=Test-HchSignedManifest -Config $c -Envelope (
+        Get-Content -Raw -LiteralPath $envelopePath|ConvertFrom-Json
+      )
+      Write-HchJsonAtomic -Path (Join-Path $c.StateRoot 'ready.json') -Value ([ordered]@{
+        schemaVersion=2;nodeId=$c.NodeId;workerKeyId=$workerKeyId
+        manifestSequence=12;manifestHash='${manifestHash}'
+        contentContractHash='${contentContractHash}';policyHash='${"b".repeat(64)}'
+        capacityPolicyHash='${capacityPolicyHash}';adaptiveWorkPolicyHash='${adaptiveWorkPolicyHash}'
+        readyUntil=[DateTimeOffset]::UtcNow.AddHours(1).ToString('o')
+        rootKeyId='${rootKeyId}';releaseKeyId='${releaseKeyId}'
+        manifestFreshnessStatus=$verified.FreshnessStatus;trustVerifiedAt=$verified.VerifiedAt
+      })
+      function Get-HchWorkerIdentity {[pscustomobject]@{keyId=$workerKeyId}}
+      Set-HchWorkerStatus -Config $c -State 'idle' -ConnectionState 'connected'
+      $gate=Assert-HchClaimGate -Config $c
+      $persistedTrust=Read-HchJsonFile -Path (Join-Path $c.StateRoot 'trust-state.json')
+      $inconsistentTrust=$persistedTrust|ConvertTo-Json -Depth 30 -Compress|ConvertFrom-Json
+      $inconsistentTrust.releaseKeyId='different-release-key'
+      Write-HchJsonAtomic -Path (Join-Path $c.StateRoot 'trust-state.json') -Value $inconsistentTrust
+      $inconsistentPinRejected=$false
+      try {
+        [void](Test-HchSignedManifest -Config $c -Envelope (
+          Get-Content -Raw -LiteralPath $envelopePath|ConvertFrom-Json
+        ))
+      } catch { $inconsistentPinRejected=$true }
+      [pscustomobject]@{
+        verified=$verified
+        persistedTrust=$persistedTrust
+        status=Read-HchJsonFile -Path (Join-Path $c.StateRoot 'status.json')
+        gateManifestHash=$gate.manifestHash
+        inconsistentPinRejected=$inconsistentPinRejected
+      }
+    } $config '${escapePs(envelopePath)}' '${workerKeyId}'
+    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(
+      ($result|ConvertTo-Json -Depth 30 -Compress)))
+  `;
+  const encoded = execFileSync(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+    { encoding: "utf8" },
+  ).trim();
+  const result = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+  assert.equal(result.verified.ExpiredFallback, true);
+  assert.equal(result.verified.FreshnessStatus, "freshness-degraded");
+  assert.equal(result.persistedTrust.cryptographicStatus, "verified");
+  assert.equal(result.persistedTrust.freshnessStatus, "freshness-degraded");
+  assert.equal(result.status.ready, true);
+  assert.equal(result.status.trust.cryptographicStatus, "verified");
+  assert.equal(result.status.trust.freshnessStatus, "freshness-degraded");
+  assert.equal(result.gateManifestHash, manifestHash);
+  assert.equal(result.inconsistentPinRejected, true);
+});
+
+test("bootstrap exact expired-pin path only validates and renews metadata", () => {
+  const source = readFileSync(modulePath, "utf8");
+  const branchStart = source.indexOf("} elseif ($pinnedExpired) {");
+  const branchEnd = source.indexOf("} else {", branchStart + 1);
+  assert.ok(branchStart >= 0 && branchEnd > branchStart);
+  const branch = source.slice(branchStart, branchEnd);
+  assert.match(branch, /Test-HchCompatibleAppliedEnvironment/);
+  assert.match(branch, /\$receiptResult = 'no-change'/);
+  assert.doesNotMatch(
+    branch,
+    /Stage-HchManifestArtifacts|Invoke-HchManifestPlan|Update-HchCompatibleManifestMetadata|Invoke-HchModelPull|Install-Hch/,
+  );
+  assert.match(
+    source,
+    /if \(-not \$pinnedExpired -and[\s\S]+\$readyRemainingSeconds -gt \$refreshBeforeSeconds\)/,
+  );
 });
 
 test("PowerShell persists delegation anchors and rejects rollback or equivocation", async (context) => {

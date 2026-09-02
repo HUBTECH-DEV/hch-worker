@@ -42,9 +42,18 @@ ou gera conteúdo até o operador executar explicitamente `start`.
   hash diferente fecha novos claims e aguarda o lote ativo terminar antes do
   apply. O heartbeat de presença continua durante esse drain e anuncia
   capacidade de novos claims igual a zero.
-- O fallback para JWS, payload ou delegação expirados exige o mesmo
-  `manifestHash` já aplicado. Uma delegação expirada não pode autorizar um
-  manifesto novo, mesmo quando o payload novo ainda está válido.
+- O fallback para JWS, payload ou delegação expirados exige correspondência
+  exata com as âncoras já persistidas em `applied-manifest.json` e
+  `trust-state.json`: `manifestSequence`, `manifestHash`,
+  `delegationSequence`, `delegationHash` e `releaseKeyId`. Uma cadeia expirada
+  nunca autoriza manifesto ou delegação novos, rollback, equivocação ou
+  assinatura inválida.
+- Para esse pin exato, a assinatura permanece `cryptographicStatus=verified` e
+  o tempo é exposto separadamente como
+  `freshnessStatus=freshness-degraded`. O bootstrap não baixa nem reaplica
+  artefatos: valida a instalação e o modelo, emite receipt `no-change` e renova
+  atestação/readiness. O claim gate continua dependendo do lease de readiness,
+  integridade instalada e contrato aplicado, não do frescor do mesmo pin.
 - A delegação raiz → release também tem sequência monotônica. O worker mantém
   em `trust-state.json` a maior `delegationSequence` e o hash SHA-256 JCS do
   envelope aceito: sequência menor é downgrade e a mesma sequência com outro
@@ -433,7 +442,8 @@ O kit grava atomicamente, dentro de `StateRoot`:
 
 - `status.json`, schema `hch.worker-status/v1`: conexão com a API, validação
   TLS e certificado (inclusive validade em sete dias e fingerprint SHA-256),
-  autenticação Ed25519, cadeia pública raiz → release → manifesto, estado,
+  autenticação Ed25519, cadeia pública raiz → release → manifesto,
+  `trust.cryptographicStatus`, `trust.freshnessStatus`, estado,
   `running`, `standby`, prontidão, uptime, lote atual e o snapshot de capacidade
   (`requestedCapacity`, `grantedCapacity`, `activeAssignments`,
   `capacityReason`, `validUntil`);

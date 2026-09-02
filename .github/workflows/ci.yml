@@ -12,8 +12,8 @@ jobs:
   portable:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
       - run: npm test
@@ -21,8 +21,8 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
       - name: Build native service host
@@ -30,3 +30,61 @@ jobs:
         run: ./ops/windows/editorial-worker/Build-HchWorkerService.ps1
       - name: Test Windows worker
         run: npm run test:windows
+
+  native-windows-v4:
+    runs-on: windows-latest
+    env:
+      WIX_EULA_ACCEPTED: ${{ vars.WIX_EULA_ACCEPTED }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            .config/dotnet-tools.json
+            src/windows/**/packages.lock.json
+            src/windows/**/packages.wix.lock.json
+
+      - name: Validate WiX command-line source guards
+        shell: pwsh
+        run: |
+          ./scripts/windows/Test-HchWorkerInstallerSource.ps1
+          ./scripts/windows/Test-HchWorkerReleaseWorkflow.ps1
+
+      - name: Restore exact locked dependencies
+        shell: pwsh
+        run: |
+          if ($env:WIX_EULA_ACCEPTED -ne 'wix7') {
+            throw 'Set WIX_EULA_ACCEPTED=wix7 only after organizational review of the WiX 7 terms.'
+          }
+          dotnet tool restore
+          if ($LASTEXITCODE -ne 0) { throw 'Tool restore failed.' }
+          dotnet restore src/windows/Hch.Worker.sln --locked-mode --runtime win-x64 -p:PublishReadyToRun=true
+          if ($LASTEXITCODE -ne 0) { throw 'Locked solution restore failed.' }
+          dotnet restore src/windows/Hch.Worker.Installer/Hch.Worker.Installer.wixproj --locked-mode -p:AcceptEula=wix7
+          if ($LASTEXITCODE -ne 0) { throw 'Locked WiX restore failed.' }
+
+      - name: Enforce formatting and dependency vulnerability gates
+        shell: pwsh
+        run: |
+          dotnet format src/windows/Hch.Worker.sln --verify-no-changes --no-restore
+          if ($LASTEXITCODE -ne 0) { throw 'Formatting verification failed.' }
+          ./scripts/windows/Test-HchWorkerDependencies.ps1 `
+            -SolutionPath src/windows/Hch.Worker.sln `
+            -EvidencePath artifacts/windows-v4/ci/dependency-vulnerability-scan.json
+
+      - name: Build and test native Windows Worker
+        shell: pwsh
+        run: >-
+          dotnet test src/windows/Hch.Worker.Tests/Hch.Worker.Tests.csproj
+          --configuration Release
+          --runtime win-x64
+          --no-restore
+          -p:Version=4.0.0
+          -p:AssemblyVersion=4.0.0.0
+          -p:FileVersion=4.0.0.0

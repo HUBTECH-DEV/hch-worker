@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "version": 4,
+  "timestamp": "2026-09-01T18:58:20-03:00",
+  "source": "user",
+  "action": "project-configuration-updated",
+  "summary": "Worker Windows 4.0.0 registrado como candidato C# nativo, com Paused/Drain, PKCE, identidades distintas e promoção condicionada a canário de paralelismo 1; 3.1.0 permanece estável e recuperável até o gate.",
+  "previousVersion": 3,
+  "newVersion": 4,
+  "rollback": null
+}

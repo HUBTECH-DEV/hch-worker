@@ -42,7 +42,7 @@ try {
         required("envelope"),
         required("output"),
         Number(argumentsByName.get("clock-skew") ?? 60),
-        argumentsByName.get("allow-expired-hash") ?? null,
+        pinnedExpiredState(argumentsByName),
       );
       break;
     default:
@@ -99,7 +99,7 @@ async function verifyManifestChain(
   envelopePath,
   outputPath,
   clockSkewSeconds,
-  allowExpiredHash,
+  pinnedState,
 ) {
   if (!Number.isSafeInteger(clockSkewSeconds) || clockSkewSeconds < 0 || clockSkewSeconds > 300) {
     throw new Error("invalid-clock-skew");
@@ -123,7 +123,11 @@ async function verifyManifestChain(
     {
     expectedReleaseKeyId: undefined,
     clockSkewSeconds,
-    allowExpired: allowExpiredHash !== null,
+    // Expiration is freshness metadata, not a cryptographic bypass. The
+    // verifier still checks every Ed25519 signature and signed relationship;
+    // it only permits an expired time window when the caller supplied the
+    // complete, already-persisted manifest and delegation pin below.
+    allowExpired: pinnedState !== null,
   });
   if (!verified.ok) throw new Error(`manifest-chain-invalid:${verified.code}`);
   if (verified.delegationProtectedHeader.kid !== rootKeyId) {
@@ -136,11 +140,13 @@ async function verifyManifestChain(
     .digest("hex");
   if (payload?.schemaVersion !== "2.0") throw new Error("manifest-schema-unsupported");
   const expiryBoundary = Date.now() - clockSkewSeconds * 1000;
-  const payloadExpired = Date.parse(payload.expiresAt) <= expiryBoundary;
+  const payloadExpiresAt = Date.parse(payload.expiresAt);
+  if (!Number.isFinite(payloadExpiresAt)) throw new Error("manifest-payload-expiry-invalid");
+  const payloadExpired = payloadExpiresAt <= expiryBoundary;
   const chainExpired = payloadExpired ||
     verified.protectedHeader.exp * 1000 <= expiryBoundary ||
     delegated.expires * 1000 <= expiryBoundary;
-  if (payloadExpired && allowExpiredHash === null) {
+  if (payloadExpired && pinnedState === null) {
     throw new Error("manifest-payload-expired");
   }
   const { hash, ...unsignedPayload } = payload;
@@ -158,8 +164,14 @@ async function verifyManifestChain(
   if (calculated !== hash && legacyCalculated !== hash) {
     throw new Error("manifest-payload-hash-mismatch");
   }
-  if (chainExpired && String(hash).toLowerCase() !== String(allowExpiredHash).toLowerCase()) {
-    throw new Error("manifest-expired-update-refused");
+  if (chainExpired) {
+    assertExpiredChainIsExactlyPinned({
+      delegated,
+      delegationHash,
+      hash,
+      payload,
+      pinnedState,
+    });
   }
   const contentContractHash = await manifestContentContractHash(payload);
   writeFileSync(outputPath, canonicalizeJson(payload), { encoding: "utf8", flag: "wx", mode: 0o600 });
@@ -170,11 +182,87 @@ async function verifyManifestChain(
     manifestHash: hash,
     manifestSequence: payload.sequence,
     contentContractHash,
+    cryptographicStatus: "verified",
+    cryptographicallyValid: true,
     expiredFallback: chainExpired,
+    freshnessStatus: chainExpired ? "freshness-degraded" : "fresh",
     releaseKeyId: delegated.releaseKeyId,
     rootKeyId,
     rootFingerprint,
   });
+}
+
+function pinnedExpiredState(parsedArguments) {
+  const names = [
+    "pinned-manifest-sequence",
+    "pinned-manifest-hash",
+    "pinned-delegation-sequence",
+    "pinned-delegation-hash",
+    "pinned-release-key-id",
+  ];
+  const present = names.filter((name) => parsedArguments.has(name));
+  if (present.length === 0) return null;
+  if (present.length !== names.length) throw new Error("pinned-expired-state-incomplete");
+
+  const manifestSequence = strictPositiveInteger(
+    parsedArguments.get("pinned-manifest-sequence"),
+    "pinned-manifest-sequence-invalid",
+  );
+  const delegationSequence = strictPositiveInteger(
+    parsedArguments.get("pinned-delegation-sequence"),
+    "pinned-delegation-sequence-invalid",
+  );
+  const manifestHash = strictSha256(
+    parsedArguments.get("pinned-manifest-hash"),
+    "pinned-manifest-hash-invalid",
+  );
+  const delegationHash = strictSha256(
+    parsedArguments.get("pinned-delegation-hash"),
+    "pinned-delegation-hash-invalid",
+  );
+  const releaseKeyId = String(parsedArguments.get("pinned-release-key-id") ?? "");
+  if (!releaseKeyId || releaseKeyId.length > 256 || /[\u0000-\u001f\u007f]/u.test(releaseKeyId)) {
+    throw new Error("pinned-release-key-id-invalid");
+  }
+  return {
+    manifestSequence,
+    manifestHash,
+    delegationSequence,
+    delegationHash,
+    releaseKeyId,
+  };
+}
+
+function assertExpiredChainIsExactlyPinned({
+  delegated,
+  delegationHash,
+  hash,
+  payload,
+  pinnedState,
+}) {
+  if (pinnedState === null) throw new Error("manifest-expired-update-refused");
+  const comparisons = [
+    [Number(payload.sequence), pinnedState.manifestSequence, "manifest-sequence"],
+    [String(hash).toLowerCase(), pinnedState.manifestHash, "manifest-hash"],
+    [Number(delegated.sequence), pinnedState.delegationSequence, "delegation-sequence"],
+    [String(delegationHash).toLowerCase(), pinnedState.delegationHash, "delegation-hash"],
+    [String(delegated.releaseKeyId), pinnedState.releaseKeyId, "release-key-id"],
+  ];
+  const mismatch = comparisons.find(([actual, expected]) => actual !== expected);
+  if (mismatch) throw new Error(`manifest-expired-pin-mismatch:${mismatch[2]}`);
+}
+
+function strictPositiveInteger(value, errorCode) {
+  if (!/^[1-9][0-9]*$/u.test(String(value ?? ""))) throw new Error(errorCode);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new Error(errorCode);
+  return parsed;
+}
+
+function strictSha256(value, errorCode) {
+  const normalized = String(value ?? "").toLowerCase();
+  if (!/^[a-f0-9]{64}$/u.test(normalized)) throw new Error(errorCode);
+  return normalized;
 }
 
 function fingerprint(key) {

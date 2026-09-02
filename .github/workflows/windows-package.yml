@@ -1,0 +1,345 @@
+name: Windows package
+
+on:
+  pull_request:
+    paths:
+      - 'global.json'
+      - '.config/**'
+      - 'src/windows/**'
+      - 'scripts/windows/**'
+      - '.github/workflows/windows-package.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'global.json'
+      - '.config/**'
+      - 'src/windows/**'
+      - 'scripts/windows/**'
+      - '.github/workflows/windows-package.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Exact source, protocol, binary and MSI version'
+        required: true
+        type: string
+        default: '4.0.0'
+      signed:
+        description: 'Enter the isolated signing pipeline'
+        required: true
+        type: boolean
+        default: false
+      run_disposable_msi_e2e:
+        description: 'Required for signed candidates: install/rollback/repair/uninstall on a disposable runner'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.sha }}
+  cancel-in-progress: false
+
+env:
+  WINDOWS_VERSION_DEFAULT: '4.0.0'
+  REQUESTED_WINDOWS_VERSION: ${{ inputs.version }}
+  WIX_EULA_ACCEPTED: ${{ vars.WIX_EULA_ACCEPTED }}
+
+jobs:
+  reject-unsafe-signed-request:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.signed == true &&
+      (github.ref != 'refs/heads/main' ||
+       github.ref_protected != true ||
+       github.event.repository.default_branch != 'main' ||
+       inputs.run_disposable_msi_e2e != true)
+    runs-on: windows-latest
+    steps:
+      - name: Reject unsafe signing request
+        shell: pwsh
+        run: >-
+          throw 'Signed candidates require protected default main and the disposable MSI lifecycle gate. Official publication is a separate post-canary workflow.'
+
+  candidate:
+    if: github.event_name != 'workflow_dispatch' || inputs.signed != true
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            .config/dotnet-tools.json
+            src/windows/**/packages.lock.json
+            src/windows/**/packages.wix.lock.json
+
+      - name: Build unsigned, non-releasable candidate
+        shell: pwsh
+        run: |
+          if ($env:WIX_EULA_ACCEPTED -ne 'wix7') {
+            throw 'Set WIX_EULA_ACCEPTED=wix7 only after organizational review of the WiX 7 terms.'
+          }
+          $version = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { $env:REQUESTED_WINDOWS_VERSION } else { $env:WINDOWS_VERSION_DEFAULT }
+          ./scripts/windows/Build-HchWorkerPackage.ps1 `
+            -Version $version `
+            -ReleaseIntent Candidate `
+            -SourceRef $env:GITHUB_REF `
+            -AcceptWixEula `
+            -AllowUnsigned `
+            -AllowUnpinnedCandidate
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hch-worker-windows-unsigned-${{ github.sha }}-${{ github.run_attempt }}
+          path: artifacts/windows-v4/release
+          if-no-files-found: error
+          retention-days: 14
+
+  prepare-signed:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.signed == true &&
+      github.ref == 'refs/heads/main' &&
+      github.ref_protected == true &&
+      github.event.repository.default_branch == 'main' &&
+      inputs.run_disposable_msi_e2e == true
+    runs-on: windows-latest
+    outputs:
+      prepared-artifact: ${{ steps.names.outputs.prepared }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            .config/dotnet-tools.json
+            src/windows/**/packages.lock.json
+            src/windows/**/packages.wix.lock.json
+
+      - name: Materialize reviewed public root trust
+        id: root
+        shell: pwsh
+        env:
+          HCH_ROOT_PUBLIC_KEY_PEM_BASE64: ${{ vars.HCH_ROOT_PUBLIC_KEY_PEM_BASE64 }}
+          HCH_ROOT_PUBLIC_KEY_FINGERPRINT: ${{ vars.HCH_ROOT_PUBLIC_KEY_FINGERPRINT }}
+          HCH_ROOT_KEY_ID: ${{ vars.HCH_ROOT_KEY_ID }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:HCH_ROOT_PUBLIC_KEY_PEM_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:HCH_ROOT_PUBLIC_KEY_FINGERPRINT) -or
+              [string]::IsNullOrWhiteSpace($env:HCH_ROOT_KEY_ID)) {
+            throw 'All three public root trust variables are required before signing.'
+          }
+          $rootPath = Join-Path $env:RUNNER_TEMP 'orchestrator-root.pem'
+          [IO.File]::WriteAllBytes($rootPath, [Convert]::FromBase64String($env:HCH_ROOT_PUBLIC_KEY_PEM_BASE64))
+          "path=$rootPath" >> $env:GITHUB_OUTPUT
+
+      - name: Restore, test and prepare without signing secrets
+        shell: pwsh
+        run: |
+          if ($env:WIX_EULA_ACCEPTED -ne 'wix7') {
+            throw 'Set WIX_EULA_ACCEPTED=wix7 only after organizational review of the WiX 7 terms.'
+          }
+          $arguments = @{
+            Version = $env:REQUESTED_WINDOWS_VERSION
+            ReleaseIntent = 'Candidate'
+            SourceRef = $env:GITHUB_REF
+            RootPublicKeyPath = '${{ steps.root.outputs.path }}'
+            RootPublicKeyFingerprint = '${{ vars.HCH_ROOT_PUBLIC_KEY_FINGERPRINT }}'
+            RootKeyId = '${{ vars.HCH_ROOT_KEY_ID }}'
+            AcceptWixEula = $true
+            AllowUnsigned = $true
+          }
+          $arguments.RequireDefender = $true
+          ./scripts/windows/Build-HchWorkerPackage.ps1 @arguments
+
+      - name: Name immutable preparation artifact
+        id: names
+        shell: pwsh
+        run: |
+          "prepared=hch-worker-windows-prepared-${{ github.run_id }}-${{ github.run_attempt }}" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.names.outputs.prepared }}
+          path: artifacts/windows-v4/work
+          if-no-files-found: error
+          retention-days: 2
+
+  sign-and-test:
+    needs: prepare-signed
+    runs-on: windows-latest
+    environment: windows-release-signing
+    outputs:
+      signed-artifact: ${{ steps.names.outputs.signed }}
+    env:
+      HCH_SIGNER_THUMBPRINT: ${{ vars.HCH_SIGNER_THUMBPRINT }}
+      HCH_SIGNER_CERTIFICATE_SHA256: ${{ vars.HCH_SIGNER_CERTIFICATE_SHA256 }}
+      HCH_TIMESTAMP_URL: ${{ vars.HCH_TIMESTAMP_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            .config/dotnet-tools.json
+            src/windows/**/packages.lock.json
+            src/windows/**/packages.wix.lock.json
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.prepare-signed.outputs.prepared-artifact }}
+          path: artifacts/windows-v4/work
+
+      - name: Validate public signer policy and restore WiX outside secret boundary
+        shell: pwsh
+        run: |
+          if ($env:HCH_SIGNER_THUMBPRINT -notmatch '^[A-Fa-f0-9]{40}$' -or
+              $env:HCH_SIGNER_CERTIFICATE_SHA256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+              [string]::IsNullOrWhiteSpace($env:HCH_TIMESTAMP_URL)) {
+            throw 'Reviewed signer thumbprint, certificate SHA-256 and timestamp URL variables are required.'
+          }
+          dotnet tool restore
+          if ($LASTEXITCODE -ne 0) { throw 'Tool restore failed.' }
+          dotnet restore src/windows/Hch.Worker.Installer/Hch.Worker.Installer.wixproj --locked-mode -p:AcceptEula=wix7
+          if ($LASTEXITCODE -ne 0) { throw 'Locked WiX restore failed.' }
+
+      - name: Sign allowlisted first-party payloads only
+        shell: pwsh
+        env:
+          HCH_SIGN_PFX_BASE64: ${{ secrets.HCH_SIGN_PFX_BASE64 }}
+          HCH_SIGN_PFX_PASSWORD: ${{ secrets.HCH_SIGN_PFX_PASSWORD }}
+        run: |
+          ./scripts/windows/Sign-HchWorkerArtifacts.ps1 `
+            -Stage Payloads `
+            -Version $env:REQUESTED_WINDOWS_VERSION `
+            -ExpectedSignerThumbprint $env:HCH_SIGNER_THUMBPRINT `
+            -ExpectedSignerCertificateSha256 $env:HCH_SIGNER_CERTIFICATE_SHA256 `
+            -TimestampUrl $env:HCH_TIMESTAMP_URL
+
+      - name: Rebuild MSI without signing secrets
+        shell: pwsh
+        run: |
+          $arguments = @{
+            Version = $env:REQUESTED_WINDOWS_VERSION
+            ExpectedSignerThumbprint = $env:HCH_SIGNER_THUMBPRINT
+            ExpectedSignerCertificateSha256 = $env:HCH_SIGNER_CERTIFICATE_SHA256
+            AcceptWixEula = $true
+          }
+          $arguments.RequireDefender = $true
+          ./scripts/windows/Repack-HchWorkerPackage.ps1 @arguments
+
+      - name: Sign final MSI only
+        shell: pwsh
+        env:
+          HCH_SIGN_PFX_BASE64: ${{ secrets.HCH_SIGN_PFX_BASE64 }}
+          HCH_SIGN_PFX_PASSWORD: ${{ secrets.HCH_SIGN_PFX_PASSWORD }}
+        run: |
+          ./scripts/windows/Sign-HchWorkerArtifacts.ps1 `
+            -Stage Msi `
+            -Version $env:REQUESTED_WINDOWS_VERSION `
+            -ExpectedSignerThumbprint $env:HCH_SIGNER_THUMBPRINT `
+            -ExpectedSignerCertificateSha256 $env:HCH_SIGNER_CERTIFICATE_SHA256 `
+            -TimestampUrl $env:HCH_TIMESTAMP_URL
+
+      - name: Exercise clean install, rollback, repair and uninstall on disposable runner
+        if: inputs.run_disposable_msi_e2e == true
+        shell: pwsh
+        run: |
+          ./scripts/windows/Invoke-HchWorkerMsiDisposableTest.ps1 `
+            -MsiPath "artifacts/windows-v4/release/HCH-Worker-$env:REQUESTED_WINDOWS_VERSION-win-x64.msi" `
+            -Version $env:REQUESTED_WINDOWS_VERSION `
+            -ExpectedSignerThumbprint $env:HCH_SIGNER_THUMBPRINT `
+            -ExpectedSignerCertificateSha256 $env:HCH_SIGNER_CERTIFICATE_SHA256 `
+            -EnvironmentKind GitHubHosted `
+            -ConfirmDisposableExecution I_UNDERSTAND_THIS_INSTALLS_AND_REMOVES_HCH_WORKER_ON_A_DISPOSABLE_MACHINE `
+            -EvidencePath artifacts/windows-v4/work/security/msi-disposable-e2e.json
+
+      - name: Generate SBOM, provenance, policy and final checksums without signing secrets
+        shell: pwsh
+        run: |
+          $arguments = @{
+            Version = $env:REQUESTED_WINDOWS_VERSION
+            ReleaseIntent = 'Candidate'
+            ExpectedSignerThumbprint = $env:HCH_SIGNER_THUMBPRINT
+            ExpectedSignerCertificateSha256 = $env:HCH_SIGNER_CERTIFICATE_SHA256
+            TimestampUrl = $env:HCH_TIMESTAMP_URL
+          }
+          $e2e = 'artifacts/windows-v4/work/security/msi-disposable-e2e.json'
+          if (Test-Path -LiteralPath $e2e) { $arguments.MsiE2eEvidencePath = $e2e }
+          $arguments.RequireDefender = $true
+          ./scripts/windows/Complete-HchWorkerReleaseEvidence.ps1 @arguments
+
+      - name: Sign checksum evidence only
+        shell: pwsh
+        env:
+          HCH_SIGN_PFX_BASE64: ${{ secrets.HCH_SIGN_PFX_BASE64 }}
+          HCH_SIGN_PFX_PASSWORD: ${{ secrets.HCH_SIGN_PFX_PASSWORD }}
+        run: |
+          ./scripts/windows/Sign-HchWorkerArtifacts.ps1 `
+            -Stage Evidence `
+            -Version $env:REQUESTED_WINDOWS_VERSION `
+            -ExpectedSignerThumbprint $env:HCH_SIGNER_THUMBPRINT `
+            -ExpectedSignerCertificateSha256 $env:HCH_SIGNER_CERTIFICATE_SHA256 `
+            -TimestampUrl $env:HCH_TIMESTAMP_URL
+
+      - name: Verify final release evidence outside secret boundary
+        shell: pwsh
+        run: |
+          $arguments = @{
+            ReleasePath = 'artifacts/windows-v4/release'
+            Version = $env:REQUESTED_WINDOWS_VERSION
+            ExpectedSignerThumbprint = $env:HCH_SIGNER_THUMBPRINT
+            ExpectedSignerCertificateSha256 = $env:HCH_SIGNER_CERTIFICATE_SHA256
+            RequireCandidate = $true
+          }
+          ./scripts/windows/Test-HchWorkerReleaseEvidence.ps1 @arguments
+
+      - name: Name immutable signed artifact
+        id: names
+        shell: pwsh
+        run: |
+          "signed=hch-worker-windows-signed-$env:REQUESTED_WINDOWS_VERSION-${{ github.sha }}-${{ github.run_attempt }}" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.names.outputs.signed }}
+          path: artifacts/windows-v4/release
+          if-no-files-found: error
+          retention-days: 90
+
+  attest-signed-artifact:
+    needs: sign-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.sign-and-test.outputs.signed-artifact }}
+          path: artifacts/windows-v4/release
+
+      - uses: actions/attest-build-provenance@8beda2b7ed98355c0e97c0a63bec38ae472e66c4 # v4
+        with:
+          subject-path: 'artifacts/windows-v4/release/**'

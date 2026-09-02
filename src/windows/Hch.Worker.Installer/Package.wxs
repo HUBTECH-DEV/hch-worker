@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Id="HubTech.HchWorker.Windows.V4"
+           Name="HCH Worker"
+           Manufacturer="HubTech"
+           Version="$(var.ProductVersion)"
+           Language="1046"
+           Scope="perMachine"
+           InstallerVersion="500"
+           Compressed="yes">
+    <SummaryInformation Description="HCH Worker nativo para Windows"
+                        Keywords="HCH,Worker,HubTech"
+                        Manufacturer="HubTech" />
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="Uma versão mais recente do [ProductName] já está instalada."
+                  IgnoreRemoveFailure="no" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="HCH_OWNER_SID" Secure="yes" Hidden="yes" />
+    <!-- Private (mixed-case) property: callers cannot select upgrade mode. -->
+    <Property Id="HchInstallMode" Value="fresh" />
+    <!--
+      This property is intentionally unusable by an ordinary installation. It
+      exists only for the opt-in disposable-VM rollback harness and carries a
+      long, exact sentinel so an accidental property assignment cannot trigger
+      the forced failure.
+    -->
+    <Property Id="HCH_TEST_ROLLBACK" Secure="yes" Hidden="yes" />
+    <SetProperty Id="HCH_OWNER_SID"
+                 Value="[UserSID]"
+                 Before="LaunchConditions"
+                 Sequence="both"
+                 Condition="NOT HCH_OWNER_SID" />
+    <Launch Condition="Installed OR WIX_UPGRADE_DETECTED OR HCH_OWNER_SID"
+            Message="Não foi possível determinar o usuário proprietário. Em instalação silenciosa informe HCH_OWNER_SID=S-1-..." />
+    <Launch Condition="Installed OR WIX_UPGRADE_DETECTED OR (HCH_OWNER_SID &lt;&gt; &quot;S-1-5-18&quot; AND HCH_OWNER_SID &lt;&gt; &quot;S-1-5-19&quot; AND HCH_OWNER_SID &lt;&gt; &quot;S-1-5-20&quot;)"
+            Message="HCH_OWNER_SID deve identificar um usuário humano, não SYSTEM, LocalService ou NetworkService." />
+    <Launch Condition="VersionNT64 &gt;= 1000"
+            Message="O HCH Worker 4 requer Windows 10/11 x64 ou Windows Server equivalente." />
+
+    <util:QueryWindowsWellKnownSIDs />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="HubTechProgramFiles" Name="HubTech">
+        <Directory Id="INSTALLFOLDER" Name="HCH Worker">
+          <Directory Id="VersionFolder" Name="4">
+            <Directory Id="ServiceFolder" Name="Service" />
+            <Directory Id="TrayFolder" Name="Tray" />
+            <Directory Id="BootstrapFolder" Name="Installer" />
+            <Directory Id="TrustPayloadFolder" Name="Trust" />
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="HubTechProgramData" Name="HubTech">
+        <Directory Id="HchDataFolder" Name="HCH Worker" />
+      </Directory>
+    </StandardDirectory>
+
+    <Component Id="ProgramDataAnchor"
+               Directory="HchDataFolder"
+               Guid="{E4A4FD5A-C8CF-4F8D-A50D-5135E6C734E2}"
+               Bitness="always64"
+               Permanent="yes">
+      <CreateFolder>
+        <util:PermissionEx User="[WIX_ACCOUNT_LOCALSYSTEM_NODOMAIN]" GenericAll="yes" />
+        <util:PermissionEx User="[WIX_ACCOUNT_ADMINISTRATORS_NODOMAIN]" GenericAll="yes" />
+      </CreateFolder>
+      <RegistryValue Root="HKLM"
+                     Key="Software\HubTech\HCH Worker"
+                     Name="DataRoot"
+                     Type="string"
+                     Value="[HchDataFolder]"
+                     KeyPath="yes" />
+    </Component>
+
+    <Component Id="WorkerService"
+               Directory="ServiceFolder"
+               Guid="{2F19A8AA-0290-4888-8DE9-659C68B7C7B2}"
+               Bitness="always64">
+      <File Id="ServiceExe"
+            Source="$(var.ServicePublishDir)\Hch.Worker.Service.exe"
+            KeyPath="yes" />
+      <ServiceInstall Id="WorkerServiceInstall"
+                      Name="HchWorker"
+                      DisplayName="HCH Worker"
+                      Description="Processamento editorial distribuído do HCH."
+                      Type="ownProcess"
+                      Start="auto"
+                      ErrorControl="normal"
+                      Account="LocalSystem"
+                      Vital="yes">
+        <ServiceConfig DelayedAutoStart="yes"
+                       ServiceSid="unrestricted"
+                       FailureActionsWhen="failedToStopOrReturnedError"
+                       OnInstall="yes"
+                       OnReinstall="yes"
+                       OnUninstall="no" />
+        <util:ServiceConfig FirstFailureActionType="restart"
+                            SecondFailureActionType="restart"
+                            ThirdFailureActionType="restart"
+                            RestartServiceDelayInSeconds="15"
+                            ResetPeriodInDays="1" />
+      </ServiceInstall>
+      <ServiceControl Id="WorkerServiceControl"
+                      Name="HchWorker"
+                      Start="install"
+                      Stop="both"
+                      Remove="uninstall"
+                      Wait="yes" />
+    </Component>
+
+    <Component Id="TrayApplication"
+               Directory="TrayFolder"
+               Guid="{818B5355-D63D-4529-985E-CE38D60CA5C1}"
+               Bitness="always64">
+      <File Id="TrayExe"
+            Source="$(var.TrayPublishDir)\Hch.Worker.Tray.exe"
+            KeyPath="yes" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                     Name="HCH Worker Tray"
+                     Type="string"
+                     Value="&quot;[#TrayExe]&quot;" />
+    </Component>
+
+    <Component Id="InstallerBootstrap"
+               Directory="BootstrapFolder"
+               Guid="{0D3F3212-F540-4E7D-98EF-21D41163754D}"
+               Bitness="always64">
+      <File Id="BootstrapExe"
+            Source="$(var.BootstrapPublishDir)\Hch.Worker.Installer.exe"
+            KeyPath="yes" />
+    </Component>
+
+    <?if $(var.IncludeRootTrustPayload) = "true" ?>
+    <Component Id="OfficialRootTrustPayload"
+               Directory="TrustPayloadFolder"
+               Guid="{5CA39EAB-4AD2-4A42-8556-3B4AE576183E}"
+               Bitness="always64">
+      <File Id="OfficialRootPublicKey"
+            Source="$(var.RootPublicKeySource)"
+            Name="orchestrator-root.pem"
+            KeyPath="yes" />
+      <File Id="OfficialRootTrustMetadata"
+            Source="$(var.RootTrustMetadataSource)"
+            Name="root-trust.json" />
+    </Component>
+    <?endif ?>
+
+    <Files Include="$(var.ServicePublishDir)\**" Directory="ServiceFolder">
+      <Exclude Files="$(var.ServicePublishDir)\Hch.Worker.Service.exe" />
+      <Exclude Files="$(var.ServicePublishDir)\**\*.pdb" />
+    </Files>
+    <Files Include="$(var.TrayPublishDir)\**" Directory="TrayFolder">
+      <Exclude Files="$(var.TrayPublishDir)\Hch.Worker.Tray.exe" />
+      <Exclude Files="$(var.TrayPublishDir)\**\*.pdb" />
+    </Files>
+
+    <!--
+      Embedded so maintenance is proven before an early RemoveExistingProducts
+      can stop or remove the currently installed service/files.
+    -->
+    <Binary Id="MaintenancePreflightBinary"
+            SourceFile="$(var.BootstrapPublishDir)\Hch.Worker.Installer.exe" />
+
+    <SetProperty Id="RollbackWorkerBootstrap"
+                 Value="&quot;[#BootstrapExe]&quot; rollback --product-root &quot;[HchDataFolder].&quot;"
+                 Before="RollbackWorkerBootstrap"
+                 Sequence="execute"
+                 Condition="NOT Installed AND ACTION &lt;&gt; &quot;ADMIN&quot;" />
+    <SetProperty Id="RunWorkerBootstrap"
+                 Value="&quot;[#BootstrapExe]&quot; bootstrap --product-root &quot;[HchDataFolder].&quot; --owner-sid &quot;[HCH_OWNER_SID]&quot; --machine-name &quot;[ComputerName]&quot; --install-mode &quot;[HchInstallMode]&quot;"
+                 Before="RunWorkerBootstrap"
+                 Sequence="execute"
+                 Condition="NOT Installed AND ACTION &lt;&gt; &quot;ADMIN&quot;" />
+    <SetProperty Id="HchInstallMode"
+                 Value="upgrade"
+                 Before="SetRunWorkerBootstrap"
+                 Sequence="execute"
+                 Condition="WIX_UPGRADE_DETECTED" />
+    <SetProperty Id="CommitWorkerBootstrap"
+                 Value="&quot;[#BootstrapExe]&quot; commit --product-root &quot;[HchDataFolder].&quot;"
+                 Before="CommitWorkerBootstrap"
+                 Sequence="execute"
+                 Condition="NOT Installed AND ACTION &lt;&gt; &quot;ADMIN&quot;" />
+
+    <CustomAction Id="RollbackWorkerBootstrap"
+                  BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixSilentExec"
+                  Execute="rollback"
+                  Impersonate="no"
+                  Return="check"
+                  HideTarget="yes" />
+    <CustomAction Id="RunWorkerBootstrap"
+                  BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixSilentExec"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check"
+                  HideTarget="yes" />
+    <CustomAction Id="CommitWorkerBootstrap"
+                  BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixSilentExec"
+                  Execute="commit"
+                  Impersonate="no"
+                   Return="check"
+                   HideTarget="yes" />
+    <CustomAction Id="PreflightWorkerMaintenance"
+                  BinaryRef="MaintenancePreflightBinary"
+                  ExeCommand="maintenance-preflight --product-root &quot;[HchDataFolder].&quot;"
+                  Execute="immediate"
+                  Impersonate="no"
+                  Return="check"
+                  HideTarget="yes" />
+    <CustomAction Id="FailDisposableRollbackTest"
+                  Error="Intentional failure requested by the disposable MSI rollback harness." />
+
+    <InstallExecuteSequence>
+      <Custom Action="PreflightWorkerMaintenance"
+              Before="InstallInitialize"
+              Condition="ACTION &lt;&gt; &quot;ADMIN&quot; AND (WIX_UPGRADE_DETECTED OR (Installed AND REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE))" />
+      <Custom Action="RollbackWorkerBootstrap"
+              Before="RunWorkerBootstrap"
+              Condition="NOT Installed AND ACTION &lt;&gt; &quot;ADMIN&quot;" />
+      <Custom Action="RunWorkerBootstrap"
+              Before="StartServices"
+              Condition="NOT Installed AND ACTION &lt;&gt; &quot;ADMIN&quot;" />
+      <Custom Action="FailDisposableRollbackTest"
+              After="RunWorkerBootstrap"
+              Condition="NOT Installed AND ACTION &lt;&gt; &quot;ADMIN&quot; AND HCH_TEST_ROLLBACK = &quot;I_UNDERSTAND_THIS_IS_A_DISPOSABLE_ROLLBACK_TEST&quot;" />
+      <Custom Action="CommitWorkerBootstrap"
+              After="FailDisposableRollbackTest"
+              Condition="NOT Installed AND ACTION &lt;&gt; &quot;ADMIN&quot;" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

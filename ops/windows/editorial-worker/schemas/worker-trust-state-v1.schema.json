@@ -7,7 +7,7 @@
   "required": [
     "schema", "schemaVersion", "rootKeyId", "rootFingerprint", "releaseKeyId",
     "delegationSequence", "delegationHash", "manifestSequence", "manifestHash", "contentContractHash",
-    "policyHash", "verifiedAt"
+    "policyHash", "cryptographicStatus", "freshnessStatus", "freshnessCheckedAt", "verifiedAt"
   ],
   "properties": {
     "schema": { "const": "hch.worker-trust-state/v1" },
@@ -21,6 +21,9 @@
     "manifestHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "contentContractHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "cryptographicStatus": { "const": "verified" },
+    "freshnessStatus": { "enum": ["fresh", "freshness-degraded"] },
+    "freshnessCheckedAt": { "type": "string", "format": "date-time" },
     "verifiedAt": { "type": "string", "format": "date-time" }
   }
 }

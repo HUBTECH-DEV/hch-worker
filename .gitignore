@@ -54,3 +54,9 @@ next-env.d.ts
 /outputs/
 /work/
 /ops/windows/installer/artifacts/
+/artifacts/
+
+# .NET build outputs
+**/bin/
+**/obj/
+*.user

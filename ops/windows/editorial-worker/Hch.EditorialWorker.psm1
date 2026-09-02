@@ -1091,6 +1091,12 @@ function Save-HchVerifiedTrustState {
   )
   $delegationSequence = [long]$Verified.delegationSequence
   $delegationHash = Get-HchNormalizedHash -Value ([string]$Verified.delegationHash)
+  $freshnessStatus = [string]$Verified.freshnessStatus
+  if ([string]$Verified.cryptographicStatus -ne 'verified' -or
+      [bool]$Verified.cryptographicallyValid -ne $true -or
+      $freshnessStatus -notin @('fresh', 'freshness-degraded')) {
+    throw 'manifest-verification-status-invalid'
+  }
   Assert-HchDelegationContinuity -Config $Config -DelegationSequence $delegationSequence `
     -DelegationHash $delegationHash
   $trustState = [ordered]@{
@@ -1105,10 +1111,81 @@ function Save-HchVerifiedTrustState {
     manifestHash = $ManifestHash
     contentContractHash = $ContentContractHash
     policyHash = $PolicyHash
+    cryptographicStatus = 'verified'
+    freshnessStatus = $freshnessStatus
+    freshnessCheckedAt = $VerifiedAt
     verifiedAt = $VerifiedAt
   }
   Write-HchJsonAtomic -Path (Join-Path ([string]$Config.StateRoot) 'trust-state.json') -Value $trustState
   return [pscustomobject]$trustState
+}
+
+function Get-HchPinnedExpiredManifestArguments {
+  param([Parameter(Mandatory = $true)][hashtable]$Config)
+  $appliedPath = Join-Path ([string]$Config.StateRoot) 'applied-manifest.json'
+  $trustPath = Join-Path ([string]$Config.StateRoot) 'trust-state.json'
+  if (-not (Test-Path -LiteralPath $appliedPath -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $trustPath -PathType Leaf)) {
+    return @()
+  }
+  try {
+    $applied = Read-HchJsonFile -Path $appliedPath
+    $trust = Read-HchJsonFile -Path $trustPath
+    $requiredApplied = @(
+      'sequence', 'manifestHash', 'rootKeyId', 'releaseKeyId',
+      'delegationSequence', 'delegationHash'
+    )
+    $requiredTrust = @(
+      'schemaVersion', 'manifestSequence', 'manifestHash', 'rootKeyId', 'releaseKeyId',
+      'delegationSequence', 'delegationHash'
+    )
+    foreach ($field in $requiredApplied) {
+      if (-not ($applied.PSObject.Properties.Name -contains $field)) { return @() }
+    }
+    foreach ($field in $requiredTrust) {
+      if (-not ($trust.PSObject.Properties.Name -contains $field)) { return @() }
+    }
+    if ([int]$trust.schemaVersion -ne 1 -or
+        [string]$applied.sequence -notmatch '^[1-9][0-9]*$' -or
+        [string]$applied.delegationSequence -notmatch '^[1-9][0-9]*$' -or
+        [string]$trust.manifestSequence -notmatch '^[1-9][0-9]*$' -or
+        [string]$trust.delegationSequence -notmatch '^[1-9][0-9]*$') {
+      return @()
+    }
+    $appliedManifestHash = Get-HchNormalizedHash -Value ([string]$applied.manifestHash)
+    $trustManifestHash = Get-HchNormalizedHash -Value ([string]$trust.manifestHash)
+    $appliedDelegationHash = Get-HchNormalizedHash -Value ([string]$applied.delegationHash)
+    $trustDelegationHash = Get-HchNormalizedHash -Value ([string]$trust.delegationHash)
+    if ([long]$applied.sequence -ne [long]$trust.manifestSequence -or
+        $appliedManifestHash -ne $trustManifestHash -or
+        [long]$applied.delegationSequence -ne [long]$trust.delegationSequence -or
+        $appliedDelegationHash -ne $trustDelegationHash -or
+        [string]::IsNullOrWhiteSpace([string]$applied.releaseKeyId) -or
+        -not [string]::Equals(
+          [string]$applied.releaseKeyId,
+          [string]$trust.releaseKeyId,
+          [StringComparison]::Ordinal
+        ) -or
+        -not [string]::Equals(
+          [string]$applied.rootKeyId,
+          [string]$trust.rootKeyId,
+          [StringComparison]::Ordinal
+        )) {
+      return @()
+    }
+    return @(
+      '--pinned-manifest-sequence', [string][long]$applied.sequence,
+      '--pinned-manifest-hash', $appliedManifestHash,
+      '--pinned-delegation-sequence', [string][long]$applied.delegationSequence,
+      '--pinned-delegation-hash', $appliedDelegationHash,
+      '--pinned-release-key-id', [string]$applied.releaseKeyId
+    )
+  } catch {
+    # A missing, partial or inconsistent local pin must never enable the
+    # expired-chain path. A fresh valid manifest can repair legacy state
+    # through the normal continuity checks.
+    return @()
+  }
 }
 
 function Test-HchRawSignature {
@@ -1146,19 +1223,13 @@ function Test-HchSignedManifest {
       'verify-chain', '--root', $rootPath, '--envelope', $envelopePath,
       '--output', $payloadPath, '--clock-skew', [string](Get-HchConfigValue $Config 'ClockSkewSeconds' 60)
     )
-    $appliedPath = Join-Path ([string]$Config.StateRoot) 'applied-manifest.json'
-    if (Test-Path -LiteralPath $appliedPath -PathType Leaf) {
-      try {
-        $applied = Read-HchJsonFile -Path $appliedPath
-        $appliedHash = Get-HchNormalizedHash -Value ([string]$applied.manifestHash)
-        $verifyArguments += @('--allow-expired-hash', $appliedHash)
-      } catch { throw 'worker-applied-manifest-invalid' }
-    }
+    $verifyArguments += @(Get-HchPinnedExpiredManifestArguments -Config $Config)
     $verified = Invoke-HchCrypto -Config $Config -Arguments $verifyArguments
     $payload = Read-HchJsonFile -Path $payloadPath
   } catch {
     $script:LastTrustObservation = [ordered]@{
-      status = 'error'; rootKeyId = $null; releaseKeyId = $null
+      status = 'error'; cryptographicStatus = 'error'; freshnessStatus = 'unknown'
+      rootKeyId = $null; releaseKeyId = $null
       manifestSequence = $null; manifestHash = $null; contentContractHash = $null; policyHash = $null
       lastVerifiedAt = $null; errorCode = 'manifest-signature-verification-failed'
     }
@@ -1252,6 +1323,8 @@ function Test-HchSignedManifest {
     -PolicyHash $policyHash -VerifiedAt $verifiedAt)
   $script:LastTrustObservation = [ordered]@{
     status = 'verified'
+    cryptographicStatus = 'verified'
+    freshnessStatus = [string]$verified.freshnessStatus
     rootKeyId = [string]$verified.rootKeyId
     releaseKeyId = [string]$verified.releaseKeyId
     manifestSequence = [long]$payload.sequence
@@ -1267,6 +1340,7 @@ function Test-HchSignedManifest {
     ManifestHash = $manifestHash
     ContentContractHash = $contentContractHash
     ExpiredFallback = [bool]$verified.expiredFallback
+    FreshnessStatus = [string]$verified.freshnessStatus
     RootKeyId = [string]$verified.rootKeyId
     ReleaseKeyId = [string]$verified.releaseKeyId
     DelegationSequence = $delegationSequence
@@ -1822,6 +1896,9 @@ function Set-HchWorkerStatus {
       # The renewable ready lease can expire without invalidating the verified
       # root/release/manifest signature chain.
       status = 'verified'
+      cryptographicStatus = 'verified'
+      freshnessStatus = Get-HchNestedValue -InputObject $ready `
+        -Path @('manifestFreshnessStatus') -Default 'unknown'
       rootKeyId = Get-HchNestedValue -InputObject $ready -Path @('rootKeyId') -Default $null
       releaseKeyId = Get-HchNestedValue -InputObject $ready -Path @('releaseKeyId') -Default $null
       manifestSequence = [long]$ready.manifestSequence
@@ -1835,7 +1912,8 @@ function Set-HchWorkerStatus {
     $previous.trust
   } else {
     [ordered]@{
-      status = 'pending'; rootKeyId = $null; releaseKeyId = $null
+      status = 'pending'; cryptographicStatus = 'pending'; freshnessStatus = 'unknown'
+      rootKeyId = $null; releaseKeyId = $null
       manifestSequence = $null; manifestHash = $null; contentContractHash = $null; policyHash = $null
       lastVerifiedAt = $null; errorCode = $null
     }
@@ -1878,6 +1956,12 @@ function Set-HchWorkerStatus {
     }
     trust = [ordered]@{
       status = [string]$trust.status
+      cryptographicStatus = Get-HchNestedValue -InputObject $trust `
+        -Path @('cryptographicStatus') -Default $(if ([string]$trust.status -eq 'verified') {
+          'verified'
+        } elseif ([string]$trust.status -eq 'error') { 'error' } else { 'pending' })
+      freshnessStatus = Get-HchNestedValue -InputObject $trust `
+        -Path @('freshnessStatus') -Default 'unknown'
       rootKeyId = Get-HchNestedValue -InputObject $trust -Path @('rootKeyId') -Default $null
       releaseKeyId = Get-HchNestedValue -InputObject $trust -Path @('releaseKeyId') -Default $null
       manifestSequence = Get-HchNestedValue -InputObject $trust -Path @('manifestSequence') -Default $null
@@ -2931,6 +3015,10 @@ function Invoke-HchWorkerBootstrap {
       (Get-HchNormalizedHash -Value ([string]$currentApplied.contentContractHash)) -ne
         (Get-HchNormalizedHash -Value ([string]$manifest.ContentContractHash))
     ))
+    $pinnedExpired = [bool]$manifest.ExpiredFallback
+    if ($pinnedExpired -and $contentChanged) {
+      throw 'expired-pinned-manifest-content-mismatch'
+    }
     $preserveReadyOnFailure = -not $contentChanged -and $null -ne $existingReady -and
       (ConvertFrom-HchTimestamp -Value ([string]$existingReady.readyUntil)) -gt [DateTimeOffset]::UtcNow
     if (Test-Path -LiteralPath $readyPath) {
@@ -2942,7 +3030,8 @@ function Invoke-HchWorkerBootstrap {
         }
         $readyRemainingSeconds = ((ConvertFrom-HchTimestamp -Value ([string]$ready.readyUntil)) -
           [DateTimeOffset]::UtcNow).TotalSeconds
-        if ([string]$ready.manifestHash -eq [string]$manifest.ManifestHash -and
+        if (-not $pinnedExpired -and
+            [string]$ready.manifestHash -eq [string]$manifest.ManifestHash -and
             $readyRemainingSeconds -gt $refreshBeforeSeconds) { return $ready }
       } catch {
         if ($contentChanged) {
@@ -2960,10 +3049,10 @@ function Invoke-HchWorkerBootstrap {
       Set-HchWorkerStatus -Config $Config -State 'updating'
     } elseif ($activeAssignments -gt 0) {
       Set-HchWorkerStatus -Config $Config -State 'processing' `
-        -Code 'compatible-manifest-refreshing'
+        -Code $(if ($pinnedExpired) { 'manifest-freshness-degraded' } else { 'compatible-manifest-refreshing' })
     } else {
       Set-HchWorkerStatus -Config $Config -State 'updating' `
-        -Code 'compatible-manifest-refreshing'
+        -Code $(if ($pinnedExpired) { 'manifest-freshness-degraded' } else { 'compatible-manifest-refreshing' })
     }
     $nonce = Get-HchChallenge -Config $Config -Identity $identity -Purpose 'bootstrap'
     $bootstrapControl = Get-HchWorkerControl -Config $Config
@@ -3021,6 +3110,13 @@ function Invoke-HchWorkerBootstrap {
       $checks = Test-HchAppliedEnvironment -Config $Config -Manifest $manifest `
         -StagedArtifacts $staged
       $receiptResult = 'applied'
+    } elseif ($pinnedExpired) {
+      # The exact persisted manifest/delegation chain was reverified above. Do
+      # not stage, download, pull or rewrite runtime artifacts merely because
+      # its freshness window elapsed. Revalidate the installed files/model and
+      # renew only the no-change receipt, attestation and readiness lease.
+      $checks = Test-HchCompatibleAppliedEnvironment -Config $Config -Manifest $manifest
+      $receiptResult = 'no-change'
     } else {
       Update-HchCompatibleManifestMetadata -Config $Config -Manifest $manifest `
         -Transaction $transaction
@@ -3107,6 +3203,7 @@ function Invoke-HchWorkerBootstrap {
       releaseKeyId = [string]$manifest.ReleaseKeyId
       delegationSequence = [long]$manifest.DelegationSequence
       delegationHash = [string]$manifest.DelegationHash
+      manifestFreshnessStatus = [string]$manifest.FreshnessStatus
       trustVerifiedAt = [string]$manifest.VerifiedAt
     }
     Write-HchJsonAtomic -Path (Join-Path ([string]$Config.StateRoot) 'applied-manifest.json') -Value $appliedRecord
@@ -3125,6 +3222,7 @@ function Invoke-HchWorkerBootstrap {
       attestedAt = [DateTimeOffset]::UtcNow.ToString('o')
       rootKeyId = [string]$manifest.RootKeyId
       releaseKeyId = [string]$manifest.ReleaseKeyId
+      manifestFreshnessStatus = [string]$manifest.FreshnessStatus
       trustVerifiedAt = [string]$manifest.VerifiedAt
     }
     Write-HchJsonAtomic -Path $readyPath -Value $readyRecord
@@ -3144,10 +3242,13 @@ function Invoke-HchWorkerBootstrap {
     $transaction.State = 'committed'
     Save-HchTransactionJournal -Transaction $transaction
     if ([string]$accepted.state -eq 'processing') {
-      Set-HchWorkerStatus -Config $Config -State 'processing' -ConnectionState 'connected'
+      Set-HchWorkerStatus -Config $Config -State 'processing' -ConnectionState 'connected' `
+        -Code $(if ($pinnedExpired) { 'manifest-freshness-degraded' } else { '' })
     } else {
       $readyState = if ([string]$accepted.state -eq 'draining') { 'standby' } else { 'idle' }
-      Set-HchWorkerStatus -Config $Config -State $readyState -ConnectionState 'connected' -ClearCurrentBatch
+      Set-HchWorkerStatus -Config $Config -State $readyState -ConnectionState 'connected' `
+        -Code $(if ($pinnedExpired) { 'manifest-freshness-degraded' } else { '' }) `
+        -ClearCurrentBatch
     }
     [void](Update-HchWorkerMetrics -Config $Config -Event 'bootstrap-success' `
       -DurationMilliseconds ([long]$timer.ElapsedMilliseconds) `

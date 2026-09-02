@@ -1,0 +1,36 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+  <PropertyGroup>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputType>Package</OutputType>
+    <OutputName>HCH-Worker-$(ProductVersion)-win-x64</OutputName>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">4.0.0</ProductVersion>
+    <ServicePublishDir Condition="'$(ServicePublishDir)' == ''">$(MSBuildThisFileDirectory)..\Hch.Worker.Service\bin\Release\net10.0-windows\win-x64\publish</ServicePublishDir>
+    <TrayPublishDir Condition="'$(TrayPublishDir)' == ''">$(MSBuildThisFileDirectory)..\Hch.Worker.Tray\bin\Release\net10.0-windows\win-x64\publish</TrayPublishDir>
+    <BootstrapPublishDir Condition="'$(BootstrapPublishDir)' == ''">$(MSBuildThisFileDirectory)bin\Release\net10.0-windows\win-x64\publish</BootstrapPublishDir>
+    <IncludeRootTrustPayload Condition="'$(IncludeRootTrustPayload)' == ''">false</IncludeRootTrustPayload>
+    <DefineConstants>ProductVersion=$(ProductVersion);ServicePublishDir=$(ServicePublishDir);TrayPublishDir=$(TrayPublishDir);BootstrapPublishDir=$(BootstrapPublishDir);IncludeRootTrustPayload=$(IncludeRootTrustPayload)</DefineConstants>
+    <DefineConstants Condition="'$(IncludeRootTrustPayload)' == 'true'">$(DefineConstants);RootPublicKeySource=$(RootPublicKeySource);RootTrustMetadataSource=$(RootTrustMetadataSource)</DefineConstants>
+    <DefaultCompressionLevel>high</DefaultCompressionLevel>
+    <DebugType>none</DebugType>
+    <SuppressValidation>false</SuppressValidation>
+    <!--
+      DelayedAutoStart and ServiceSid have no equivalent in the Util extension.
+      The package targets MSI 5.0+ only and emits these two settings through the
+      MsiServiceConfig table; recovery actions remain on util:ServiceConfig.
+    -->
+    <SuppressSpecificWarnings>$(SuppressSpecificWarnings);1149</SuppressSpecificWarnings>
+    <RestoreLockedMode Condition="'$(CI)' == 'true'">true</RestoreLockedMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Util.wixext" Version="[7.0.0]" />
+  </ItemGroup>
+
+  <Target Name="ValidatePublishInputs" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(ServicePublishDir)\Hch.Worker.Service.exe')" Text="Service publish output was not found at $(ServicePublishDir)." />
+    <Error Condition="!Exists('$(TrayPublishDir)\Hch.Worker.Tray.exe')" Text="Tray publish output was not found at $(TrayPublishDir)." />
+    <Error Condition="!Exists('$(BootstrapPublishDir)\Hch.Worker.Installer.exe')" Text="Installer bootstrap output was not found at $(BootstrapPublishDir)." />
+    <Error Condition="'$(IncludeRootTrustPayload)' == 'true' AND !Exists('$(RootPublicKeySource)')" Text="Official root public-key payload was not found at $(RootPublicKeySource)." />
+    <Error Condition="'$(IncludeRootTrustPayload)' == 'true' AND !Exists('$(RootTrustMetadataSource)')" Text="Official root trust metadata was not found at $(RootTrustMetadataSource)." />
+  </Target>
+</Project>

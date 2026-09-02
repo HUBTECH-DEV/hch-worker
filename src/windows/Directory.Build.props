@@ -1,0 +1,19 @@
+<Project>
+  <PropertyGroup>
+    <Version>4.0.0</Version>
+    <AssemblyVersion>4.0.0.0</AssemblyVersion>
+    <FileVersion>4.0.0.0</FileVersion>
+    <Authors>HUBTECH-DEV</Authors>
+    <Company>HubTech</Company>
+    <Product>HCH Worker</Product>
+    <Copyright>Copyright © HubTech 2026</Copyright>
+    <RepositoryUrl>https://github.com/HUBTECH-DEV/hch-worker</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <LangVersion>14.0</LangVersion>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+</Project>
