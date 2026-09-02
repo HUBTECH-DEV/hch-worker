@@ -287,6 +287,7 @@ test("service heartbeat renews readiness without enabling claims", () => {
 test("release artifact gate requires integrity, publisher identity, and timestamp", () => {
   const verifier = readFileSync(join(kitRoot, "Test-HchWorkerReleaseArtifact.ps1"), "utf8");
   const signer = readFileSync(join(kitRoot, "Sign-HchWorkerReleaseArtifact.ps1"), "utf8");
+  const setupBuilder = readFileSync(join(kitRoot, "../installer/Build-HchWorkerSetup.ps1"), "utf8");
   const manifest = readFileSync(join(serviceRoot, "HchEditorialWorkerService.exe.manifest"), "utf8");
   const csharp = readFileSync(join(serviceRoot, "HchEditorialWorkerService.cs"), "utf8");
   assert.match(verifier, /worker-release-artifact-hash-mismatch/);
@@ -295,6 +296,8 @@ test("release artifact gate requires integrity, publisher identity, and timestam
   assert.match(verifier, /worker-release-publisher-mismatch/);
   assert.match(signer, /\/fd SHA256/);
   assert.match(signer, /\/tr \$TimestampUrl \/td SHA256/);
+  assert.match(setupBuilder, /New-HchWorkerReleaseEvidence\.ps1/);
+  assert.match(setupBuilder, /evidence\s*=\s*\$evidencePath/);
   assert.match(manifest, /requestedExecutionLevel level="asInvoker"/);
   assert.match(csharp, /AssemblyCompany\("HUBTECH CONSULTORIA E DESENVOLVIMENTO LTDA"\)/);
   assert.match(csharp, /AssemblyFileVersion\("3\.1\.0\.0"\)/);

@@ -11,8 +11,10 @@ $ErrorActionPreference = 'Stop'
 
 function Invoke-CheckedNative {
     param([Parameter(Mandatory)][string]$Command, [Parameter(Mandatory)][string[]]$Arguments)
-    & $Command @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "bridge-archive-command-failed:$Command" }
+    $output = @(& $Command @Arguments)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) { throw "bridge-archive-command-failed:$Command" }
+    $output
 }
 
 function Copy-BridgePath {
@@ -43,21 +45,28 @@ if (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
 
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if ([string]::IsNullOrWhiteSpace($SourceCommit)) {
-    $SourceCommit = (& git -C $repositoryRoot rev-parse HEAD).Trim().ToLowerInvariant()
+    $sourceCommitOutput = @(Invoke-CheckedNative 'git' @('-C', $repositoryRoot, 'rev-parse', 'HEAD'))
+    if ($sourceCommitOutput.Count -ne 1) { throw 'bridge-archive-source-commit-invalid' }
+    $SourceCommit = ([string]$sourceCommitOutput[0]).Trim().ToLowerInvariant()
 }
-if ($LASTEXITCODE -ne 0 -or $SourceCommit -notmatch '^[0-9a-f]{40}$') {
+if ($SourceCommit -notmatch '^[0-9a-f]{40}$') {
     throw 'bridge-archive-source-commit-invalid'
 }
-$head = (& git -C $repositoryRoot rev-parse HEAD).Trim().ToLowerInvariant()
-if ($LASTEXITCODE -ne 0 -or $head -cne $SourceCommit) { throw 'bridge-archive-source-commit-mismatch' }
-$sourceEpochText = (& git -C $repositoryRoot show -s --format=%ct $SourceCommit).Trim()
+$headOutput = @(Invoke-CheckedNative 'git' @('-C', $repositoryRoot, 'rev-parse', 'HEAD'))
+if ($headOutput.Count -ne 1) { throw 'bridge-archive-source-commit-mismatch' }
+$head = ([string]$headOutput[0]).Trim().ToLowerInvariant()
+if ($head -cne $SourceCommit) { throw 'bridge-archive-source-commit-mismatch' }
+$sourceEpochOutput = @(Invoke-CheckedNative 'git' @('-C', $repositoryRoot, 'show', '-s', '--format=%ct', $SourceCommit))
+if ($sourceEpochOutput.Count -ne 1) { throw 'bridge-archive-source-epoch-invalid' }
+$sourceEpochText = ([string]$sourceEpochOutput[0]).Trim()
 $sourceEpoch = 0L
-if ($LASTEXITCODE -ne 0 -or -not [Int64]::TryParse($sourceEpochText, [ref]$sourceEpoch) -or $sourceEpoch -le 0) {
+if (-not [Int64]::TryParse($sourceEpochText, [ref]$sourceEpoch) -or $sourceEpoch -le 0) {
     throw 'bridge-archive-source-epoch-invalid'
 }
 
-$tarVersion = (& tar --version 2>&1 | Select-Object -First 1)
-if ($LASTEXITCODE -ne 0 -or [string]$tarVersion -notmatch 'GNU tar') {
+$tarVersionOutput = @(Invoke-CheckedNative 'tar' @('--version'))
+$tarVersion = if ($tarVersionOutput.Count -gt 0) { [string]$tarVersionOutput[0] } else { '' }
+if ($tarVersion -notmatch 'GNU tar') {
     throw 'bridge-archive-gnu-tar-required'
 }
 

@@ -19,10 +19,11 @@ $fleetValidator = Join-Path $repositoryRoot 'scripts\windows\Test-HchWorkerFleet
 $fleetSigner = Join-Path $repositoryRoot 'scripts\windows\Sign-HchWorkerFleetTransitionEvidence.ps1'
 $releaseMonitorPath = Join-Path $repositoryRoot 'ops\worker-dashboard\lib\releases.mjs'
 $buildScript = Join-Path $repositoryRoot 'scripts\windows\Build-HchWorkerPackage.ps1'
+$artifactSigner = Join-Path $repositoryRoot 'scripts\windows\Sign-HchWorkerArtifacts.ps1'
 $completeScript = Join-Path $repositoryRoot 'scripts\windows\Complete-HchWorkerReleaseEvidence.ps1'
 $releaseEvidenceScript = Join-Path $repositoryRoot 'scripts\windows\Test-HchWorkerReleaseEvidence.ps1'
 $onboardingProbe = Join-Path $repositoryRoot 'scripts\windows\Test-HchWorkerOnboardingEndpoints.ps1'
-foreach ($path in $ciPath, $candidatePath, $promotionPath, $bridgeWorkflowPath, $canaryValidator, $canaryExporter, $canarySigner, $bridgeReleaseValidator, $bridgeArchiveBuilder, $bridgeCompleteScript, $fleetValidator, $fleetSigner, $releaseMonitorPath, $buildScript, $completeScript, $releaseEvidenceScript, $onboardingProbe) {
+foreach ($path in $ciPath, $candidatePath, $promotionPath, $bridgeWorkflowPath, $canaryValidator, $canaryExporter, $canarySigner, $bridgeReleaseValidator, $bridgeArchiveBuilder, $bridgeCompleteScript, $fleetValidator, $fleetSigner, $releaseMonitorPath, $buildScript, $artifactSigner, $completeScript, $releaseEvidenceScript, $onboardingProbe) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Windows release gate file is missing: $path"
     }
@@ -41,7 +42,15 @@ $bridgeComplete = Get-Content -LiteralPath $bridgeCompleteScript -Raw
 $fleet = Get-Content -LiteralPath $fleetValidator -Raw
 $fleetSigning = Get-Content -LiteralPath $fleetSigner -Raw
 $releaseMonitor = Get-Content -LiteralPath $releaseMonitorPath -Raw
+$artifactSigning = Get-Content -LiteralPath $artifactSigner -Raw
 $releaseMonitorRuntimeShape = $releaseMonitor.Replace('${RELEASE_PAGE_SIZE}', '100').Replace('${page}', '')
+
+if (-not $artifactSigning.Contains(
+        "`$_.EnhancedKeyUsageList.ObjectId -contains '1.3.6.1.5.5.7.3.3'",
+        [StringComparison]::Ordinal) -or
+    $artifactSigning -match 'EnhancedKeyUsageList\.ObjectId\.Value') {
+    throw 'Windows artifact signer must recognize the PowerShell EKU ObjectId string shape.'
+}
 
 function Assert-CanaryExactPropertyShape {
     param(
@@ -231,12 +240,21 @@ foreach ($required in @(
     'Build-HchWorkerBridgeArchives.ps1',
     'Build-HchWorkerService.ps1',
     'Build-HchWorkerSetup.ps1',
+    'bridge-source:',
+    'needs: [portable-source, macos-source, windows-source]',
+    'needs: [bridge-source]',
     'Complete-HchWorkerBridgePackage.ps1',
     'Test-HchWorkerBridgeRelease.ps1',
     '-CandidateMode',
     'actions/attest-build-provenance@',
     'gh attestation verify',
     'RELEASE_IMMUTABILITY_ENFORCED',
+    'immutable-releases',
+    'Repository release immutability is not enabled.',
+    'refs/tags/v3.1.1',
+    '@($detail.bypass_actors).Count -eq 0',
+    "`$ruleTypes -ccontains 'update'",
+    "`$ruleTypes -ccontains 'deletion'",
     'gh release create v3.1.1',
     'HCH-Worker-Compatibility: compatible',
     'HCH-Worker-Content-Impact: none')) {
@@ -280,6 +298,7 @@ foreach ($required in @(
     "if (`$Version -cne '3.1.1')",
     'bridge-archive-reproducible-build-requires-linux',
     'GNU tar',
+    "Invoke-CheckedNative 'git'",
     '--sort=name',
     '--mtime=@$sourceEpoch',
     'bridge-archive-expanded-size-limit-exceeded',
@@ -287,6 +306,9 @@ foreach ($required in @(
     if (-not $bridgeArchive.Contains($required, [StringComparison]::Ordinal)) {
         throw "Compatibility bridge archive builder gate is missing: $required"
     }
+}
+if ($bridgeArchive -match '(?m)^\s*if\s*\(\$LASTEXITCODE') {
+    throw 'Compatibility bridge archive builder reads stale native exit state outside its checked command wrapper.'
 }
 foreach ($required in @(
     'SHA256SUMS.txt',

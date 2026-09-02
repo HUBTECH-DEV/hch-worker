@@ -1,17 +1,10 @@
 name: Build and publish compatibility bridge 3.1.1
 
 on:
+  # This workflow publishes the stable branch-protection check `bridge-source`.
+  # It must run for every PR so GitHub never leaves the required check pending
+  # because a path filter skipped the workflow.
   pull_request:
-    paths:
-      - 'lib/**'
-      - 'ops/linux/**'
-      - 'ops/macos/**'
-      - 'ops/systemd/**'
-      - 'ops/windows/editorial-worker/**'
-      - 'ops/windows/installer/**'
-      - 'ops/worker-dashboard/**'
-      - 'scripts/**'
-      - '.github/workflows/bridge-package.yml'
   push:
     branches: [main]
     paths:
@@ -167,6 +160,21 @@ jobs:
       - name: Test Windows bridge source
         run: npm run test:windows
 
+  bridge-source:
+    if: always()
+    needs: [portable-source, macos-source, windows-source]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every compatibility source gate
+        env:
+          PORTABLE_RESULT: ${{ needs.portable-source.result }}
+          MACOS_RESULT: ${{ needs.macos-source.result }}
+          WINDOWS_RESULT: ${{ needs.windows-source.result }}
+        run: |
+          test "$PORTABLE_RESULT" = success
+          test "$MACOS_RESULT" = success
+          test "$WINDOWS_RESULT" = success
+
   reject-unsafe-publish:
     if: >-
       github.event_name == 'workflow_dispatch' &&
@@ -185,7 +193,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       github.ref_protected == true &&
       github.event.repository.default_branch == 'main'
-    needs: [portable-source, macos-source, windows-source]
+    needs: [bridge-source]
     runs-on: windows-latest
     environment: bridge-release-signing
     outputs:
@@ -376,6 +384,34 @@ jobs:
         run: |
           if ($env:RELEASE_IMMUTABILITY_ENFORCED -cne 'true') {
             throw 'Repository release immutability must be administratively enabled and reviewed.'
+          }
+          $immutableReleaseState = gh api `
+            -H 'Accept: application/vnd.github+json' `
+            -H 'X-GitHub-Api-Version: 2026-03-10' `
+            "repos/$env:GITHUB_REPOSITORY/immutable-releases" |
+            ConvertFrom-Json -Depth 10
+          if ($LASTEXITCODE -ne 0 -or $immutableReleaseState.enabled -ne $true) {
+            throw 'Repository release immutability is not enabled.'
+          }
+          $rulesets = @(gh api "repos/$env:GITHUB_REPOSITORY/rulesets?includes_parents=true" |
+            ConvertFrom-Json -Depth 50)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read repository tag rulesets.' }
+          $protectedBridgeTag = $false
+          foreach ($summary in @($rulesets | Where-Object { $_.target -eq 'tag' -and $_.enforcement -eq 'active' })) {
+            $detail = gh api "repos/$env:GITHUB_REPOSITORY/rulesets/$($summary.id)" |
+              ConvertFrom-Json -Depth 50
+            if ($LASTEXITCODE -ne 0) { throw 'Could not inspect an active repository tag ruleset.' }
+            $ruleTypes = @($detail.rules.type)
+            if (@($detail.conditions.ref_name.include) -ccontains 'refs/tags/v3.1.1' `
+                -and @($detail.conditions.ref_name.exclude).Count -eq 0 `
+                -and @($detail.bypass_actors).Count -eq 0 `
+                -and $ruleTypes -ccontains 'update' `
+                -and $ruleTypes -ccontains 'deletion') {
+              $protectedBridgeTag = $true
+            }
+          }
+          if (-not $protectedBridgeTag) {
+            throw 'No active no-bypass ruleset protects refs/tags/v3.1.1 from mutation.'
           }
           if ((git cat-file -t refs/tags/v3.1.1) -cne 'tag' -or
               (git rev-parse 'refs/tags/v3.1.1^{commit}') -cne $env:GITHUB_SHA) {

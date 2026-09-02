@@ -100,6 +100,9 @@ try {
     & (Join-Path $kitRoot 'Sign-HchWorkerReleaseArtifact.ps1') -BinaryPath $outputPath `
       -CertificateThumbprint $SigningThumbprint -TimestampUrl $TimestampUrl | Out-Null
   }
+  $evidencePath = $outputPath + '.release.json'
+  [void](& (Join-Path $kitRoot 'New-HchWorkerReleaseEvidence.ps1') `
+    -BinaryPath $outputPath -OutputPath $evidencePath)
   $sha256 = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToUpperInvariant()
   $wingetRoot = Join-Path $outputRoot 'winget'
   New-Item -ItemType Directory -Path $wingetRoot -Force | Out-Null
@@ -152,7 +155,13 @@ ManifestVersion: 1.10.0
     [Text.UTF8Encoding]::new($false))
   [IO.File]::WriteAllText((Join-Path $wingetRoot 'Hubtech.HCHWorker.locale.pt-BR.yaml'), $localeManifest,
     [Text.UTF8Encoding]::new($false))
-  [pscustomobject]@{ artifact = $outputPath; version = $version; sha256 = $sha256; winget = $wingetRoot }
+  [pscustomobject]@{
+    artifact = $outputPath
+    evidence = $evidencePath
+    version = $version
+    sha256 = $sha256
+    winget = $wingetRoot
+  }
 } finally {
   Remove-Item -LiteralPath $buildRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
