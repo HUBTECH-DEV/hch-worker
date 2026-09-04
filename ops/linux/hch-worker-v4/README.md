@@ -96,9 +96,18 @@ configurações e dados. Remoção destrutiva é deliberadamente ausente.
 
 ```sh
 ./test/artifacts.test.sh
+./scripts/validate-unit.sh
 ```
 
 O teste valida sintaxe POSIX, hardening essencial da unidade, rejeição dos
 placeholders e bloqueio de concorrência inicial acima de 1. Um canário real
 ainda precisa comprovar bootstrap, heartbeat, claim, complete/fail, reinício e
 rollback, permanecendo `PendingReview` até aprovação humana.
+
+Não execute `systemd-analyze verify systemd/hch-worker.service` diretamente em
+uma árvore de fontes: ele também verifica a existência do `ExecStart` absoluto
+e, corretamente, falha antes de o payload existir em `/opt`. O helper
+`validate-unit.sh` substitui somente esse caminho por `/bin/true` numa cópia
+temporária e exerce `systemd-analyze` sobre todas as demais diretivas. Depois da
+instalação, `validate-install.sh` verifica a unidade original contra o payload
+real.
