@@ -66,8 +66,8 @@ public sealed class LinuxMachineSecretProtector : IMachineSecretProtector
             using var aes = new AesGcm(key, TagSize);
             aes.Decrypt(
                 protectedBytes.Slice(Magic.Length, NonceSize),
-                protectedBytes.Slice(Magic.Length + NonceSize, TagSize),
                 protectedBytes[headerSize..],
+                protectedBytes.Slice(Magic.Length + NonceSize, TagSize),
                 plaintext,
                 aad);
             return plaintext;
