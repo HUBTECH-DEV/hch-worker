@@ -90,12 +90,12 @@ public sealed class EditorialRecoveryEvidence
 }
 
 /// <summary>
-/// Stores the lease-bearing assignment and any generated draft under DPAPI
-/// LocalMachine protection. Public journals retain only hashes and state.
+/// Stores the lease-bearing assignment and any generated draft under the
+/// platform machine-secret protector. Public journals retain only hashes and state.
 /// </summary>
 public sealed class ProtectedEditorialRecoveryStore(
     AtomicFileStore files,
-    MachineSecretProtector protector,
+    IMachineSecretProtector protector,
     string nodeId,
     TimeProvider? timeProvider = null)
 {
@@ -276,7 +276,11 @@ public sealed class ProtectedEditorialRecoveryStore(
     }
 
     private static string PathFor(string assignmentId) =>
+#if HCH_LINUX
+        Path.Combine("journals", "recovery", assignmentId + ".json.linux-aesgcm");
+#else
         Path.Combine("journals", "recovery", assignmentId + ".json.dpapi");
+#endif
 
     private string Purpose(string assignmentId) => $"assignment-recovery:{nodeId}:{assignmentId}";
 
