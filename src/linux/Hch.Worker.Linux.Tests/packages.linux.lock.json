@@ -107,9 +107,13 @@
       "hch.worker.core": {
         "type": "Project"
       },
+      "hch.worker.ipc.contracts": {
+        "type": "Project"
+      },
       "hch.worker.linux": {
         "type": "Project",
         "dependencies": {
+          "Hch.Worker.IPC.Contracts": "[4.0.0, )",
           "Hch.Worker.Ollama": "[4.0.0, )",
           "Hch.Worker.Persistence": "[4.0.0, )"
         }
