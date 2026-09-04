@@ -1,4 +1,6 @@
 using Hch.Worker.Linux;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 
 namespace Hch.Worker.Linux.Tests;
 
@@ -32,10 +34,15 @@ public sealed class LinuxPathSecurityTests
         string target = Path.Combine(fixture.Path, "target");
         string link = Path.Combine(fixture.Path, "link");
         Directory.CreateDirectory(target);
+        File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite
+            | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute
+            | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        UnixFileMode originalMode = File.GetUnixFileMode(target);
         Directory.CreateSymbolicLink(link, target);
 
         Assert.Throws<UnauthorizedAccessException>(() =>
             LinuxPathSecurity.EnsurePrivateDirectory(link));
+        Assert.Equal(originalMode, File.GetUnixFileMode(target));
     }
 
     [Fact]
@@ -66,6 +73,30 @@ public sealed class LinuxPathSecurityTests
 
         Assert.Throws<UnauthorizedAccessException>(() => LinuxPathSecurity.RequirePrivateFile(file));
     }
+
+    [Fact]
+    public void PrivateFileRejectsSymbolicAndHardLinks()
+    {
+        using var fixture = new TemporaryDirectory();
+        string target = Path.Combine(fixture.Path, "target");
+        string symbolicLink = Path.Combine(fixture.Path, "symbolic");
+        string hardLink = Path.Combine(fixture.Path, "hard");
+        File.WriteAllText(target, "secret");
+        File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        File.CreateSymbolicLink(symbolicLink, target);
+        if (CreateHardLink(target, hardLink) != 0)
+        {
+            throw new Win32Exception(Marshal.GetLastPInvokeError());
+        }
+
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            LinuxPathSecurity.RequirePrivateFile(symbolicLink));
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            LinuxPathSecurity.RequirePrivateFile(hardLink));
+    }
+
+    [DllImport("libc", EntryPoint = "link", SetLastError = true)]
+    private static extern int CreateHardLink(string existingPath, string newPath);
 }
 
 internal sealed class TemporaryDirectory : IDisposable

@@ -4,9 +4,6 @@ using System.Runtime.InteropServices;
 
 public static class LinuxPathSecurity
 {
-    private const UnixFileMode UnsafeWriteBits =
-        UnixFileMode.GroupWrite | UnixFileMode.OtherWrite;
-
     public static string RequireAbsoluteCanonicalPath(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
@@ -31,41 +28,14 @@ public static class LinuxPathSecurity
 
     public static void EnsurePrivateDirectory(string path)
     {
-        string canonical = RequireAbsoluteCanonicalPath(path);
-        Directory.CreateDirectory(canonical, UnixFileMode.UserRead
-            | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        File.SetUnixFileMode(canonical, UnixFileMode.UserRead
-            | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        RejectSymbolicLink(canonical);
-        LinuxFileMetadata metadata = ReadMetadata(canonical);
-        if (!metadata.IsDirectory || metadata.OwnerUid != GetEffectiveUserId())
-        {
-            throw new UnauthorizedAccessException("linux-private-directory-owner-or-type-invalid");
-        }
-
-        RejectUnsafeWritePermissions(canonical);
+        LinuxSecureFile.EnsurePrivateDirectory(path);
     }
 
     public static void RequirePrivateFile(string path)
     {
-        string canonical = RequireAbsoluteCanonicalPath(path);
-        if (!File.Exists(canonical))
-        {
-            throw new FileNotFoundException("linux-private-file-not-found", canonical);
-        }
-
-        RejectSymbolicLink(canonical);
-        LinuxFileMetadata metadata = ReadMetadata(canonical);
-        if (!metadata.IsRegularFile || metadata.OwnerUid != GetEffectiveUserId())
-        {
-            throw new UnauthorizedAccessException("linux-private-file-owner-or-type-invalid");
-        }
-
-        UnixFileMode mode = File.GetUnixFileMode(canonical);
-        if ((mode & (UnsafeWriteBits | UnixFileMode.GroupRead | UnixFileMode.OtherRead)) != 0)
-        {
-            throw new UnauthorizedAccessException("linux-private-file-permissions-unsafe");
-        }
+        using FileStream _ = LinuxSecureFile.OpenPrivateFileForRead(
+            path,
+            missingReturnsNull: false)!;
     }
 
     public static LinuxFileMetadata ReadMetadata(string path)
@@ -103,31 +73,9 @@ public static class LinuxPathSecurity
         }
     }
 
-    private static void RejectUnsafeWritePermissions(string path)
-    {
-        if ((File.GetUnixFileMode(path) & UnsafeWriteBits) != 0)
-        {
-            throw new UnauthorizedAccessException("linux-path-permissions-unsafe");
-        }
-    }
-
-    private static void RejectSymbolicLink(string path)
-    {
-        FileSystemInfo info = Directory.Exists(path)
-            ? new DirectoryInfo(path)
-            : new FileInfo(path);
-        if (info.LinkTarget is not null
-            || (info.Attributes & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new UnauthorizedAccessException("linux-symbolic-link-refused");
-        }
-    }
-
     [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
     private static extern int Statx(int directoryFd, string path, int flags, uint mask, nint buffer);
 
-    [DllImport("libc", EntryPoint = "geteuid", SetLastError = false)]
-    private static extern uint GetEffectiveUserId();
 }
 
 public readonly record struct LinuxFileMetadata(

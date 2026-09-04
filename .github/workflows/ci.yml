@@ -57,6 +57,7 @@ jobs:
         run: |
           dotnet restore src/linux/Hch.Worker.Linux.Tests/Hch.Worker.Linux.Tests.csproj \
             --locked-mode \
+            --runtime linux-x64 \
             -p:HchLinuxBuild=true
           dotnet build src/linux/Hch.Worker.Linux.Tests/Hch.Worker.Linux.Tests.csproj \
             --configuration Release \
