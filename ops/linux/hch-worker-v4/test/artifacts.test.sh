@@ -17,9 +17,7 @@ grep -q '^CapabilityBoundingSet=$' "$bundle/systemd/hch-worker.service"
 grep -q '^ReadWritePaths=/var/lib/hch-worker /run/hch-worker /var/log/hch-worker$' "$bundle/systemd/hch-worker.service"
 
 if command -v systemd-analyze >/dev/null 2>&1; then
-  sed 's|/opt/hch-worker/current/Hch.Worker.Service|/bin/true|g' \
-    "$bundle/systemd/hch-worker.service" >"$tmp/hch-worker.service"
-  systemd-analyze verify "$tmp/hch-worker.service"
+  "$bundle/scripts/validate-unit.sh" "$bundle/systemd/hch-worker.service"
 fi
 
 if "$bundle/scripts/validate-config.sh" "$bundle/config/config.example.json" >/dev/null 2>&1; then
