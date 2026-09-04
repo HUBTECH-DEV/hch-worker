@@ -35,18 +35,19 @@ jobs:
             src/windows/Hch.Worker.{Core,IPC.Contracts,Ollama,Persistence,Protocol,Security}/packages.lock.json
 
       - name: Restore exact locked portable dependencies
-        # The shared project locks also serve the Windows build and therefore
-        # retain their existing win-x64 target. The test assembly itself remains
-        # framework-dependent net10.0 and is executed by the Linux host below.
-        run: dotnet restore src/windows/Hch.Worker.Portable.Tests/Hch.Worker.Portable.Tests.csproj --locked-mode --runtime win-x64
+        # Linux and Windows intentionally use separate project lockfiles so a
+        # platform restore cannot silently rewrite the other platform's graph.
+        run: dotnet restore src/windows/Hch.Worker.Portable.Tests/Hch.Worker.Portable.Tests.csproj --locked-mode -p:HchLinuxBuild=true
 
       - name: Build and test portable .NET contracts
         run: |
           dotnet build src/windows/Hch.Worker.Portable.Tests/Hch.Worker.Portable.Tests.csproj \
             --configuration Release \
+            -p:HchLinuxBuild=true \
             --no-restore
           dotnet test src/windows/Hch.Worker.Portable.Tests/Hch.Worker.Portable.Tests.csproj \
             --configuration Release \
+            -p:HchLinuxBuild=true \
             --no-build \
             --no-restore
 

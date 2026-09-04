@@ -14,6 +14,7 @@
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetLockFilePath Condition="'$(HchLinuxBuild)' == 'true'">$(MSBuildProjectDirectory)/packages.linux.lock.json</NuGetLockFilePath>
     <DebugType>embedded</DebugType>
   </PropertyGroup>
 </Project>
