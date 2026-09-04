@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="[6.0.4]" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="[17.14.1]" />
+    <PackageReference Include="xunit" Version="[2.9.3]" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="[3.1.4]" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+    <Using Include="System.Net.Http" />
+    <Using Include="System.IO" />
+  </ItemGroup>
+
+  <!--
+    Keep the portable contract tests single-sourced with the Windows suite. Tests
+    which reference Service, Tray, WPF or Windows platform adapters intentionally
+    remain exclusive to Hch.Worker.Tests.
+  -->
+  <ItemGroup>
+    <Compile Include="..\Hch.Worker.Tests\CoreControlTests.cs" Link="CoreControlTests.cs" />
+    <Compile Include="..\Hch.Worker.Tests\CoreSchedulerTests.cs" Link="CoreSchedulerTests.cs" />
+    <Compile Include="..\Hch.Worker.Tests\IpcContractTests.cs" Link="IpcContractTests.cs" />
+    <Compile Include="..\Hch.Worker.Tests\OllamaTests.cs" Link="OllamaTests.cs" />
+    <Compile Include="..\Hch.Worker.Tests\PersistenceTests.cs" Link="PersistenceTests.cs" />
+    <Compile Include="..\Hch.Worker.Tests\ProtocolContractsTests.cs" Link="ProtocolContractsTests.cs" />
+    <Compile Include="..\Hch.Worker.Tests\ProtocolCryptographyTests.cs" Link="ProtocolCryptographyTests.cs" />
+    <Compile Include="..\Hch.Worker.Tests\ProtocolHttpSignatureTests.cs" Link="ProtocolHttpSignatureTests.cs" />
+    <Compile Include="..\Hch.Worker.Tests\ProtocolJcsTests.cs" Link="ProtocolJcsTests.cs" />
+    <Compile Include="..\Hch.Worker.Tests\SecurityTests.cs" Link="SecurityTests.cs" />
+    <Compile Include="..\Hch.Worker.Tests\SignedManifestVerificationTests.cs" Link="SignedManifestVerificationTests.cs" />
+    <Compile Include="..\Hch.Worker.Tests\TestOllamaEndpointGuard.cs" Link="TestOllamaEndpointGuard.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Hch.Worker.Core\Hch.Worker.Core.csproj" />
+    <ProjectReference Include="..\Hch.Worker.IPC.Contracts\Hch.Worker.IPC.Contracts.csproj" />
+    <ProjectReference Include="..\Hch.Worker.Ollama\Hch.Worker.Ollama.csproj" />
+    <ProjectReference Include="..\Hch.Worker.Persistence\Hch.Worker.Persistence.csproj" />
+    <ProjectReference Include="..\Hch.Worker.Protocol\Hch.Worker.Protocol.csproj" />
+    <ProjectReference Include="..\Hch.Worker.Security\Hch.Worker.Security.csproj" />
+  </ItemGroup>
+
+</Project>

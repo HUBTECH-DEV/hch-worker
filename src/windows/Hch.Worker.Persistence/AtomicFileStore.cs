@@ -42,8 +42,17 @@ public sealed class AtomicFileStore
             throw new ArgumentException("State paths must be relative.", nameof(relativePath));
         }
 
-        var fullPath = Path.GetFullPath(Path.Combine(_root, relativePath));
-        if (!fullPath.StartsWith(_rootPrefix, StringComparison.OrdinalIgnoreCase))
+        // State paths can originate in persisted manifests created on another OS.
+        // Treat both separator styles as separators before containment checks so a
+        // Windows traversal cannot become an ordinary filename on Unix.
+        string portableRelativePath = relativePath
+            .Replace('\\', Path.DirectorySeparatorChar)
+            .Replace('/', Path.DirectorySeparatorChar);
+        var fullPath = Path.GetFullPath(Path.Combine(_root, portableRelativePath));
+        StringComparison pathComparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (!fullPath.StartsWith(_rootPrefix, pathComparison))
         {
             throw new ArgumentException("The state path escapes the state root.", nameof(relativePath));
         }
