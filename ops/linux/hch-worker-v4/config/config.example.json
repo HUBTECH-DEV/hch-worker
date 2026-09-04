@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "nodeId": "REPLACE_WITH_ENROLLED_NODE_ID",
+  "workerName": "HCH Worker Linux candidate",
+  "keyId": "REPLACE_WITH_WORKER_PUBLIC_KEY_ID",
+  "ownerSid": null,
+  "rootKeyId": null,
+  "rootPublicKeyFingerprint": null,
+  "rootPublicKeyPath": null,
+  "orchestratorBaseUri": "https://hubtech.online/",
+  "ollamaBaseUri": "http://127.0.0.1:11434/",
+  "lastNonZeroMaxConcurrentJobs": 1,
+  "claimBatchSize": 1,
+  "manifestCapacityLimit": 64,
+  "localResourceLimit": 64,
+  "stateRoot": "/var/lib/hch-worker/state"
+}
