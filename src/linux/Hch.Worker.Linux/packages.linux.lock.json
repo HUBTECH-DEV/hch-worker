@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "BouncyCastle.Cryptography": {
+        "type": "Transitive",
+        "resolved": "2.7.0",
+        "contentHash": "U+12df8UEWHgBi04YVf/Lgi2dy3SItlIYvHjjEVa/BngCQIzDCDRBk50DDByCfDvSbe5pRNFr3b7UrVK2kMcLw=="
+      },
+      "hch.worker.core": {
+        "type": "Project"
+      },
+      "hch.worker.ollama": {
+        "type": "Project",
+        "dependencies": {
+          "Hch.Worker.Core": "[4.0.0, )",
+          "Hch.Worker.Protocol": "[4.0.0, )"
+        }
+      },
+      "hch.worker.persistence": {
+        "type": "Project",
+        "dependencies": {
+          "Hch.Worker.Core": "[4.0.0, )",
+          "Hch.Worker.Protocol": "[4.0.0, )",
+          "Hch.Worker.Security": "[4.0.0, )"
+        }
+      },
+      "hch.worker.protocol": {
+        "type": "Project"
+      },
+      "hch.worker.security": {
+        "type": "Project",
+        "dependencies": {
+          "BouncyCastle.Cryptography": "[2.7.0, 2.7.0]",
+          "Hch.Worker.Protocol": "[4.0.0, )"
+        }
+      }
+    }
+  }
+}
