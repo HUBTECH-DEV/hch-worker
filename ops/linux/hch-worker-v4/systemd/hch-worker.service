@@ -1,0 +1,62 @@
+[Unit]
+Description=HCH Worker 4 Linux candidate (headless)
+Documentation=file:/usr/share/doc/hch-worker/README.md
+Wants=network-online.target
+After=network-online.target ollama.service
+ConditionFileIsExecutable=/opt/hch-worker/current/Hch.Worker.Service
+ConditionPathIsReadWrite=/var/lib/hch-worker
+StartLimitIntervalSec=5min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=hch-worker
+Group=hch-worker
+Environment=DOTNET_ENVIRONMENT=Production
+Environment=HCH_WORKER_CONFIG_PATH=/etc/hch-worker/config.json
+Environment=HCH_WORKER_CONTROL_SOCKET=/run/hch-worker/control.sock
+EnvironmentFile=-/etc/hch-worker/environment
+ExecStart=/opt/hch-worker/current/Hch.Worker.Service
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=2min
+TimeoutStopSec=1h
+KillSignal=SIGTERM
+KillMode=mixed
+UMask=0077
+
+StateDirectory=hch-worker
+StateDirectoryMode=0700
+RuntimeDirectory=hch-worker
+RuntimeDirectoryMode=0700
+LogsDirectory=hch-worker
+LogsDirectoryMode=0700
+ConfigurationDirectory=hch-worker
+ConfigurationDirectoryMode=0750
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ReadWritePaths=/var/lib/hch-worker /run/hch-worker /var/log/hch-worker
+ReadOnlyPaths=/etc/hch-worker /opt/hch-worker
+
+[Install]
+WantedBy=multi-user.target
