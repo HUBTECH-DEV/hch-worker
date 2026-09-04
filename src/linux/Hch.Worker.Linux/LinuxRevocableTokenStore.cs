@@ -23,34 +23,35 @@ public sealed partial class LinuxRevocableTokenStore
             throw new ArgumentException("credential-token-length-invalid", nameof(token));
         }
 
-        LinuxPathSecurity.EnsurePrivateDirectory(directory);
-        string temporary = Path.Combine(directory, $".{Guid.NewGuid():N}.tmp");
+        using Microsoft.Win32.SafeHandles.SafeFileHandle directoryHandle =
+            LinuxSecureFile.OpenPrivateDirectory(directory);
+        string temporaryFileName = $".{Guid.NewGuid():N}.tmp";
         byte[] buffer = token.ToArray();
         try
         {
-            using (var stream = new FileStream(temporary, new FileStreamOptions
-            {
-                Access = FileAccess.Write,
-                Mode = FileMode.CreateNew,
-                Share = FileShare.None,
-                Options = FileOptions.WriteThrough,
-                UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
-            }))
+            using (FileStream stream = LinuxSecureFile.CreatePrivateFileAt(
+                directoryHandle,
+                temporaryFileName))
             {
                 stream.Write(buffer);
                 stream.Flush(flushToDisk: true);
             }
 
-            File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-            File.Move(temporary, destination, overwrite: true);
-            LinuxPathSecurity.RequirePrivateFile(destination);
+            LinuxSecureFile.ReplaceAt(
+                directoryHandle,
+                temporaryFileName,
+                Path.GetFileName(destination));
         }
         finally
         {
             CryptographicOperations.ZeroMemory(buffer);
-            if (File.Exists(temporary))
+            try
             {
-                File.Delete(temporary);
+                LinuxSecureFile.DeleteAt(directoryHandle, temporaryFileName);
+            }
+            catch (IOException error) when (error.InnerException is System.ComponentModel.Win32Exception
+                { NativeErrorCode: 2 })
+            {
             }
         }
     }
@@ -58,32 +59,55 @@ public sealed partial class LinuxRevocableTokenStore
     public LinuxTokenSecret? Read(string tokenId)
     {
         string path = TokenPath(tokenId);
-        if (!File.Exists(path))
+        using Microsoft.Win32.SafeHandles.SafeFileHandle directoryHandle =
+            LinuxSecureFile.OpenPrivateDirectory(directory);
+        using FileStream? stream = LinuxSecureFile.OpenPrivateFileForReadAt(
+            directoryHandle,
+            Path.GetFileName(path),
+            missingReturnsNull: true);
+        if (stream is null)
         {
             return null;
         }
 
-        LinuxPathSecurity.RequirePrivateFile(path);
-        byte[] value = File.ReadAllBytes(path);
-        if (value.Length is < 1 or > MaximumTokenBytes)
+        byte[] value = new byte[MaximumTokenBytes + 1];
+        int length = 0;
+        while (length < value.Length)
+        {
+            int read = stream.Read(value, length, value.Length - length);
+            if (read == 0)
+            {
+                break;
+            }
+
+            length += read;
+        }
+
+        if (length is < 1 or > MaximumTokenBytes)
         {
             CryptographicOperations.ZeroMemory(value);
             throw new InvalidDataException("credential-token-blob-invalid");
         }
 
+        Array.Resize(ref value, length);
         return new LinuxTokenSecret(value);
     }
 
     public bool Revoke(string tokenId)
     {
         string path = TokenPath(tokenId);
-        if (!File.Exists(path))
+        using Microsoft.Win32.SafeHandles.SafeFileHandle directoryHandle =
+            LinuxSecureFile.OpenPrivateDirectory(directory);
+        using FileStream? stream = LinuxSecureFile.OpenPrivateFileForReadAt(
+            directoryHandle,
+            Path.GetFileName(path),
+            missingReturnsNull: true);
+        if (stream is null)
         {
             return false;
         }
 
-        LinuxPathSecurity.RequirePrivateFile(path);
-        File.Delete(path);
+        LinuxSecureFile.DeleteAt(directoryHandle, Path.GetFileName(path));
         return true;
     }
 

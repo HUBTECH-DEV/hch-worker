@@ -87,17 +87,14 @@ public sealed class LinuxMachineSecretProtector : IMachineSecretProtector
     private byte[] ReadOrCreateKey()
     {
         string directory = Path.GetDirectoryName(keyPath)!;
-        LinuxPathSecurity.EnsurePrivateDirectory(directory);
+        using Microsoft.Win32.SafeHandles.SafeFileHandle directoryHandle =
+            LinuxSecureFile.OpenPrivateDirectory(directory);
+        string keyFileName = Path.GetFileName(keyPath);
         try
         {
-            using var stream = new FileStream(keyPath, new FileStreamOptions
-            {
-                Access = FileAccess.Write,
-                Mode = FileMode.CreateNew,
-                Share = FileShare.None,
-                Options = FileOptions.WriteThrough,
-                UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
-            });
+            using FileStream stream = LinuxSecureFile.CreatePrivateFileAt(
+                directoryHandle,
+                keyFileName);
             byte[] generated = RandomNumberGenerator.GetBytes(KeySize);
             try
             {
@@ -109,19 +106,36 @@ public sealed class LinuxMachineSecretProtector : IMachineSecretProtector
                 CryptographicOperations.ZeroMemory(generated);
             }
         }
-        catch (IOException) when (File.Exists(keyPath))
+        catch (IOException)
         {
-            // Another process or an earlier installation created the key.
+            // An existing key is opened below through O_NOFOLLOW and validated
+            // on the descriptor. Any other creation error also fails there.
         }
 
-        LinuxPathSecurity.RequirePrivateFile(keyPath);
-        byte[] key = File.ReadAllBytes(keyPath);
-        if (key.Length != KeySize)
+        using FileStream keyStream = LinuxSecureFile.OpenPrivateFileForReadAt(
+            directoryHandle,
+            keyFileName,
+            missingReturnsNull: false)!;
+        byte[] key = new byte[KeySize + 1];
+        int length = 0;
+        while (length < key.Length)
+        {
+            int read = keyStream.Read(key, length, key.Length - length);
+            if (read == 0)
+            {
+                break;
+            }
+
+            length += read;
+        }
+
+        if (length != KeySize)
         {
             CryptographicOperations.ZeroMemory(key);
             throw new CryptographicException("linux-machine-key-length-invalid");
         }
 
+        Array.Resize(ref key, KeySize);
         return key;
     }
 

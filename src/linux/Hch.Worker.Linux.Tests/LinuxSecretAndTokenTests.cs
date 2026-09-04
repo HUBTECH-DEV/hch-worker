@@ -54,6 +54,22 @@ public sealed class LinuxSecretAndTokenTests
     }
 
     [Fact]
+    public void MachineProtectorNeverFollowsPreexistingKeySymlink()
+    {
+        using var fixture = new TemporaryDirectory();
+        string target = Path.Combine(fixture.Path, "external-key");
+        byte[] original = Enumerable.Repeat((byte)0x5a, 32).ToArray();
+        File.WriteAllBytes(target, original);
+        File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        File.CreateSymbolicLink(Path.Combine(fixture.Path, "machine-secret.key"), target);
+        var protector = new LinuxMachineSecretProtector(fixture.Path);
+
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            protector.Protect("secret"u8, "purpose"));
+        Assert.Equal(original, File.ReadAllBytes(target));
+    }
+
+    [Fact]
     public void TokenStoreRoundTripsRedactsAndRevokes()
     {
         using var fixture = new TemporaryDirectory();
@@ -102,5 +118,41 @@ public sealed class LinuxSecretAndTokenTests
 
         Assert.Throws<UnauthorizedAccessException>(() => store.Read("unsafe"));
         Assert.Throws<UnauthorizedAccessException>(() => store.Revoke("unsafe"));
+    }
+
+    [Fact]
+    public void TokenStoreNeverReadsOrRevokesThroughSymlink()
+    {
+        using var fixture = new TemporaryDirectory();
+        string credentials = Path.Combine(fixture.Path, "credentials");
+        Directory.CreateDirectory(credentials);
+        string target = Path.Combine(fixture.Path, "external-token");
+        File.WriteAllText(target, "external-secret");
+        File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        File.CreateSymbolicLink(Path.Combine(credentials, "linked.token"), target);
+        var store = new LinuxRevocableTokenStore(fixture.Path);
+
+        Assert.Throws<UnauthorizedAccessException>(() => store.Read("linked"));
+        Assert.Throws<UnauthorizedAccessException>(() => store.Revoke("linked"));
+        Assert.Equal("external-secret", File.ReadAllText(target));
+    }
+
+    [Fact]
+    public void TokenStoreAtomicallyReplacesSymlinkWithoutChangingItsTarget()
+    {
+        using var fixture = new TemporaryDirectory();
+        string credentials = Path.Combine(fixture.Path, "credentials");
+        Directory.CreateDirectory(credentials);
+        string target = Path.Combine(fixture.Path, "external-token");
+        File.WriteAllText(target, "external-secret");
+        File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        File.CreateSymbolicLink(Path.Combine(credentials, "current.token"), target);
+        var store = new LinuxRevocableTokenStore(fixture.Path);
+
+        store.Store("current", "replacement"u8);
+
+        using LinuxTokenSecret stored = Assert.IsType<LinuxTokenSecret>(store.Read("current"));
+        Assert.Equal("replacement"u8.ToArray(), stored.Value.ToArray());
+        Assert.Equal("external-secret", File.ReadAllText(target));
     }
 }
