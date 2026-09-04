@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Hch.Worker.Linux\Hch.Worker.Linux.csproj" />
+    <ProjectReference Include="..\Hch.Worker.Service.Linux\Hch.Worker.Service.Linux.csproj" />
   </ItemGroup>
 
 </Project>
