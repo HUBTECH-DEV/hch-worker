@@ -120,14 +120,19 @@ public sealed class WindowsOllamaEndpointGuard : IOllamaEndpointGuard, IAuxiliar
 
 public sealed class WindowsLegacyWorkerCutoverGuard
 {
-    public WindowsLegacyWorkerCutoverGuard(string nodeId) =>
-        ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
+    private readonly LinuxLegacyWorkerCutoverGuard inner;
 
-    public Task EnsureExclusiveAsync(CancellationToken cancellationToken = default)
+    public WindowsLegacyWorkerCutoverGuard(string nodeId) => inner = new(nodeId);
+
+    public async Task EnsureExclusiveAsync(CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        throw new Hch.Worker.Core.WorkerControlException(
-            "linux-exclusive-claiming-unimplemented",
-            "Linux claiming remains disabled until exclusive cutover verification is implemented.");
+        try
+        {
+            await inner.EnsureExclusiveAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (LinuxLegacyWorkerCutoverException error)
+        {
+            throw new Hch.Worker.Core.WorkerControlException(error.Code, error.Message);
+        }
     }
 }
