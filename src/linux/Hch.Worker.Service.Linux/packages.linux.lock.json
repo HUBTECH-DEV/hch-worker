@@ -301,6 +301,7 @@
       "hch.worker.linux": {
         "type": "Project",
         "dependencies": {
+          "Hch.Worker.IPC.Contracts": "[4.0.0, )",
           "Hch.Worker.Ollama": "[4.0.0, )",
           "Hch.Worker.Persistence": "[4.0.0, )"
         }
