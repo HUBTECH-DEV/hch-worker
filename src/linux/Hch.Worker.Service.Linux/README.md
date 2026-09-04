@@ -6,11 +6,18 @@ operacional. O assembly e o apphost publicados se chamam
 `Hch.Worker.Service`, alinhados ao pacote operacional Linux.
 
 O host sempre compõe `WorkerControlState` em `Paused`, capacidade zero e sem
-autorização de claim. Nesta etapa não existe IPC Linux: o stub abre zero sockets
-e mantém a tarefa de supervisão inativa. A guarda de cutover também rejeita
-qualquer futura tentativa interna de `Start` com
+autorização de claim. O controle local usa Unix Domain Socket autenticado por
+`SO_PEERCRED`, em `/run/hch-worker/control.sock` por padrão. O UID do serviço
+pode executar os comandos do contrato v2; UID 0 é restrito a
+`PrepareMaintenance`. Não existe fallback TCP. A guarda de cutover rejeita
+qualquer tentativa de `Start` ou paralelismo positivo com
 `linux-exclusive-claiming-unimplemented`. Portanto este binário serve para
 boot, bootstrap/heartbeat em Drain e telemetria; não está apto a processar jobs.
+
+`HCH_WORKER_CONTROL_SOCKET` altera o caminho somente para ambientes controlados
+como testes. O diretório e o socket precisam pertencer ao UID do processo e são
+forçados a `0700` e `0600`, respectivamente. Um caminho preexistente, inclusive
+socket antigo, é recusado em vez de removido sem prova de propriedade.
 
 Build e publicação bloqueados pelo lockfile Linux:
 
@@ -35,8 +42,17 @@ HCH_WORKER_CONFIG_PATH="$PWD/src/linux/Hch.Worker.Service.Linux/test/smoke-confi
 test "$?" -eq 124
 ```
 
-Limitações abertas: Unix Domain Socket autenticado, atestação do PID dono do
-listener Ollama, verificação de cutover exclusivo, enrollment local e testes de
-canário. O guard Ollama aceita nesta etapa somente processos executados por
+Os testes Linux exercitam framing, credenciais do peer, permissões do socket,
+Pause e a recusa fail-closed de Start:
+
+```sh
+/home/pjunior/.dotnet/dotnet test \
+  src/linux/Hch.Worker.Linux.Tests/Hch.Worker.Linux.Tests.csproj \
+  -c Release -r linux-x64 -p:HchLinuxBuild=true -p:RestoreLockedMode=true
+```
+
+Limitações abertas: cliente/CLI Linux, atestação do PID dono do listener
+Ollama, verificação de cutover exclusivo, provisionamento inicial de identidade
+e testes de canário. O guard Ollama aceita nesta etapa somente processos executados por
 `root` ou pelo mesmo UID do Worker; instalações com usuário `ollama` separado
 permanecem fail-closed até a política de UID explícita ser implementada.
