@@ -131,9 +131,16 @@ public sealed class NvidiaSmiTelemetryProvider
         double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed)
             && parsed is >= 0 and <= 100 ? parsed : null;
 
-    private static ulong? ParseMebibytes(string value) =>
-        ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out ulong parsed)
-            ? checked(parsed * 1024UL * 1024UL) : null;
+    private static ulong? ParseMebibytes(string value)
+    {
+        if (!ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out ulong parsed)
+            || parsed > ulong.MaxValue / (1024UL * 1024UL))
+        {
+            return null;
+        }
+
+        return parsed * 1024UL * 1024UL;
+    }
 
     private static string? NormalizeName(string value)
     {

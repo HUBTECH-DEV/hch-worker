@@ -31,8 +31,10 @@ jobs:
           cache: true
           cache-dependency-path: |
             global.json
-            src/windows/Hch.Worker.Portable.Tests/packages.lock.json
-            src/windows/Hch.Worker.{Core,IPC.Contracts,Ollama,Persistence,Protocol,Security}/packages.lock.json
+            src/linux/Hch.Worker.Linux.Tests/packages.linux.lock.json
+            src/linux/Hch.Worker.Linux/packages.linux.lock.json
+            src/windows/Hch.Worker.Portable.Tests/packages.linux.lock.json
+            src/windows/Hch.Worker.{Core,IPC.Contracts,Ollama,Persistence,Protocol,Security}/packages.linux.lock.json
 
       - name: Restore exact locked portable dependencies
         # Linux and Windows intentionally use separate project lockfiles so a
@@ -46,6 +48,21 @@ jobs:
             -p:HchLinuxBuild=true \
             --no-restore
           dotnet test src/windows/Hch.Worker.Portable.Tests/Hch.Worker.Portable.Tests.csproj \
+            --configuration Release \
+            -p:HchLinuxBuild=true \
+            --no-build \
+            --no-restore
+
+      - name: Restore, build and test Linux platform adapters
+        run: |
+          dotnet restore src/linux/Hch.Worker.Linux.Tests/Hch.Worker.Linux.Tests.csproj \
+            --locked-mode \
+            -p:HchLinuxBuild=true
+          dotnet build src/linux/Hch.Worker.Linux.Tests/Hch.Worker.Linux.Tests.csproj \
+            --configuration Release \
+            -p:HchLinuxBuild=true \
+            --no-restore
+          dotnet test src/linux/Hch.Worker.Linux.Tests/Hch.Worker.Linux.Tests.csproj \
             --configuration Release \
             -p:HchLinuxBuild=true \
             --no-build \
