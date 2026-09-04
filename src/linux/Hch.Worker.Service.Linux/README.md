@@ -9,10 +9,11 @@ O host sempre compõe `WorkerControlState` em `Paused`, capacidade zero e sem
 autorização de claim. O controle local usa Unix Domain Socket autenticado por
 `SO_PEERCRED`, em `/run/hch-worker/control.sock` por padrão. O UID do serviço
 pode executar os comandos do contrato v2; UID 0 é restrito a
-`PrepareMaintenance`. Não existe fallback TCP. A guarda de cutover rejeita
-qualquer tentativa de `Start` ou paralelismo positivo com
-`linux-exclusive-claiming-unimplemented`. Portanto este binário serve para
-boot, bootstrap/heartbeat em Drain e telemetria; não está apto a processar jobs.
+`PrepareMaintenance`. Não existe fallback TCP. Uma tentativa explícita de
+`Start` somente pode habilitar claims depois que a guarda de cutover comprovar,
+de forma fail-closed, pidfile seguro, units legadas inativas/desabilitadas e
+ausência de processo conflitante para o mesmo node. Boot e bootstrap continuam
+sempre em Drain.
 
 `HCH_WORKER_CONTROL_SOCKET` altera o caminho somente para ambientes controlados
 como testes. O diretório e o socket precisam pertencer ao UID do processo e são
@@ -43,7 +44,7 @@ test "$?" -eq 124
 ```
 
 Os testes Linux exercitam framing, credenciais do peer, permissões do socket,
-Pause e a recusa fail-closed de Start:
+Pause, a guarda de cutover e a recusa fail-closed de Start:
 
 ```sh
 /home/pjunior/.dotnet/dotnet test \
@@ -51,8 +52,8 @@ Pause e a recusa fail-closed de Start:
   -c Release -r linux-x64 -p:HchLinuxBuild=true -p:RestoreLockedMode=true
 ```
 
-Limitações abertas: cliente/CLI Linux, atestação do PID dono do listener
-Ollama, verificação de cutover exclusivo, provisionamento inicial de identidade
-e testes de canário. O guard Ollama aceita nesta etapa somente processos executados por
+Limitações abertas: cliente/CLI Linux, atestação do PID dono do listener Ollama,
+provisionamento inicial de identidade, enrollment local e testes de canário. O
+guard Ollama aceita nesta etapa somente processos executados por
 `root` ou pelo mesmo UID do Worker; instalações com usuário `ollama` separado
 permanecem fail-closed até a política de UID explícita ser implementada.
