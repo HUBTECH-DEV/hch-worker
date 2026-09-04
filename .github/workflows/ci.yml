@@ -18,6 +18,38 @@ jobs:
           node-version: 22
       - run: npm test
 
+  native-linux-v4-portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            src/windows/Hch.Worker.Portable.Tests/packages.lock.json
+            src/windows/Hch.Worker.{Core,IPC.Contracts,Ollama,Persistence,Protocol,Security}/packages.lock.json
+
+      - name: Restore exact locked portable dependencies
+        # The shared project locks also serve the Windows build and therefore
+        # retain their existing win-x64 target. The test assembly itself remains
+        # framework-dependent net10.0 and is executed by the Linux host below.
+        run: dotnet restore src/windows/Hch.Worker.Portable.Tests/Hch.Worker.Portable.Tests.csproj --locked-mode --runtime win-x64
+
+      - name: Build and test portable .NET contracts
+        run: |
+          dotnet build src/windows/Hch.Worker.Portable.Tests/Hch.Worker.Portable.Tests.csproj \
+            --configuration Release \
+            --no-restore
+          dotnet test src/windows/Hch.Worker.Portable.Tests/Hch.Worker.Portable.Tests.csproj \
+            --configuration Release \
+            --no-build \
+            --no-restore
+
   windows:
     runs-on: windows-latest
     steps:
