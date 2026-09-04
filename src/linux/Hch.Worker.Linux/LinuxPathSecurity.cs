@@ -37,6 +37,12 @@ public static class LinuxPathSecurity
         File.SetUnixFileMode(canonical, UnixFileMode.UserRead
             | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         RejectSymbolicLink(canonical);
+        LinuxFileMetadata metadata = ReadMetadata(canonical);
+        if (!metadata.IsDirectory || metadata.OwnerUid != GetEffectiveUserId())
+        {
+            throw new UnauthorizedAccessException("linux-private-directory-owner-or-type-invalid");
+        }
+
         RejectUnsafeWritePermissions(canonical);
     }
 
@@ -84,7 +90,12 @@ public static class LinuxPathSecurity
 
             uint uid = unchecked((uint)Marshal.ReadInt32(buffer, 20));
             ushort mode = unchecked((ushort)Marshal.ReadInt16(buffer, 28));
-            return new LinuxFileMetadata(uid, (mode & 0xf000) == 0x8000);
+            ushort fileType = unchecked((ushort)(mode & 0xf000));
+            return new LinuxFileMetadata(
+                uid,
+                IsRegularFile: fileType == 0x8000,
+                IsDirectory: fileType == 0x4000,
+                IsSocket: fileType == 0xc000);
         }
         finally
         {
@@ -119,4 +130,8 @@ public static class LinuxPathSecurity
     private static extern uint GetEffectiveUserId();
 }
 
-public readonly record struct LinuxFileMetadata(uint OwnerUid, bool IsRegularFile);
+public readonly record struct LinuxFileMetadata(
+    uint OwnerUid,
+    bool IsRegularFile,
+    bool IsDirectory,
+    bool IsSocket);

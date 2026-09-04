@@ -10,6 +10,9 @@
       "hch.worker.core": {
         "type": "Project"
       },
+      "hch.worker.ipc.contracts": {
+        "type": "Project"
+      },
       "hch.worker.ollama": {
         "type": "Project",
         "dependencies": {
