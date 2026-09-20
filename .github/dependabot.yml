@@ -1,0 +1,40 @@
+version: 2
+
+# Agrupamento é obrigatório aqui, não preferência de estilo.
+#
+# Sem grupo, o Dependabot abre um pull request por dependência. Além do volume,
+# isso quebra pares de ações que precisam subir juntas: `github/codeql-action/init`
+# e `github/codeql-action/analyze` são dependências distintas para o Dependabot,
+# mas a mesma action em execução, e o CodeQL recusa rodar com as duas em versões
+# diferentes. Em HUBTECH-DEV/hubicg-community isso travou dois pull requests que
+# se bloqueavam mutuamente, sem que fechar um destravasse o outro.
+#
+# O grupo específico vem sempre antes do curinga: o Dependabot atribui cada
+# dependência ao primeiro grupo cujo padrão casar.
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 5
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 5
+    groups:
+      production:
+        dependency-type: production
+        patterns:
+          - "*"
+      development:
+        dependency-type: development
+        patterns:
+          - "*"
