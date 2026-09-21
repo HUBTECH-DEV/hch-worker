@@ -30,11 +30,31 @@ updates:
     schedule: {interval: weekly}
     open-pull-requests-limit: 5
     groups:
+      # Major fica separado de propósito. Agrupar tudo sob um curinga junta
+      # correção de segurança com quebra de compatibilidade no mesmo pull
+      # request: quando o major quebra o build, a correção de segurança fica
+      # refém dele, e o Dependabot deixa de abrir pull request de segurança
+      # dedicado porque considera que já existe um cobrindo a versão vulnerável.
+      #
+      # Com a separação, minor e patch — que é onde a maior parte das correções
+      # de segurança chega — seguem mergeáveis sozinhos.
       production:
         dependency-type: production
+        update-types: ["minor", "patch"]
+        patterns:
+          - "*"
+      production-major:
+        dependency-type: production
+        update-types: ["major"]
         patterns:
           - "*"
       development:
         dependency-type: development
+        update-types: ["minor", "patch"]
+        patterns:
+          - "*"
+      development-major:
+        dependency-type: development
+        update-types: ["major"]
         patterns:
           - "*"
