@@ -10,6 +10,9 @@ using Hch.Worker.Protocol;
 using Hch.Worker.Security;
 using Hch.Worker.Windows;
 using Microsoft.Extensions.Logging;
+#if HCH_LINUX
+using Hch.Worker.Linux;
+#endif
 
 namespace Hch.Worker.Service;
 
@@ -667,7 +670,7 @@ public sealed class WorkerRuntimeFactory(
         var journals = new EditorialJournalStore(files);
         var recovery = new ProtectedEditorialRecoveryStore(
             files,
-            new MachineSecretProtector(),
+            CreateMachineSecretProtector(configuration.StateRoot),
             configuration.NodeId,
             timeProvider);
         var pendingClaims = new PendingClaimStore(files);
@@ -782,7 +785,9 @@ public sealed class WorkerRuntimeFactory(
         Ed25519Identity? identity = null;
         try
         {
-            identity = await new MachineWorkerIdentityStore(files, new MachineSecretProtector())
+            identity = await new MachineWorkerIdentityStore(
+                files,
+                CreateMachineSecretProtector(configuration.StateRoot))
                 .LoadAsync(configuration.NodeId, configuration.KeyId, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception error) when (error is CryptographicException or WorkerServiceException)
@@ -1722,4 +1727,13 @@ public sealed class WorkerRuntimeFactory(
         {
             Timeout = Timeout.InfiniteTimeSpan,
         };
+
+    private static IMachineSecretProtector CreateMachineSecretProtector(string stateRoot)
+    {
+#if HCH_LINUX
+        return new LinuxMachineSecretProtector(stateRoot);
+#else
+        return new MachineSecretProtector();
+#endif
+    }
 }

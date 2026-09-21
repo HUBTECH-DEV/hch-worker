@@ -1,0 +1,3 @@
+# Optional non-secret process environment. Do not place credentials here.
+TZ=UTC
+DOTNET_EnableDiagnostics=0

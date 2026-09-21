@@ -4,12 +4,16 @@ using Hch.Worker.Security;
 
 namespace Hch.Worker.Service;
 
-/// <summary>Loads the service identity from DPAPI LocalMachine protected state.</summary>
+/// <summary>Loads the service identity from platform-protected machine state.</summary>
 public sealed class MachineWorkerIdentityStore(
     AtomicFileStore files,
-    MachineSecretProtector protector)
+    IMachineSecretProtector protector)
 {
+#if HCH_LINUX
+    private const string RelativePath = "identity/worker-ed25519.pkcs8.linux-aesgcm";
+#else
     private const string RelativePath = "identity/worker-ed25519.pkcs8.dpapi";
+#endif
 
     public async Task<Ed25519Identity?> LoadAsync(
         string nodeId,

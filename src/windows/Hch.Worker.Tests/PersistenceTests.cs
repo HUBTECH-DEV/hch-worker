@@ -26,14 +26,16 @@ public sealed class PersistenceTests
         }
     }
 
-    [Fact]
-    public async Task AtomicStoreRejectsTraversalAndRoundTripsStrictJson()
+    [Theory]
+    [InlineData("../outside.json")]
+    [InlineData("..\\outside.json")]
+    public async Task AtomicStoreRejectsTraversalAndRoundTripsStrictJson(string traversalPath)
     {
         var root = TemporaryDirectory();
         try
         {
             var store = new AtomicFileStore(root);
-            Assert.Throws<ArgumentException>(() => store.Resolve("..\\outside.json"));
+            Assert.Throws<ArgumentException>(() => store.Resolve(traversalPath));
             var value = new MigrationJournal(
                 1,
                 "migration-1",

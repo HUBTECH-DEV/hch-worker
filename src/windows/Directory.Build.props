@@ -14,6 +14,12 @@
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <NuGetLockFilePath Condition="'$(HchLinuxBuild)' == 'true'">$(MSBuildProjectDirectory)/packages.linux.lock.json</NuGetLockFilePath>
+    <!-- Os lockfiles Linux foram gerados com o identificador de runtime
+         linux-x64 e registram os alvos net10.0 e net10.0/linux-x64. Sem
+         declarar o mesmo identificador aqui, o restore em modo travado falha
+         com NU1004: o projeto avalia sem identificador algum e diverge do lock. -->
+    <RuntimeIdentifiers Condition="'$(HchLinuxBuild)' == 'true'">linux-x64</RuntimeIdentifiers>
     <DebugType>embedded</DebugType>
   </PropertyGroup>
 </Project>
