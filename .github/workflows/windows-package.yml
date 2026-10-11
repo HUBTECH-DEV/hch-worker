@@ -108,7 +108,7 @@ jobs:
           Signed workflow dispatch remains fail-closed until the reviewed variable and signing gates exist.
           '@ >> $env:GITHUB_STEP_SUMMARY
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: env.WIX_EULA_ACCEPTED == 'wix7'
         with:
           name: hch-worker-windows-unsigned-${{ github.sha }}-${{ github.run_attempt }}
@@ -185,7 +185,7 @@ jobs:
         run: |
           "prepared=hch-worker-windows-prepared-${{ github.run_id }}-${{ github.run_attempt }}" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ steps.names.outputs.prepared }}
           path: artifacts/windows-v4/work
@@ -218,7 +218,7 @@ jobs:
             src/windows/**/packages.lock.json
             src/windows/**/packages.wix.lock.json
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ${{ needs.prepare-signed.outputs.prepared-artifact }}
           path: artifacts/windows-v4/work
@@ -333,7 +333,7 @@ jobs:
         run: |
           "signed=hch-worker-windows-signed-$env:REQUESTED_WINDOWS_VERSION-${{ github.sha }}-${{ github.run_attempt }}" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ steps.names.outputs.signed }}
           path: artifacts/windows-v4/release
@@ -348,7 +348,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ${{ needs.sign-and-test.outputs.signed-artifact }}
           path: artifacts/windows-v4/release
